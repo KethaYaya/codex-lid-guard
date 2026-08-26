@@ -1,6 +1,6 @@
 # Codex Lid Guard
 
-Codex Lid Guard is a Windows companion extension for the OpenAI Codex VS Code extension. It lets a local Codex turn continue after you close a laptop lid, restores the user's exact lid-close settings when the turn ends, and puts the laptop to sleep if the lid is still closed.
+if you use  codex on VSCode, you can make codex work for you while the laptop lid is still closed with this little extension.
 
 ## What it does
 
