@@ -15,7 +15,7 @@ This uses [documented Codex lifecycle hooks](https://learn.chatgpt.com/docs/hook
 
 ## Install the shared VSIX
 
-Recipients need Windows 10/11 x64, VS Code, and the official OpenAI Codex extension. The VSIX contains a self-contained native helper; Node.js and the .NET SDK are not required.
+Recipients need Windows 10/11 x64, VS Code, and the official OpenAI Codex extension. The VSIX contains a self-contained Rust helper; Node.js, Rust, and the .NET runtime are not required on recipient machines.
 
 ```powershell
 code --install-extension .\extension\codex-lid-guard.vsix
@@ -47,14 +47,15 @@ Before uninstalling, run the disable command so its lifecycle hook entries are r
 
 ## Development
 
-Building from source requires Node.js 20+ and the .NET 8 SDK or newer.
+Building from source requires Node.js 20+, Rust through `rustup`, and the Visual Studio C++ build tools.
 
 ```powershell
 cd extension
 cmd /c npm install
 cmd /c npm test
 cd ..
-dotnet build .\native\CodexLidGuard\CodexLidGuard.csproj -c Release
+cargo test --manifest-path .\native\CodexLidGuard\Cargo.toml
+cargo build --release --manifest-path .\native\CodexLidGuard\Cargo.toml
 ```
 
 The native executable supports `status`, `restore`, `sound done`, and `sound request` for diagnostics. Logs are written to `%LOCALAPPDATA%\CodexLidGuard\guard.log`.

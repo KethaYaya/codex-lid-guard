@@ -1,0 +1,22 @@
+[package]
+name = "codex-lid-guard"
+version = "0.1.4"
+edition = "2024"
+description = "Windows lid and sleep guard for local Codex turns"
+license = "MIT"
+
+[[bin]]
+name = "CodexLidGuard"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

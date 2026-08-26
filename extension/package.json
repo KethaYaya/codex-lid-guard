@@ -33,7 +33,7 @@
   "scripts": {
     "clean": "node ./scripts/clean.mjs",
     "compile": "tsc -p ./",
-    "build:helper": "dotnet publish ../native/CodexLidGuard/CodexLidGuard.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o ./bin/win-x64",
+    "build:helper": "node ./scripts/build-helper.mjs",
     "build": "npm run clean && npm run compile && npm run build:helper",
     "test": "npm run compile && node --test dist/test/*.test.js",
     "package": "npm run build && vsce package --no-dependencies --allow-missing-repository -o codex-lid-guard.vsix"

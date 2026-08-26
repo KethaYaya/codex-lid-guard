@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Replaced the 35 MB self-contained .NET helper with a sub-megabyte native Rust helper.
+- Preserved the existing hook CLI, concurrent-turn tracking, crash recovery, lid notifications, post-task sleep, and Herdr alert sounds.
+- Bumped the internal daemon protocol so an older helper process is safely restored and retired during an upgrade.
+
 ## 0.1.4
 
 - Added Herdr's original completion and needs-response sounds.

@@ -2,7 +2,7 @@
 
 Keep a local Codex task running when a Windows laptop lid is closed, then restore the original power settings and sleep once the task is finished.
 
-Requires Windows 10/11 and the official OpenAI Codex VS Code extension. The packaged VSIX includes its native helper, so recipients do not need Node.js or the .NET SDK.
+Requires Windows 10/11 and the official OpenAI Codex VS Code extension. The packaged VSIX includes its native Rust helper, so recipients do not need Node.js, Rust, or the .NET runtime.
 
 The extension connects to Codex's official `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Stop`, and `SessionEnd` lifecycle hooks. While one or more local turns are active, its native Windows guardian:
 

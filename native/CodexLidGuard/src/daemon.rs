@@ -1,0 +1,331 @@
+use std::collections::HashSet;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use crate::logging;
+use crate::model::{GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION};
+use crate::{paths, win};
+
+struct DaemonState {
+    active_turns: HashSet<String>,
+    power_policy: win::PowerPolicy,
+    lid_state: LidState,
+    pending_sleep: Option<Arc<AtomicBool>>,
+}
+
+impl DaemonState {
+    fn new() -> Self {
+        Self {
+            active_turns: HashSet::new(),
+            power_policy: win::PowerPolicy::new(),
+            lid_state: LidState::Unknown,
+            pending_sleep: None,
+        }
+    }
+
+    fn cancel_pending_sleep(&mut self) {
+        if let Some(token) = self.pending_sleep.take() {
+            token.store(true, Ordering::Release);
+        }
+    }
+
+    fn snapshot(&self, ok: bool, message: impl Into<String>) -> GuardResponse {
+        GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_path: std::env::current_exe()
+                .ok()
+                .map(|value| value.to_string_lossy().into_owned()),
+            ok,
+            message: message.into(),
+            active_turns: self.active_turns.len(),
+            is_guarding: self.power_policy.is_guarding(),
+            lid_state: self.lid_state.as_str().to_string(),
+            sleep_pending: self
+                .pending_sleep
+                .as_ref()
+                .is_some_and(|token| !token.load(Ordering::Acquire)),
+        }
+    }
+}
+
+pub fn run() -> io::Result<()> {
+    let Some(_instance) = win::InstanceMutex::acquire(&paths::mutex_name())? else {
+        return Ok(());
+    };
+    let state = Arc::new(Mutex::new(DaemonState::new()));
+    let watcher_state = Arc::clone(&state);
+    let _watcher = win::LidWatcher::start(move |next| {
+        if let Ok(mut state) = watcher_state.lock() {
+            if state.lid_state != next {
+                state.lid_state = next;
+                logging::write(format!("Lid state changed to {next:?}."));
+                if next == LidState::Open {
+                    state.cancel_pending_sleep();
+                }
+            }
+        }
+    })?;
+    let pipe = win::PipeServer::new(&paths::pipe_name());
+    logging::write(format!(
+        "Guardian daemon started on pipe {}.",
+        paths::pipe_name()
+    ));
+
+    loop {
+        let can_exit = state
+            .lock()
+            .map(|value| value.active_turns.is_empty() && value.pending_sleep.is_none())
+            .unwrap_or(false);
+        let timeout = can_exit.then_some(Duration::from_secs(5 * 60));
+        match pipe.accept(timeout) {
+            Ok(win::AcceptResult::Connected(connection)) => {
+                if let Err(cause) = handle_connection(connection, &state) {
+                    logging::write(format!("Request handling failed: {cause}"));
+                }
+            }
+            Ok(win::AcceptResult::TimedOut) => {
+                let still_idle = state
+                    .lock()
+                    .map(|value| value.active_turns.is_empty() && value.pending_sleep.is_none())
+                    .unwrap_or(false);
+                if still_idle {
+                    logging::write("Guardian daemon reached its idle timeout.");
+                    break;
+                }
+            }
+            Err(cause) => logging::write(format!("Pipe connection ended unexpectedly: {cause}")),
+        }
+    }
+
+    if let Ok(mut state) = state.lock() {
+        state.cancel_pending_sleep();
+        state.active_turns.clear();
+        if let Err(cause) = state.power_policy.release() {
+            logging::write(format!("Power-policy cleanup failed: {cause}"));
+        }
+    }
+    logging::write("Guardian daemon stopped.");
+    Ok(())
+}
+
+fn handle_connection(
+    connection: win::PipeConnection,
+    shared: &Arc<Mutex<DaemonState>>,
+) -> io::Result<()> {
+    let line = connection.read_line()?;
+    let response = match serde_json::from_str::<GuardRequest>(&line) {
+        Ok(request) => handle_request(shared, request),
+        Err(cause) => {
+            logging::write(format!("Guardian request failed: {cause}"));
+            shared
+                .lock()
+                .map(|state| state.snapshot(false, cause.to_string()))
+                .unwrap_or_else(|_| failure("guardian state lock was poisoned"))
+        }
+    };
+    connection.write_line(&serde_json::to_string(&response)?)
+}
+
+fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> GuardResponse {
+    let action = request.action.to_ascii_lowercase();
+    let mut sleep_schedule = None;
+    let response = {
+        let Ok(mut state) = shared.lock() else {
+            return failure("guardian state lock was poisoned");
+        };
+        match action.as_str() {
+            "acquire" => acquire(&mut state, &request),
+            "release" => {
+                let key = turn_key(&request);
+                state.active_turns.remove(&key);
+                logging::write(format!(
+                    "Turn released: {key}. Active turns: {}.",
+                    state.active_turns.len()
+                ));
+                if state.active_turns.is_empty() {
+                    if let Err(cause) = state.power_policy.release() {
+                        state.snapshot(false, cause.to_string())
+                    } else {
+                        sleep_schedule = prepare_sleep(&mut state);
+                        state.snapshot(true, "Codex turn finished.")
+                    }
+                } else {
+                    state.snapshot(true, "Codex turn finished.")
+                }
+            }
+            "release-session" => {
+                let session = request.session_id.as_deref().unwrap_or_default();
+                let prefix = format!("{session}:");
+                state.active_turns.retain(|key| !key.starts_with(&prefix));
+                logging::write(format!(
+                    "Session released: {session}. Active turns: {}.",
+                    state.active_turns.len()
+                ));
+                if state.active_turns.is_empty() {
+                    if let Err(cause) = state.power_policy.release() {
+                        state.snapshot(false, cause.to_string())
+                    } else {
+                        sleep_schedule = prepare_sleep(&mut state);
+                        state.snapshot(true, "Codex session finished.")
+                    }
+                } else {
+                    state.snapshot(true, "Codex session finished.")
+                }
+            }
+            "restore" => {
+                state.active_turns.clear();
+                state.cancel_pending_sleep();
+                match state.power_policy.release() {
+                    Ok(()) => {
+                        state.snapshot(true, "The original Windows power policy was restored.")
+                    }
+                    Err(cause) => state.snapshot(false, cause.to_string()),
+                }
+            }
+            "status" => state.snapshot(true, "Status read."),
+            _ => state.snapshot(
+                false,
+                format!("Unknown guardian action '{}'.", request.action),
+            ),
+        }
+    };
+    if let Some((token, delay)) = sleep_schedule {
+        spawn_sleep(shared, token, delay);
+    }
+    response
+}
+
+fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
+    let key = turn_key(request);
+    let prefix = session_prefix(request);
+    state.cancel_pending_sleep();
+    let previous_count = state.active_turns.len();
+    state
+        .active_turns
+        .retain(|candidate| !candidate.starts_with(&prefix) || candidate == &key);
+    let replaced = previous_count.saturating_sub(state.active_turns.len());
+    if replaced > 0 {
+        logging::write(format!(
+            "Removed {replaced} stale turn(s) for session {}.",
+            prefix.trim_end_matches(':')
+        ));
+    }
+    let inserted = state.active_turns.insert(key.clone());
+    if inserted && state.active_turns.len() == 1 {
+        if let Err(cause) = state.power_policy.acquire() {
+            state.active_turns.remove(&key);
+            return state.snapshot(false, cause.to_string());
+        }
+    }
+    logging::write(format!(
+        "Turn acquired: {key}. Active turns: {}.",
+        state.active_turns.len()
+    ));
+    state.snapshot(
+        true,
+        "Windows will stay awake until the Codex turn finishes.",
+    )
+}
+
+fn prepare_sleep(state: &mut DaemonState) -> Option<(Arc<AtomicBool>, Duration)> {
+    let settings = GuardSettings::load();
+    if !settings.sleep_when_lid_closed || state.lid_state != LidState::Closed {
+        return None;
+    }
+    state.cancel_pending_sleep();
+    let token = Arc::new(AtomicBool::new(false));
+    state.pending_sleep = Some(Arc::clone(&token));
+    logging::write(format!(
+        "Sleep scheduled in {} seconds because the lid is closed.",
+        settings.sleep_delay_seconds
+    ));
+    Some((token, Duration::from_secs(settings.sleep_delay_seconds)))
+}
+
+fn spawn_sleep(shared: &Arc<Mutex<DaemonState>>, token: Arc<AtomicBool>, delay: Duration) {
+    let shared = Arc::clone(shared);
+    thread::spawn(move || {
+        thread::sleep(delay);
+        if token.load(Ordering::Acquire) {
+            return;
+        }
+        let should_suspend = if let Ok(mut state) = shared.lock() {
+            let matches_pending = state
+                .pending_sleep
+                .as_ref()
+                .is_some_and(|pending| Arc::ptr_eq(pending, &token));
+            if matches_pending
+                && state.active_turns.is_empty()
+                && state.lid_state == LidState::Closed
+            {
+                state.pending_sleep = None;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if should_suspend && !win::suspend() {
+            logging::write("Windows rejected the sleep request.");
+        }
+    });
+}
+
+fn turn_key(request: &GuardRequest) -> String {
+    let session = request
+        .session_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown-session");
+    let turn = request
+        .turn_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("current-turn");
+    format!("{session}:{turn}")
+}
+
+fn session_prefix(request: &GuardRequest) -> String {
+    let session = request
+        .session_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown-session");
+    format!("{session}:")
+}
+
+fn failure(message: impl Into<String>) -> GuardResponse {
+    GuardResponse {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_path: std::env::current_exe()
+            .ok()
+            .map(|value| value.to_string_lossy().into_owned()),
+        message: message.into(),
+        ..GuardResponse::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_keys_default_missing_ids() {
+        let request = GuardRequest::default();
+        assert_eq!(turn_key(&request), "unknown-session:current-turn");
+    }
+
+    #[test]
+    fn turn_keys_preserve_session_and_turn() {
+        let request = GuardRequest {
+            session_id: Some("session".into()),
+            turn_id: Some("turn".into()),
+            ..GuardRequest::default()
+        };
+        assert_eq!(turn_key(&request), "session:turn");
+    }
+}
