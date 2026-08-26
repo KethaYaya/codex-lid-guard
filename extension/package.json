@@ -1,0 +1,102 @@
+{
+  "name": "codex-lid-guard",
+  "displayName": "Codex Lid Guard",
+  "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
+  "version": "0.1.4",
+  "publisher": "codex-lid-guard",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "codex",
+    "sleep",
+    "lid",
+    "windows",
+    "keep awake",
+    "alerts",
+    "sounds"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/src/extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "extensionDependencies": [
+    "openai.chatgpt"
+  ],
+  "scripts": {
+    "clean": "node ./scripts/clean.mjs",
+    "compile": "tsc -p ./",
+    "build:helper": "dotnet publish ../native/CodexLidGuard/CodexLidGuard.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o ./bin/win-x64",
+    "build": "npm run clean && npm run compile && npm run build:helper",
+    "test": "npm run compile && node --test dist/test/*.test.js",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository -o codex-lid-guard.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.8.3"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexLidGuard.enable",
+        "title": "Codex Lid Guard: Enable"
+      },
+      {
+        "command": "codexLidGuard.disable",
+        "title": "Codex Lid Guard: Disable and Restore Power Settings"
+      },
+      {
+        "command": "codexLidGuard.showStatus",
+        "title": "Codex Lid Guard: Show Status"
+      },
+      {
+        "command": "codexLidGuard.restorePowerSettings",
+        "title": "Codex Lid Guard: Restore Power Settings Now"
+      },
+      {
+        "command": "codexLidGuard.finishSetup",
+        "title": "Codex Lid Guard: Finish Codex Hook Setup"
+      },
+      {
+        "command": "codexLidGuard.testAlertSounds",
+        "title": "Codex Lid Guard: Test Alert Sounds"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Lid Guard",
+      "properties": {
+        "codexLidGuard.alertSounds": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play Herdr-style alerts when a Codex task completes or needs your response."
+        },
+        "codexLidGuard.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Install Codex lifecycle hooks and guard the laptop while local turns run."
+        },
+        "codexLidGuard.sleepWhenLidClosed": {
+          "type": "boolean",
+          "default": true,
+          "description": "Put Windows to sleep after the final active Codex turn finishes if the lid is still closed."
+        },
+        "codexLidGuard.sleepDelaySeconds": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 300,
+          "description": "Grace period before sleeping after a task finishes with the lid closed. A new turn cancels the pending sleep."
+        }
+      }
+    }
+  }
+}

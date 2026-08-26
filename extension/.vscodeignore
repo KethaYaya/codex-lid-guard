@@ -1,0 +1,12 @@
+.github/**
+.vscode/**
+scripts/**
+src/**
+test/**
+node_modules/**
+tsconfig.json
+package-lock.json
+*.vsix
+**/*.pdb
+dist/test/**
+dist/**/*.map

@@ -1,0 +1,36 @@
+# Changelog
+
+## 0.1.4
+
+- Added Herdr's original completion and needs-response sounds.
+- Added `PermissionRequest` and targeted `PreToolUse` hooks for immediate approval and structured user-input alerts.
+- Added an alert-sound setting and a Command Palette sound test.
+- Bundled Herdr's Apache-2.0 license and sound attribution.
+- Fixed stale turn IDs after a missed `Stop`, automatically replaces legacy guardian daemons, and removed the heavy WPF payload from routine status checks.
+
+- The trust retry notice is now non-blocking, and its pre-review hash baseline survives retries and reloads so users can operate the Codex terminal before checking again.
+- Setup now verifies that Codex persisted new trust hashes for all three Lid Guard hooks before it marks onboarding complete or reloads VS Code.
+- Fixed a restart regression where VS Code could lowercase the extension drive letter, changing the exact Codex hook hashes and causing previously trusted hooks to be skipped. Setup now reopens once so the optimized definitions cannot remain silently untrusted.
+
+## 0.1.3
+
+- Fixed hook onboarding for the VS Code Codex experience: the setup flow now opens the interactive Codex CLI, which displays the supported hook-review screen automatically.
+- Removed the incorrect instruction to enter `/hooks` in the VS Code chat.
+- Made shared VSIX installs portable by locating the Codex CLI inside the recipient's official OpenAI VS Code extension instead of relying on a machine-specific installation path.
+- Made the status-bar shield react immediately to guardian acquire/release events; the 15-second poll remains only as a fallback.
+- Removed a redundant nested PowerShell launch from Windows hooks, reducing measured helper activation from about 638 ms to about 160 ms.
+- Updated the shield directly from the guardian's confirmed-acquire event before running the slower diagnostic status query.
+
+## 0.1.2
+
+- Added a persistent install/update setup flow that opens Codex, copies `/hooks`, and reloads VS Code after the user confirms the required hook review.
+- Setup remains pending when dismissed, so the trust step is offered again on the next activation.
+
+## 0.1.1
+
+- Fixed automatic Windows hook invocation with `commandWindows`.
+- Added guidance for the required Codex hook trust and reload step.
+
+## 0.1.0
+
+- Initial release with automatic Codex hook integration, Windows lid protection, crash recovery, and post-task sleep.

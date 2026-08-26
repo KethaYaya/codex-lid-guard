@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+extension/node_modules/
+extension/dist/
+extension/*.vsix
+*.user
+*.suo
+.DS_Store
