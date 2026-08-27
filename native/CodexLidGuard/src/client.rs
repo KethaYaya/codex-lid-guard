@@ -12,7 +12,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub fn send(request: GuardRequest) -> GuardResponse {
+pub fn send(mut request: GuardRequest) -> GuardResponse {
+    request.client_version = Some(env!("CARGO_PKG_VERSION").to_string());
     let mut response = try_send(&request, Duration::from_millis(25));
     if let Some(value) = response.as_ref() {
         if !is_compatible(value) {
@@ -102,7 +103,28 @@ fn is_compatible(response: &GuardResponse) -> bool {
 fn should_replace_idle_daemon(request: &GuardRequest, response: &GuardResponse) -> bool {
     request.action.eq_ignore_ascii_case("status")
         && response.active_turns == 0
-        && response.daemon_version.as_deref() != Some(env!("CARGO_PKG_VERSION"))
+        && response
+            .daemon_version
+            .as_deref()
+            .is_none_or(|version| version_is_older(version, env!("CARGO_PKG_VERSION")))
+}
+
+fn version_is_older(candidate: &str, current: &str) -> bool {
+    match (parse_version(candidate), parse_version(current)) {
+        (Some(candidate), Some(current)) => candidate < current,
+        _ => true,
+    }
+}
+
+fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
+    let core = value.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let version = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(version)
 }
 
 fn failure(message: impl Into<String>) -> GuardResponse {
@@ -169,6 +191,28 @@ mod tests {
             ..GuardResponse::default()
         };
         assert!(!should_replace_idle_daemon(&request, &response));
+    }
+
+    #[test]
+    fn newer_idle_daemons_are_never_replaced_by_older_helpers() {
+        let request = GuardRequest {
+            action: "status".into(),
+            ..GuardRequest::default()
+        };
+        let response = GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: Some("99.0.0".into()),
+            active_turns: 0,
+            ..GuardResponse::default()
+        };
+        assert!(!should_replace_idle_daemon(&request, &response));
+    }
+
+    #[test]
+    fn release_versions_compare_numerically() {
+        assert!(version_is_older("0.1.9", "0.1.10"));
+        assert!(!version_is_older("0.2.0", "0.1.10"));
+        assert!(version_is_older("legacy", "0.1.10"));
     }
 
     #[test]

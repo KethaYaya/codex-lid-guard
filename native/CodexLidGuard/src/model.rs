@@ -16,9 +16,11 @@ pub struct HookPayload {
 #[serde(default, rename_all = "camelCase")]
 pub struct GuardRequest {
     pub action: String,
+    pub client_version: Option<String>,
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
     pub cwd: Option<String>,
+    pub origin_window: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,6 +57,7 @@ impl Default for GuardResponse {
 #[serde(default, rename_all = "camelCase")]
 pub struct GuardSettings {
     pub alert_sounds: bool,
+    pub alert_sounds_only_when_unfocused: bool,
     pub sleep_when_lid_closed: bool,
     pub sleep_delay_seconds: u64,
 }
@@ -63,6 +66,7 @@ impl Default for GuardSettings {
     fn default() -> Self {
         Self {
             alert_sounds: true,
+            alert_sounds_only_when_unfocused: true,
             sleep_when_lid_closed: true,
             sleep_delay_seconds: 10,
         }
@@ -122,6 +126,7 @@ mod tests {
         let settings: GuardSettings = serde_json::from_str(r#"{"sleepDelaySeconds":999}"#).unwrap();
         let settings = settings.clamp();
         assert!(settings.alert_sounds);
+        assert!(settings.alert_sounds_only_when_unfocused);
         assert!(settings.sleep_when_lid_closed);
         assert_eq!(settings.sleep_delay_seconds, 300);
     }
@@ -130,13 +135,17 @@ mod tests {
     fn wire_names_match_the_existing_helper() {
         let request = GuardRequest {
             action: "acquire".into(),
+            client_version: Some(env!("CARGO_PKG_VERSION").into()),
             session_id: Some("s".into()),
             turn_id: Some("t".into()),
             cwd: None,
+            origin_window: Some(42),
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("sessionId"));
         assert!(json.contains("turnId"));
+        assert!(json.contains("originWindow"));
+        assert!(json.contains("clientVersion"));
 
         let response = serde_json::to_string(&GuardResponse {
             protocol_version: PROTOCOL_VERSION,

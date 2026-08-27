@@ -30,12 +30,14 @@ export async function runHelper(
 export async function writeHelperSettings(
   settingsPath: string,
   alertSounds: boolean,
+  alertSoundsOnlyWhenUnfocused: boolean,
   sleepWhenLidClosed: boolean,
   sleepDelaySeconds: number
 ): Promise<void> {
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
   const settings = {
     alertSounds,
+    alertSoundsOnlyWhenUnfocused,
     sleepWhenLidClosed,
     sleepDelaySeconds: Math.max(0, Math.min(300, sleepDelaySeconds))
   };

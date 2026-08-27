@@ -3,7 +3,7 @@
   "displayName": "Codex Lid Guard",
   "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
   "icon": "images/codex-lid-guard-logo.png",
-  "version": "0.1.6",
+  "version": "0.1.9",
   "publisher": "KethaYaya",
   "license": "MIT",
   "pricing": "Free",
@@ -88,6 +88,11 @@
           "type": "boolean",
           "default": true,
           "description": "Play Herdr-style alerts when a Codex task completes or needs your response."
+        },
+        "codexLidGuard.alertSoundsOnlyWhenUnfocused": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play automatic alerts only when the task's Codex chat is not current or its editor window is minimized or no longer in the foreground. The manual sound test always plays."
         },
         "codexLidGuard.enabled": {
           "type": "boolean",

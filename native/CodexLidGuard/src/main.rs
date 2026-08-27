@@ -59,6 +59,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_hook(action: &str) {
+    let origin_window = action
+        .eq_ignore_ascii_case("acquire")
+        .then(win::foreground_editor_window)
+        .flatten();
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload = match serde_json::from_str::<HookPayload>(&input) {
@@ -70,9 +74,11 @@ fn run_hook(action: &str) {
     };
     let response = client::send(GuardRequest {
         action: action.to_string(),
+        client_version: None,
         session_id: payload.session_id,
         turn_id: payload.turn_id,
         cwd: payload.cwd,
+        origin_window,
     });
     if !response.ok {
         logging::write(format!(

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.9
+
+- Tracked the most recently messaged Codex chat in each VS Code window.
+- Allowed completion and needs-response alerts from another running chat in the same focused window, while keeping the current chat quiet.
+
+## 0.1.8
+
+- Prevented older VS Code windows from replacing a newer shared guardian daemon during extension updates.
+- Added versioned client requests and a compatibility response for v0.1.6/v0.1.7 status leases, keeping multi-window protection stable until every window reloads.
+
+## 0.1.7
+
+- Associated each Codex turn with the foreground VS Code window that submitted it.
+- Suppressed automatic completion and needs-response sounds while that exact window remains focused; minimized windows, covered windows, and other VS Code sessions still receive alerts.
+- Added `codexLidGuard.alertSoundsOnlyWhenUnfocused`, enabled by default. Manual sound tests always play.
+
 ## 0.1.6
 
 - Avoided status-file rewrites for read-only requests and unchanged snapshots, reducing background disk and file-watcher activity.

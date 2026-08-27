@@ -436,6 +436,7 @@ async function syncSettings(): Promise<void> {
   await writeHelperSettings(
     helperSettingsPath(),
     config.get<boolean>("alertSounds", true),
+    config.get<boolean>("alertSoundsOnlyWhenUnfocused", true),
     config.get<boolean>("sleepWhenLidClosed", true),
     config.get<number>("sleepDelaySeconds", 10)
   );

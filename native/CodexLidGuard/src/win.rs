@@ -44,6 +44,7 @@ const TOKEN_QUERY: u32 = 0x0008;
 const TOKEN_USER_CLASS: u32 = 1;
 const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 const PROCESS_TERMINATE: u32 = 0x0001;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
 const ES_CONTINUOUS: u32 = 0x8000_0000;
@@ -261,6 +262,12 @@ unsafe extern "system" {
     fn LocalFree(memory: Handle) -> Handle;
     fn MoveFileExW(existing: *const u16, destination: *const u16, flags: u32) -> Bool;
     fn OpenProcess(access: u32, inherit: Bool, process_id: u32) -> Handle;
+    fn QueryFullProcessImageNameW(
+        process: Handle,
+        flags: u32,
+        executable_name: *mut u16,
+        size: *mut u32,
+    ) -> Bool;
     fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
     fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
     fn ProcessIdToSessionId(process_id: u32, session_id: *mut u32) -> Bool;
@@ -357,7 +364,11 @@ unsafe extern "system" {
     fn DefWindowProcW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn DestroyWindow(window: Hwnd) -> Bool;
     fn DispatchMessageW(message: *const Message) -> Lresult;
+    fn GetForegroundWindow() -> Hwnd;
     fn GetMessageW(message: *mut Message, window: Hwnd, min: u32, max: u32) -> Bool;
+    fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
+    fn IsIconic(window: Hwnd) -> Bool;
+    fn IsWindow(window: Hwnd) -> Bool;
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Bool;
     fn PostQuitMessage(exit_code: i32);
     fn RegisterClassExW(window_class: *const WindowClassExW) -> u16;
@@ -1034,6 +1045,65 @@ fn set_execution_state(guarding: bool) -> io::Result<()> {
     }
 }
 
+pub fn foreground_editor_window() -> Option<u64> {
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.is_null() || IsWindow(window) == 0 || IsIconic(window) != 0 {
+            return None;
+        }
+        let mut process_id = 0;
+        if GetWindowThreadProcessId(window, &mut process_id) == 0 || process_id == 0 {
+            return None;
+        }
+        let executable = process_executable_name(process_id)?;
+        if !is_supported_editor_process(&executable) {
+            return None;
+        }
+        Some(window as usize as u64)
+    }
+}
+
+pub fn is_window_focused(window: u64) -> bool {
+    let window = window as usize as Hwnd;
+    unsafe {
+        !window.is_null()
+            && IsWindow(window) != 0
+            && IsIconic(window) == 0
+            && GetForegroundWindow() == window
+    }
+}
+
+fn process_executable_name(process_id: u32) -> Option<String> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if process.is_null() {
+            return None;
+        }
+        let process = OwnedHandle(process);
+        let mut buffer = vec![0u16; 32_768];
+        let mut length = buffer.len() as u32;
+        if QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &mut length) == 0 {
+            return None;
+        }
+        Path::new(&String::from_utf16_lossy(&buffer[..length as usize]))
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+}
+
+fn is_supported_editor_process(executable: &str) -> bool {
+    matches!(
+        executable.to_ascii_lowercase().as_str(),
+        "code.exe"
+            | "code - insiders.exe"
+            | "code - oss.exe"
+            | "codium.exe"
+            | "vscodium.exe"
+            | "cursor.exe"
+            | "windsurf.exe"
+    )
+}
+
 pub fn atomic_write(destination: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1319,6 +1389,15 @@ mod tests {
     #[test]
     fn session_identity_is_available() {
         assert!(current_user_sid().is_some());
+    }
+
+    #[test]
+    fn supported_editor_processes_cover_vscode_and_common_builds() {
+        assert!(is_supported_editor_process("Code.exe"));
+        assert!(is_supported_editor_process("Code - Insiders.exe"));
+        assert!(is_supported_editor_process("VSCodium.exe"));
+        assert!(is_supported_editor_process("Cursor.exe"));
+        assert!(!is_supported_editor_process("notepad.exe"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, hash_map::Entry};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,7 +14,8 @@ const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
 static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
 
 struct DaemonState {
-    active_turns: HashSet<String>,
+    active_turns: HashMap<String, Option<u64>>,
+    latest_session_by_window: HashMap<u64, String>,
     power_policy: win::PowerPolicy,
     lid_state: LidState,
     pending_sleep: Option<Arc<AtomicBool>>,
@@ -45,7 +46,8 @@ impl AlertSchedule {
 impl DaemonState {
     fn new() -> Self {
         Self {
-            active_turns: HashSet::new(),
+            active_turns: HashMap::new(),
+            latest_session_by_window: HashMap::new(),
             power_policy: win::PowerPolicy::new(),
             lid_state: LidState::Unknown,
             pending_sleep: None,
@@ -139,6 +141,7 @@ pub fn run() -> io::Result<()> {
     if let Ok(mut state) = state.lock() {
         state.cancel_pending_sleep();
         state.active_turns.clear();
+        state.latest_session_by_window.clear();
         if let Err(cause) = state.power_policy.release() {
             logging::write(format!("Power-policy cleanup failed: {cause}"));
         }
@@ -154,7 +157,11 @@ fn handle_connection(
 ) -> io::Result<()> {
     let line = connection.read_line()?;
     let response = match serde_json::from_str::<GuardRequest>(&line) {
-        Ok(request) => handle_request(shared, request),
+        Ok(request) => {
+            let mut response = handle_request(shared, request.clone());
+            shield_newer_daemon_from_legacy_status(&request, &mut response);
+            response
+        }
         Err(cause) => {
             logging::write(format!("Guardian request failed: {cause}"));
             shared
@@ -166,10 +173,25 @@ fn handle_connection(
     connection.write_line(&serde_json::to_string(&response)?)
 }
 
+fn shield_newer_daemon_from_legacy_status(request: &GuardRequest, response: &mut GuardResponse) {
+    if request.action.eq_ignore_ascii_case("status")
+        && request.client_version.is_none()
+        && response.active_turns == 0
+    {
+        // v0.1.6 and v0.1.7 clients interpreted any different daemon version as
+        // stale. Reporting a nonzero reference count only to those read-only
+        // clients prevents an older VS Code window from downgrading a newer
+        // idle daemon. The real event-driven status snapshot is unchanged.
+        response.active_turns = 1;
+    }
+}
+
 fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> GuardResponse {
     let action = request.action.to_ascii_lowercase();
     let mut sleep_schedule = None;
     let mut sound_schedule = None;
+    let mut alert_window = None;
+    let mut alert_session_is_current = true;
     let (response, should_publish_status) = {
         let Ok(mut state) = shared.lock() else {
             return failure("guardian state lock was poisoned");
@@ -178,7 +200,9 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             "acquire" => acquire(&mut state, &request),
             "release" => {
                 let key = turn_key(&request);
-                state.active_turns.remove(&key);
+                alert_window = state.active_turns.remove(&key).flatten();
+                alert_session_is_current =
+                    origin_session_is_current(&state, &request, alert_window);
                 logging::write(format!(
                     "Turn released: {key}. Active turns: {}.",
                     state.active_turns.len()
@@ -197,7 +221,9 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             "release-session" => {
                 let session = request.session_id.as_deref().unwrap_or_default();
                 let prefix = format!("{session}:");
-                state.active_turns.retain(|key| !key.starts_with(&prefix));
+                state
+                    .active_turns
+                    .retain(|key, _| !key.starts_with(&prefix));
                 logging::write(format!(
                     "Session released: {session}. Active turns: {}.",
                     state.active_turns.len()
@@ -215,6 +241,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             }
             "restore" => {
                 state.active_turns.clear();
+                state.latest_session_by_window.clear();
                 state.cancel_pending_sleep();
                 match state.power_policy.release() {
                     Ok(()) => {
@@ -225,7 +252,12 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             }
             "status" => state.snapshot(true, "Status read."),
             "sound-done" => state.snapshot(true, "Completion alert scheduled."),
-            "sound-request" => state.snapshot(true, "Needs-response alert scheduled."),
+            "sound-request" => {
+                alert_window = origin_window_for_request(&state, &request);
+                alert_session_is_current =
+                    origin_session_is_current(&state, &request, alert_window);
+                state.snapshot(true, "Needs-response alert scheduled.")
+            }
             _ => state.snapshot(
                 false,
                 format!("Unknown guardian action '{}'.", request.action),
@@ -237,7 +269,10 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                 "sound-request" => Some(AlertSound::Request),
                 _ => None,
             };
-            if let Some(sound) = requested_sound.filter(|sound| state.schedule_alert(*sound)) {
+            if let Some(sound) = requested_sound.filter(|sound| {
+                should_play_automatic_alert(*sound, alert_window, alert_session_is_current)
+                    && state.schedule_alert(*sound)
+            }) {
                 sound_schedule = Some(sound);
             }
         }
@@ -264,7 +299,7 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
     let previous_count = state.active_turns.len();
     state
         .active_turns
-        .retain(|candidate| !candidate.starts_with(&prefix) || candidate == &key);
+        .retain(|candidate, _| !candidate.starts_with(&prefix) || candidate == &key);
     let replaced = previous_count.saturating_sub(state.active_turns.len());
     if replaced > 0 {
         logging::write(format!(
@@ -272,7 +307,13 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
             prefix.trim_end_matches(':')
         ));
     }
-    let inserted = state.active_turns.insert(key.clone());
+    let inserted = match state.active_turns.entry(key.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(request.origin_window);
+            true
+        }
+        Entry::Occupied(_) => false,
+    };
     if inserted
         && state.active_turns.len() == 1
         && let Err(cause) = state.power_policy.acquire()
@@ -280,6 +321,7 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         state.active_turns.remove(&key);
         return state.snapshot(false, cause.to_string());
     }
+    remember_latest_session(state, request);
     logging::write(format!(
         "Turn acquired: {key}. Active turns: {}.",
         state.active_turns.len()
@@ -288,6 +330,99 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         true,
         "Windows will stay awake until the Codex turn finishes.",
     )
+}
+
+fn remember_latest_session(state: &mut DaemonState, request: &GuardRequest) {
+    if let (Some(window), Some(session)) = (
+        request.origin_window,
+        request
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        state
+            .latest_session_by_window
+            .insert(window, session.to_string());
+    }
+}
+
+fn origin_window_for_request(state: &DaemonState, request: &GuardRequest) -> Option<u64> {
+    let key = turn_key(request);
+    state.active_turns.get(&key).copied().flatten().or_else(|| {
+        let prefix = session_prefix(request);
+        state
+            .active_turns
+            .iter()
+            .find_map(|(key, window)| key.starts_with(&prefix).then_some(*window).flatten())
+    })
+}
+
+fn origin_session_is_current(
+    state: &DaemonState,
+    request: &GuardRequest,
+    origin_window: Option<u64>,
+) -> bool {
+    let Some(window) = origin_window else {
+        return true;
+    };
+    let Some(session) = request
+        .session_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return true;
+    };
+    latest_session_matches(
+        state
+            .latest_session_by_window
+            .get(&window)
+            .map(String::as_str),
+        Some(session),
+    )
+}
+
+fn latest_session_matches(latest: Option<&str>, session: Option<&str>) -> bool {
+    match (latest, session) {
+        (Some(latest), Some(session)) => latest == session,
+        _ => true,
+    }
+}
+
+fn should_play_automatic_alert(
+    sound: AlertSound,
+    origin_window: Option<u64>,
+    origin_session_is_current: bool,
+) -> bool {
+    let settings = GuardSettings::load();
+    if !settings.alert_sounds {
+        return false;
+    }
+    let origin_is_focused = origin_window.is_some_and(win::is_window_focused);
+    let should_play = alert_should_play(
+        settings.alert_sounds_only_when_unfocused,
+        origin_window,
+        origin_is_focused,
+        origin_session_is_current,
+    );
+    if !should_play {
+        logging::write(format!(
+            "Suppressed {} alert because its Codex chat is current in the focused editor window.",
+            sound.label()
+        ));
+    }
+    should_play
+}
+
+fn alert_should_play(
+    only_when_unfocused: bool,
+    origin_window: Option<u64>,
+    origin_is_focused: bool,
+    origin_session_is_current: bool,
+) -> bool {
+    !only_when_unfocused
+        || origin_window.is_none()
+        || !origin_is_focused
+        || !origin_session_is_current
 }
 
 fn prepare_sleep(state: &mut DaemonState) -> Option<(Arc<AtomicBool>, Duration)> {
@@ -425,5 +560,62 @@ mod tests {
         assert!(!snapshot_changed(Some(b"same"), b"same"));
         assert!(snapshot_changed(Some(b"before"), b"after"));
         assert!(snapshot_changed(None, b"first"));
+    }
+
+    #[test]
+    fn focused_origin_windows_suppress_automatic_alerts() {
+        assert!(!alert_should_play(true, Some(42), true, true));
+        assert!(alert_should_play(true, Some(42), false, true));
+        assert!(alert_should_play(true, None, false, true));
+    }
+
+    #[test]
+    fn a_different_recent_chat_in_the_same_window_receives_alerts() {
+        assert!(alert_should_play(true, Some(42), true, false));
+    }
+
+    #[test]
+    fn latest_messaged_chat_is_compared_by_session_id() {
+        assert!(latest_session_matches(Some("chat-a"), Some("chat-a")));
+        assert!(!latest_session_matches(Some("chat-b"), Some("chat-a")));
+        assert!(latest_session_matches(None, Some("chat-a")));
+        assert!(latest_session_matches(Some("chat-a"), None));
+    }
+
+    #[test]
+    fn focus_filter_can_be_disabled() {
+        assert!(alert_should_play(false, Some(42), true, true));
+    }
+
+    #[test]
+    fn legacy_status_clients_cannot_downgrade_an_idle_newer_daemon() {
+        let request = GuardRequest {
+            action: "status".into(),
+            client_version: None,
+            ..GuardRequest::default()
+        };
+        let mut response = GuardResponse {
+            active_turns: 0,
+            is_guarding: false,
+            ..GuardResponse::default()
+        };
+        shield_newer_daemon_from_legacy_status(&request, &mut response);
+        assert_eq!(response.active_turns, 1);
+        assert!(!response.is_guarding);
+    }
+
+    #[test]
+    fn versioned_status_clients_receive_the_real_idle_count() {
+        let request = GuardRequest {
+            action: "status".into(),
+            client_version: Some(env!("CARGO_PKG_VERSION").into()),
+            ..GuardRequest::default()
+        };
+        let mut response = GuardResponse {
+            active_turns: 0,
+            ..GuardResponse::default()
+        };
+        shield_newer_daemon_from_legacy_status(&request, &mut response);
+        assert_eq!(response.active_turns, 0);
     }
 }
