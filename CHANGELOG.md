@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5
+
+- Moved alert playback from PowerShell/WPF to native Windows multimedia APIs and scheduled sounds inside the Rust guardian.
+- Replaced log-driven status refreshes with small atomic status snapshots and made periodic polling a watcher-failure fallback only.
+- Improved cold-start retry latency without shortening response timeouts, plus same-protocol daemon handoff, duplicate-alert suppression, and log rotation.
+- Added Windows job-breakaway startup and a four-minute VS Code daemon lease so short-lived hook runners cannot end protection for other sessions.
+- Based setup bookkeeping on the hook-definition revision so unchanged hook commands do not trigger redundant setup prompts.
+
+## 0.1.4
+
 - Rewrote the native Windows guardian in Rust for faster hook startup and a much smaller VSIX while preserving power-policy recovery and concurrent-turn behavior.
 
 - The trust retry notice is now non-blocking, and its pre-review hash baseline survives retries and reloads so users can operate the Codex terminal before checking again.

@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,9 +9,11 @@ use crate::model::{GuardRequest, GuardResponse, PROTOCOL_VERSION};
 use crate::{paths, win};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn send(request: GuardRequest) -> GuardResponse {
-    let mut response = try_send(&request, Duration::from_millis(150));
+    let mut response = try_send(&request, Duration::from_millis(25));
     if response.as_ref().is_some_and(|value| !is_compatible(value)) {
         retire_legacy_daemon();
         response = None;
@@ -24,19 +25,21 @@ pub fn send(request: GuardRequest) -> GuardResponse {
         return failure(format!("Could not start the guardian daemon: {cause}"));
     }
     let deadline = Instant::now() + Duration::from_secs(4);
+    let mut retry_delay = Duration::from_millis(5);
     while Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
-        if let Some(response) = try_send(&request, Duration::from_millis(400)) {
-            if is_compatible(&response) {
-                return response;
-            }
+        if let Some(response) = try_send(&request, Duration::from_millis(100))
+            && is_compatible(&response)
+        {
+            return response;
         }
+        thread::sleep(retry_delay);
+        retry_delay = (retry_delay * 2).min(Duration::from_millis(40));
     }
     failure("Could not start the guardian daemon.")
 }
 
 fn try_send(request: &GuardRequest, timeout: Duration) -> Option<GuardResponse> {
-    let connection = win::connect_pipe(&paths::pipe_name(), timeout).ok()?;
+    let connection = win::connect_pipe(&paths::pipe_name(), timeout, RESPONSE_TIMEOUT).ok()?;
     connection
         .write_line(&serde_json::to_string(request).ok()?)
         .ok()?;
@@ -45,12 +48,24 @@ fn try_send(request: &GuardRequest, timeout: Duration) -> Option<GuardResponse> 
 
 fn start_daemon() -> std::io::Result<()> {
     let executable = std::env::current_exe()?;
+    match spawn_daemon(&executable, CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB) {
+        Ok(()) => Ok(()),
+        Err(breakaway_error) => {
+            logging::write(format!(
+                "Could not start the guardian outside the hook job; using the normal process group: {breakaway_error}"
+            ));
+            spawn_daemon(&executable, CREATE_NO_WINDOW)
+        }
+    }
+}
+
+fn spawn_daemon(executable: &std::path::Path, creation_flags: u32) -> std::io::Result<()> {
     Command::new(executable)
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(creation_flags)
         .spawn()?;
     Ok(())
 }
@@ -67,27 +82,11 @@ fn retire_legacy_daemon() {
     for process_id in win::terminate_other_helpers() {
         logging::write(format!("Stopped legacy guardian process {process_id}."));
     }
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(25));
 }
 
 fn is_compatible(response: &GuardResponse) -> bool {
-    if response.protocol_version != PROTOCOL_VERSION {
-        return false;
-    }
-    let Some(daemon_path) = response.daemon_path.as_deref() else {
-        return false;
-    };
-    let Ok(current) = std::env::current_exe() else {
-        return false;
-    };
-    equivalent_path(Path::new(daemon_path), &current)
-}
-
-fn equivalent_path(left: &Path, right: &Path) -> bool {
-    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
-    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
+    response.protocol_version == PROTOCOL_VERSION
 }
 
 fn failure(message: impl Into<String>) -> GuardResponse {
@@ -98,5 +97,29 @@ fn failure(message: impl Into<String>) -> GuardResponse {
             .map(|value| value.to_string_lossy().into_owned()),
         message: message.into(),
         ..GuardResponse::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatible_daemons_can_move_between_extension_install_paths() {
+        let response = GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_path: Some(r"C:\different\extension\CodexLidGuard.exe".into()),
+            ..GuardResponse::default()
+        };
+        assert!(is_compatible(&response));
+    }
+
+    #[test]
+    fn incompatible_protocols_are_replaced() {
+        let response = GuardResponse {
+            protocol_version: PROTOCOL_VERSION - 1,
+            ..GuardResponse::default()
+        };
+        assert!(!is_compatible(&response));
     }
 }

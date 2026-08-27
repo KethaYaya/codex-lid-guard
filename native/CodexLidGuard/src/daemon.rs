@@ -1,19 +1,45 @@
 use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::logging;
 use crate::model::{GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION};
+use crate::sound::{self, AlertSound};
 use crate::{paths, win};
+
+const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
+static STATUS_GATE: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct DaemonState {
     active_turns: HashSet<String>,
     power_policy: win::PowerPolicy,
     lid_state: LidState,
     pending_sleep: Option<Arc<AtomicBool>>,
+    alerts: AlertSchedule,
+}
+
+#[derive(Default)]
+struct AlertSchedule {
+    last_done_alert: Option<Instant>,
+    last_request_alert: Option<Instant>,
+}
+
+impl AlertSchedule {
+    fn schedule(&mut self, sound: AlertSound) -> bool {
+        let now = Instant::now();
+        let previous = match sound {
+            AlertSound::Done => &mut self.last_done_alert,
+            AlertSound::Request => &mut self.last_request_alert,
+        };
+        if previous.is_some_and(|instant| now.duration_since(instant) < SOUND_DEDUP_WINDOW) {
+            return false;
+        }
+        *previous = Some(now);
+        true
+    }
 }
 
 impl DaemonState {
@@ -23,6 +49,7 @@ impl DaemonState {
             power_policy: win::PowerPolicy::new(),
             lid_state: LidState::Unknown,
             pending_sleep: None,
+            alerts: AlertSchedule::default(),
         }
     }
 
@@ -49,6 +76,10 @@ impl DaemonState {
                 .is_some_and(|token| !token.load(Ordering::Acquire)),
         }
     }
+
+    fn schedule_alert(&mut self, sound: AlertSound) -> bool {
+        self.alerts.schedule(sound)
+    }
 }
 
 pub fn run() -> io::Result<()> {
@@ -58,14 +89,15 @@ pub fn run() -> io::Result<()> {
     let state = Arc::new(Mutex::new(DaemonState::new()));
     let watcher_state = Arc::clone(&state);
     let _watcher = win::LidWatcher::start(move |next| {
-        if let Ok(mut state) = watcher_state.lock() {
-            if state.lid_state != next {
-                state.lid_state = next;
-                logging::write(format!("Lid state changed to {next:?}."));
-                if next == LidState::Open {
-                    state.cancel_pending_sleep();
-                }
+        if let Ok(mut state) = watcher_state.lock()
+            && state.lid_state != next
+        {
+            state.lid_state = next;
+            logging::write(format!("Lid state changed to {next:?}."));
+            if next == LidState::Open {
+                state.cancel_pending_sleep();
             }
+            publish_status(&state.snapshot(true, "Lid state changed."));
         }
     })?;
     let pipe = win::PipeServer::new(&paths::pipe_name());
@@ -73,6 +105,9 @@ pub fn run() -> io::Result<()> {
         "Guardian daemon started on pipe {}.",
         paths::pipe_name()
     ));
+    if let Ok(state) = state.lock() {
+        publish_status(&state.snapshot(true, "Guardian daemon ready."));
+    }
 
     loop {
         let can_exit = state
@@ -106,6 +141,7 @@ pub fn run() -> io::Result<()> {
         if let Err(cause) = state.power_policy.release() {
             logging::write(format!("Power-policy cleanup failed: {cause}"));
         }
+        publish_status(&state.snapshot(true, "Guardian daemon stopped."));
     }
     logging::write("Guardian daemon stopped.");
     Ok(())
@@ -132,11 +168,12 @@ fn handle_connection(
 fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> GuardResponse {
     let action = request.action.to_ascii_lowercase();
     let mut sleep_schedule = None;
+    let mut sound_schedule = None;
     let response = {
         let Ok(mut state) = shared.lock() else {
             return failure("guardian state lock was poisoned");
         };
-        match action.as_str() {
+        let response = match action.as_str() {
             "acquire" => acquire(&mut state, &request),
             "release" => {
                 let key = turn_key(&request);
@@ -186,14 +223,31 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                 }
             }
             "status" => state.snapshot(true, "Status read."),
+            "sound-done" => state.snapshot(true, "Completion alert scheduled."),
+            "sound-request" => state.snapshot(true, "Needs-response alert scheduled."),
             _ => state.snapshot(
                 false,
                 format!("Unknown guardian action '{}'.", request.action),
             ),
+        };
+        if response.ok {
+            let requested_sound = match action.as_str() {
+                "release" | "sound-done" => Some(AlertSound::Done),
+                "sound-request" => Some(AlertSound::Request),
+                _ => None,
+            };
+            if let Some(sound) = requested_sound.filter(|sound| state.schedule_alert(*sound)) {
+                sound_schedule = Some(sound);
+            }
         }
+        publish_status(&response);
+        response
     };
     if let Some((token, delay)) = sleep_schedule {
         spawn_sleep(shared, token, delay);
+    }
+    if let Some(sound) = sound_schedule {
+        sound::start(sound);
     }
     response
 }
@@ -214,11 +268,12 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         ));
     }
     let inserted = state.active_turns.insert(key.clone());
-    if inserted && state.active_turns.len() == 1 {
-        if let Err(cause) = state.power_policy.acquire() {
-            state.active_turns.remove(&key);
-            return state.snapshot(false, cause.to_string());
-        }
+    if inserted
+        && state.active_turns.len() == 1
+        && let Err(cause) = state.power_policy.acquire()
+    {
+        state.active_turns.remove(&key);
+        return state.snapshot(false, cause.to_string());
     }
     logging::write(format!(
         "Turn acquired: {key}. Active turns: {}.",
@@ -262,6 +317,7 @@ fn spawn_sleep(shared: &Arc<Mutex<DaemonState>>, token: Arc<AtomicBool>, delay: 
                 && state.lid_state == LidState::Closed
             {
                 state.pending_sleep = None;
+                publish_status(&state.snapshot(true, "Requesting Windows sleep."));
                 true
             } else {
                 false
@@ -273,6 +329,18 @@ fn spawn_sleep(shared: &Arc<Mutex<DaemonState>>, token: Arc<AtomicBool>, delay: 
             logging::write("Windows rejected the sleep request.");
         }
     });
+}
+
+fn publish_status(response: &GuardResponse) {
+    let Ok(_gate) = STATUS_GATE.get_or_init(|| Mutex::new(())).lock() else {
+        return;
+    };
+    let Ok(bytes) = serde_json::to_vec(response) else {
+        return;
+    };
+    if let Err(cause) = win::atomic_write(&paths::status_file(), &bytes) {
+        logging::write(format!("Could not publish guardian status: {cause}"));
+    }
 }
 
 fn turn_key(request: &GuardRequest) -> String {
@@ -327,5 +395,13 @@ mod tests {
             ..GuardRequest::default()
         };
         assert_eq!(turn_key(&request), "session:turn");
+    }
+
+    #[test]
+    fn duplicate_alerts_are_suppressed_without_suppressing_other_alerts() {
+        let mut alerts = AlertSchedule::default();
+        assert!(alerts.schedule(AlertSound::Request));
+        assert!(!alerts.schedule(AlertSound::Request));
+        assert!(alerts.schedule(AlertSound::Done));
     }
 }

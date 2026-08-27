@@ -23,6 +23,14 @@ pub fn log_file() -> PathBuf {
     data_directory().join("guard.log")
 }
 
+pub fn archived_log_file() -> PathBuf {
+    data_directory().join("guard.log.1")
+}
+
+pub fn status_file() -> PathBuf {
+    data_directory().join("status.json")
+}
+
 pub fn pipe_name() -> String {
     format!(r"\\.\pipe\CodexLidGuard.{}", session_key())
 }

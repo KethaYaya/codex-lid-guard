@@ -5,6 +5,7 @@ use std::ffi::{OsStr, c_void};
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
@@ -387,10 +388,7 @@ fn wide_string(value: &[u16]) -> String {
 }
 
 fn error(operation: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Other,
-        format!("{operation}: {}", io::Error::last_os_error()),
-    )
+    io::Error::other(format!("{operation}: {}", io::Error::last_os_error()))
 }
 
 pub fn local_timestamp() -> String {
@@ -747,9 +745,13 @@ unsafe fn run_overlapped(
     }
 }
 
-pub fn connect_pipe(name: &str, timeout: Duration) -> io::Result<PipeConnection> {
+pub fn connect_pipe(
+    name: &str,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+) -> io::Result<PipeConnection> {
     let name = wide(name);
-    let milliseconds = timeout.as_millis().min(u32::MAX as u128) as u32;
+    let milliseconds = connect_timeout.as_millis().min(u32::MAX as u128) as u32;
     unsafe {
         if WaitNamedPipeW(name.as_ptr(), milliseconds) == 0 {
             return Err(error("WaitNamedPipeW failed"));
@@ -770,7 +772,7 @@ pub fn connect_pipe(name: &str, timeout: Duration) -> io::Result<PipeConnection>
             handle: OwnedHandle(handle),
             overlapped: true,
             disconnect_on_drop: false,
-            io_timeout: Some(timeout),
+            io_timeout: Some(io_timeout),
         })
     }
 }
@@ -891,10 +893,7 @@ fn active_scheme() -> io::Result<Guid> {
             "read the active power scheme",
         )?;
         if pointer.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "PowerGetActiveScheme returned no scheme",
-            ));
+            return Err(io::Error::other("PowerGetActiveScheme returned no scheme"));
         }
         let value = *pointer;
         LocalFree(pointer.cast());
@@ -996,11 +995,16 @@ fn set_execution_state(guarding: bool) -> io::Result<()> {
     }
 }
 
-fn save_recovery(state: &SavedPowerState) -> io::Result<()> {
-    std::fs::create_dir_all(paths::data_directory())?;
-    let destination = paths::recovery_file();
-    let temporary = destination.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+pub fn atomic_write(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let extension = destination
+        .extension()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let temporary = destination.with_extension(format!("{extension}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, bytes)?;
     let source_wide = wide(temporary.as_os_str());
     let destination_wide = wide(destination.as_os_str());
     if unsafe {
@@ -1011,9 +1015,15 @@ fn save_recovery(state: &SavedPowerState) -> io::Result<()> {
         )
     } == 0
     {
-        return Err(error("could not atomically save the power recovery record"));
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error("could not atomically replace file"));
     }
     Ok(())
+}
+
+fn save_recovery(state: &SavedPowerState) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(state)?;
+    atomic_write(&paths::recovery_file(), &bytes)
 }
 
 fn load_recovery() -> Option<SavedPowerState> {
@@ -1071,7 +1081,7 @@ impl LidWatcher {
             Ok(Err(message)) => {
                 let _ = thread.join();
                 clear_lid_callback();
-                Err(io::Error::new(io::ErrorKind::Other, message))
+                Err(io::Error::other(message))
             }
             Err(_) => {
                 clear_lid_callback();
@@ -1099,10 +1109,10 @@ impl Drop for LidWatcher {
 }
 
 fn clear_lid_callback() {
-    if let Some(gate) = LID_CALLBACK.get() {
-        if let Ok(mut slot) = gate.lock() {
-            *slot = None;
-        }
+    if let Some(gate) = LID_CALLBACK.get()
+        && let Ok(mut slot) = gate.lock()
+    {
+        *slot = None;
     }
 }
 
@@ -1267,7 +1277,21 @@ mod tests {
     }
 
     #[test]
-    fn pipe_reads_time_out_if_a_connected_daemon_stalls() {
+    fn atomic_write_replaces_an_existing_snapshot() {
+        let directory = std::env::temp_dir().join(format!(
+            "codex-lid-guard-atomic-write-test-{}",
+            std::process::id()
+        ));
+        let destination = directory.join("status.json");
+        atomic_write(&destination, b"first").unwrap();
+        atomic_write(&destination, b"second").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"second");
+        std::fs::remove_file(destination).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn pipe_response_timeout_is_independent_from_the_connection_timeout() {
         let pipe_name = format!(r"\\.\pipe\CodexLidGuard.TimeoutTest.{}", std::process::id());
         let server_name = pipe_name.clone();
         let server = std::thread::spawn(move || {
@@ -1282,7 +1306,11 @@ mod tests {
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         let connection = loop {
-            match connect_pipe(&pipe_name, Duration::from_millis(50)) {
+            match connect_pipe(
+                &pipe_name,
+                Duration::from_millis(10),
+                Duration::from_millis(100),
+            ) {
                 Ok(connection) => break connection,
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -1294,6 +1322,7 @@ mod tests {
         let started = std::time::Instant::now();
         let error = connection.read_line().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(75));
         assert!(started.elapsed() < Duration::from_secs(1));
         server.join().unwrap();
     }

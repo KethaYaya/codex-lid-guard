@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   allGuardTrustHashesChanged,
-  parseGuardTrustHashes
+  parseGuardTrustHashes,
+  setupStateMatchesRevision
 } from "../src/trustVerifier";
 
 const hooksPath = "C:\\Users\\Test\\.codex\\hooks.json";
@@ -53,4 +54,12 @@ test("requires every Lid Guard hash to change before setup is complete", () => {
     user_prompt_submit: "old-prompt",
     stop: "new-stop"
   }), false);
+});
+
+test("preserves approval when only the extension version changes", () => {
+  const revision = "herdr-alert-sounds-5";
+  assert.equal(setupStateMatchesRevision(revision, revision), true);
+  assert.equal(setupStateMatchesRevision(`0.1.4:${revision}`, revision), true);
+  assert.equal(setupStateMatchesRevision("0.1.4:older-hooks", revision), false);
+  assert.equal(setupStateMatchesRevision(undefined, revision), false);
 });

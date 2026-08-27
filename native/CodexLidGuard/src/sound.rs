@@ -1,52 +1,27 @@
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
-
-use std::os::windows::process::CommandExt;
 
 use crate::logging;
 use crate::model::GuardSettings;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const SOUND_PATH_VARIABLE: &str = "CODEX_LID_GUARD_SOUND_PATH";
-const PLAYER_SCRIPT: &str = r#"
-$ErrorActionPreference = 'Stop'
-$Path = [Environment]::GetEnvironmentVariable('CODEX_LID_GUARD_SOUND_PATH', 'Process')
-if ([string]::IsNullOrWhiteSpace($Path)) { throw 'CODEX_LID_GUARD_SOUND_PATH is not set' }
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-$resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
-$script:player = [System.Windows.Media.MediaPlayer]::new()
-$script:frame = [System.Windows.Threading.DispatcherFrame]::new()
-$script:timer = [System.Windows.Threading.DispatcherTimer]::new()
-$script:timer.Interval = [TimeSpan]::FromSeconds(15)
-$script:failed = $null
-$script:timedOut = $false
-$script:player.add_MediaOpened({ $script:player.Play() })
-$script:player.add_MediaEnded({ $script:frame.Continue = $false })
-$script:player.add_MediaFailed({
-    param($sender, $eventArgs)
-    $script:failed = $eventArgs.ErrorException
-    $script:frame.Continue = $false
-})
-$script:timer.add_Tick({
-    $script:timedOut = $true
-    $script:frame.Continue = $false
-})
-try {
-    $script:player.Open([Uri]::new($resolved))
-    $script:timer.Start()
-    [System.Windows.Threading.Dispatcher]::PushFrame($script:frame)
-} finally {
-    $script:timer.Stop()
-    $script:player.Close()
-}
-if ($script:failed) { throw "sound media failed: $($script:failed.Message)" }
-if ($script:timedOut) { throw 'sound playback timed out' }
-"#;
+const MCI_ERROR_BUFFER_LENGTH: usize = 256;
+static SOUND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, Debug)]
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn mciSendStringW(
+        command: *const u16,
+        result: *mut u16,
+        result_length: u32,
+        callback: isize,
+    ) -> u32;
+    fn mciGetErrorStringW(error: u32, text: *mut u16, text_length: u32) -> i32;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AlertSound {
     Done,
     Request,
@@ -77,17 +52,11 @@ impl AlertSound {
 }
 
 pub fn start(sound: AlertSound) {
-    let Ok(executable) = std::env::current_exe() else {
-        logging::write("Could not locate the alert sound player executable.");
-        return;
-    };
-    if let Err(cause) = Command::new(executable)
-        .args(["play-sound", sound.label()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
+    if let Err(cause) = thread::Builder::new()
+        .name(format!("Codex Lid Guard {} alert", sound.label()))
+        .spawn(move || {
+            let _ = play_and_wait(sound);
+        })
     {
         logging::write(format!("Could not start the alert sound player: {cause}"));
     }
@@ -102,60 +71,32 @@ pub fn play_and_wait(sound: AlertSound) -> bool {
         logging::write(format!("Alert sound is missing: {}", sound_path.display()));
         return false;
     }
-    let child = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            PLAYER_SCRIPT,
-        ])
-        .env(SOUND_PATH_VARIABLE, &sound_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-    let Ok(mut child) = child else {
+    let sequence = SOUND_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let alias = format!("CodexLidGuardSound{}_{}", std::process::id(), sequence);
+    let open = format!(
+        "open \"{}\" type mpegvideo alias {alias}",
+        sound_path.to_string_lossy()
+    );
+    if let Err(cause) = mci(&open) {
         logging::write(format!(
-            "Could not play {} alert sound: Windows did not start PowerShell.",
+            "Could not open {} alert sound: {cause}.",
             sound.label()
         ));
         return false;
-    };
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
-                logging::write(format!("Played {} alert sound.", sound.label()));
-                return true;
-            }
-            Ok(Some(status)) => {
-                logging::write(format!(
-                    "Could not play {} alert sound: PowerShell exited with {status}.",
-                    sound.label()
-                ));
-                return false;
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                logging::write(format!(
-                    "Could not play {} alert sound: playback timed out.",
-                    sound.label()
-                ));
-                return false;
-            }
-            Err(cause) => {
-                logging::write(format!(
-                    "Could not play {} alert sound: {cause}.",
-                    sound.label()
-                ));
-                return false;
-            }
+    }
+    let played = mci(&format!("play {alias} wait"));
+    let _ = mci(&format!("close {alias}"));
+    match played {
+        Ok(()) => {
+            logging::write(format!("Played {} alert sound.", sound.label()));
+            true
+        }
+        Err(cause) => {
+            logging::write(format!(
+                "Could not play {} alert sound: {cause}.",
+                sound.label()
+            ));
+            false
         }
     }
 }
@@ -167,4 +108,25 @@ fn sound_path(sound: AlertSound) -> PathBuf {
         .unwrap_or_default()
         .join("sounds")
         .join(sound.file_name())
+}
+
+fn mci(command: &str) -> Result<(), String> {
+    let command: Vec<u16> = OsStr::new(command).encode_wide().chain(Some(0)).collect();
+    let error = unsafe { mciSendStringW(command.as_ptr(), std::ptr::null_mut(), 0, 0) };
+    if error == 0 {
+        return Ok(());
+    }
+    let mut text = [0u16; MCI_ERROR_BUFFER_LENGTH];
+    let described =
+        unsafe { mciGetErrorStringW(error, text.as_mut_ptr(), MCI_ERROR_BUFFER_LENGTH as u32) }
+            != 0;
+    if described {
+        let length = text
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(text.len());
+        Err(String::from_utf16_lossy(&text[..length]))
+    } else {
+        Err(format!("Windows multimedia error {error}"))
+    }
 }

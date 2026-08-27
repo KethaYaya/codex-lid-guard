@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
@@ -135,5 +135,14 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("sessionId"));
         assert!(json.contains("turnId"));
+
+        let response = serde_json::to_string(&GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            active_turns: 2,
+            ..GuardResponse::default()
+        })
+        .unwrap();
+        assert!(response.contains("activeTurns"));
+        assert!(response.contains("protocolVersion"));
     }
 }

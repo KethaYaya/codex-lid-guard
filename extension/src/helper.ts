@@ -41,3 +41,8 @@ export async function writeHelperSettings(
   };
   await fs.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
+
+export async function readHelperStatus(statusPath: string): Promise<GuardStatus> {
+  const raw = await fs.readFile(statusPath, "utf8");
+  return JSON.parse(raw) as GuardStatus;
+}

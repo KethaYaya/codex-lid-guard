@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5
+
+- Replaced PowerShell/WPF alert playback with native Windows multimedia playback scheduled inside the guardian daemon.
+- Added atomic, event-driven status snapshots so the status bar no longer rereads the growing log or launches a helper every minute when file watching works.
+- Reduced cold daemon startup backoff without shortening the response timeout, preventing duplicate first-acquire retries, and suppressed duplicate alerts fired within 750 milliseconds.
+- Made same-protocol daemons compatible across VS Code extension install paths, preventing update and development copies from repeatedly replacing one another.
+- Kept the shared daemon outside short-lived hook jobs and renewed its lease every four minutes while VS Code is open, preserving concurrent-session protection without one-minute polling.
+- Kept the guardian log open between writes and added 1 MB log rotation.
+- Based setup bookkeeping on the hook-definition revision, avoiding redundant prompts when hook commands are unchanged.
+
 ## 0.1.4
 
 - Replaced the 35 MB self-contained .NET helper with a sub-megabyte native Rust helper.

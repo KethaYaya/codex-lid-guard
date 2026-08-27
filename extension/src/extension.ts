@@ -10,14 +10,16 @@ import {
   withoutGuardHooks,
   writeHooksDocument
 } from "./hookInstaller";
-import { GuardStatus, runHelper, writeHelperSettings } from "./helper";
+import { GuardStatus, readHelperStatus, runHelper, writeHelperSettings } from "./helper";
 import {
   allGuardTrustHashesChanged,
   readGuardTrustHashes,
+  setupStateMatchesRevision,
   type GuardTrustHashes
 } from "./trustVerifier";
 
 let refreshTimer: NodeJS.Timeout | undefined;
+let daemonLeaseTimer: NodeJS.Timeout | undefined;
 let statusWatcher: FSWatcher | undefined;
 let statusRefreshDebounce: NodeJS.Timeout | undefined;
 let updatingEnabledSetting = false;
@@ -64,24 +66,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   await syncSettings();
   startStatusWatcher(context, statusBar);
+  context.subscriptions.push({
+    dispose: () => {
+      stopStatusWatcher();
+      stopFallbackRefresh();
+      stopDaemonLease();
+    }
+  });
   if (configuration().get<boolean>("enabled", true)) {
     await enable(context, statusBar, false);
   } else {
     setDisabled(statusBar);
   }
+  startDaemonLease(context, statusBar);
 
-  refreshTimer = setInterval(() => {
-    if (configuration().get<boolean>("enabled", true)) {
-      void refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error)));
-    }
-  }, 60_000);
-  context.subscriptions.push({ dispose: () => refreshTimer && clearInterval(refreshTimer) });
 }
 
 export function deactivate(): void {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-  }
+  stopDaemonLease();
+  stopFallbackRefresh();
   stopStatusWatcher();
   // Do not stop the native guardian here: VS Code may close while Codex is still
   // finishing a local turn, and that is exactly when protection matters most.
@@ -107,8 +110,11 @@ async function enable(
     await setEnabledSetting(true);
     await refreshStatus(context, statusBar);
 
-    const setupRequired = hooksChanged
-      || context.globalState.get<string>(setupVersionStateKey) !== setupStateVersion(context);
+    const storedSetupVersion = context.globalState.get<string>(setupVersionStateKey);
+    const setupRequired = hooksChanged || !setupStateMatchesRevision(storedSetupVersion, hookSetupRevision);
+    if (!setupRequired && storedSetupVersion !== setupStateVersion()) {
+      await context.globalState.update(setupVersionStateKey, setupStateVersion());
+    }
     if (setupRequired) {
       void promptToFinishSetup(context);
     } else if (notify) {
@@ -153,7 +159,7 @@ async function promptToFinishSetup(context: vscode.ExtensionContext): Promise<vo
       return;
     }
 
-    const setupRevision = setupStateVersion(context);
+    const setupRevision = setupStateVersion();
     let storedBaseline = context.globalState.get<StoredTrustBaseline>(setupTrustBaselineStateKey);
     if (!storedBaseline || storedBaseline.revision !== setupRevision) {
       storedBaseline = {
@@ -184,7 +190,7 @@ async function promptToFinishSetup(context: vscode.ExtensionContext): Promise<vo
 
       if (await waitForGuardTrustChange(trustBefore)) {
         terminal.dispose();
-        await context.globalState.update(setupVersionStateKey, setupStateVersion(context));
+        await context.globalState.update(setupVersionStateKey, setupStateVersion());
         await context.globalState.update(setupTrustBaselineStateKey, undefined);
         await vscode.commands.executeCommand("workbench.action.reloadWindow");
         return;
@@ -309,14 +315,12 @@ async function refreshStatus(
 
 function startStatusWatcher(context: vscode.ExtensionContext, statusBar: vscode.StatusBarItem): void {
   stopStatusWatcher();
+  stopFallbackRefresh();
   try {
     statusWatcher = watch(path.dirname(helperSettingsPath()), { persistent: false }, (_event, filename) => {
       const changedFile = filename?.toString().toLowerCase();
-      if (changedFile && changedFile !== "guard.log" && changedFile !== "power-recovery.json") {
+      if (changedFile && changedFile !== "status.json") {
         return;
-      }
-      if (!changedFile || changedFile === "guard.log") {
-        void reflectConfirmedAcquire(statusBar);
       }
       if (statusRefreshDebounce) {
         clearTimeout(statusRefreshDebounce);
@@ -324,37 +328,53 @@ function startStatusWatcher(context: vscode.ExtensionContext, statusBar: vscode.
       statusRefreshDebounce = setTimeout(() => {
         statusRefreshDebounce = undefined;
         if (configuration().get<boolean>("enabled", true)) {
-          void refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error)));
+          void readHelperStatus(helperStatusPath())
+            .then((status) => updateStatusBar(statusBar, status))
+            .catch(() => refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error))));
         }
-      }, 100);
+      }, 25);
     });
     statusWatcher.on("error", () => {
       stopStatusWatcher();
+      startFallbackRefresh(context, statusBar);
     });
-    context.subscriptions.push({ dispose: stopStatusWatcher });
   } catch {
-    // The periodic refresh remains active as a fallback if file watching is unavailable.
+    startFallbackRefresh(context, statusBar);
   }
 }
 
-async function reflectConfirmedAcquire(statusBar: vscode.StatusBarItem): Promise<void> {
-  try {
-    const log = await fs.readFile(helperLogPath(), "utf8");
-    const latestLine = log.trimEnd().split(/\r?\n/).at(-1) || "";
-    const countMatch = latestLine.match(/Turn acquired: .* Active turns: (\d+)\.$/);
-    const activeTurns = countMatch ? Number(countMatch[1]) : latestLine.includes("Guard acquired for power scheme") ? 1 : 0;
-    if (activeTurns > 0) {
-      updateStatusBar(statusBar, {
-        ok: true,
-        message: "Guardian acquisition confirmed.",
-        activeTurns,
-        isGuarding: true,
-        lidState: "unknown",
-        sleepPending: false
-      });
+function startFallbackRefresh(context: vscode.ExtensionContext, statusBar: vscode.StatusBarItem): void {
+  if (refreshTimer) {
+    return;
+  }
+  refreshTimer = setInterval(() => {
+    if (configuration().get<boolean>("enabled", true)) {
+      void refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error)));
     }
-  } catch {
-    // The normal status query immediately below remains the source of truth.
+  }, 60_000);
+}
+
+function stopFallbackRefresh(): void {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = undefined;
+  }
+}
+
+function startDaemonLease(context: vscode.ExtensionContext, statusBar: vscode.StatusBarItem): void {
+  stopDaemonLease();
+  daemonLeaseTimer = setInterval(() => {
+    if (configuration().get<boolean>("enabled", true)) {
+      void refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error)));
+    }
+  }, 4 * 60_000);
+  daemonLeaseTimer.unref();
+}
+
+function stopDaemonLease(): void {
+  if (daemonLeaseTimer) {
+    clearInterval(daemonLeaseTimer);
+    daemonLeaseTimer = undefined;
   }
 }
 
@@ -429,12 +449,8 @@ function helperPath(context: vscode.ExtensionContext): string {
   return path.join(context.extensionPath, "bin", "win-x64", "CodexLidGuard.exe");
 }
 
-function extensionVersion(context: vscode.ExtensionContext): string {
-  return String(context.extension.packageJSON.version);
-}
-
-function setupStateVersion(context: vscode.ExtensionContext): string {
-  return `${extensionVersion(context)}:${hookSetupRevision}`;
+function setupStateVersion(): string {
+  return hookSetupRevision;
 }
 
 function codexCliPath(context: vscode.ExtensionContext): string {
@@ -454,12 +470,12 @@ function helperSettingsPath(): string {
   return path.join(localAppData, "CodexLidGuard", "settings.json");
 }
 
-function helperLogPath(): string {
+function helperStatusPath(): string {
   const localAppData = process.env.LOCALAPPDATA;
   if (!localAppData) {
     throw new Error("LOCALAPPDATA is not available.");
   }
-  return path.join(localAppData, "CodexLidGuard", "guard.log");
+  return path.join(localAppData, "CodexLidGuard", "status.json");
 }
 
 function codexHooksPath(): string {

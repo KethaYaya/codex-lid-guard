@@ -42,6 +42,10 @@ export function allGuardTrustHashesChanged(
   return guardTrustEvents.every((event) => Boolean(after[event]) && after[event] !== before[event]);
 }
 
+export function setupStateMatchesRevision(value: string | undefined, revision: string): boolean {
+  return value === revision || value?.endsWith(`:${revision}`) === true;
+}
+
 export async function readGuardTrustHashes(configPath: string, hooksPath: string): Promise<GuardTrustHashes> {
   try {
     return parseGuardTrustHashes(await fs.readFile(configPath, "utf8"), hooksPath);

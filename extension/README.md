@@ -16,7 +16,9 @@ It also bundles Herdr's two original alerts: `done` plays when a Codex task comp
 
 Use the status-bar shield or the `Codex Lid Guard` commands in the Command Palette to inspect, disable, or immediately restore the power settings.
 
-The shield listens for the native guardian's confirmed-acquire event and normally updates in well under a second. A diagnostic status query follows in the background, and a lightweight 60-second periodic refresh remains as a fallback.
+The shield listens for small atomic status snapshots written only when guardian state changes, so it normally updates in well under a second without launching diagnostic processes. VS Code renews the shared daemon lease once every four minutes so concurrent sessions keep one persistent guardian; a 60-second refresh runs only if Windows file watching is unavailable.
+
+Alerts use native Windows multimedia playback inside the guardian. No PowerShell or WPF process is started for routine sound playback.
 
 After installation or an update, the extension opens a persistent setup flow and launches the interactive Codex CLI in a terminal. Codex displays its supported **Hooks need review** screen automatically. The terminal UI is keyboard-driven: press `T` to trust the five Lid Guard hooks, then use the setup notification to close the terminal and reload VS Code. Clicking the terminal text does not activate it. If you dismiss the flow, the setup prompt returns on the next activation. You can also run **Codex Lid Guard: Finish Codex Hook Setup** from the Command Palette.
 

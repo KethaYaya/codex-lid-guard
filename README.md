@@ -25,7 +25,7 @@ The extension enables itself on first activation and merges its hook groups into
 
 The status-bar shield shows whether the guardian is idle, protecting active turns, or waiting to sleep. These commands are available from the Command Palette:
 
-The shield listens for the guardian's confirmed-acquire event and normally updates in well under a second. A lightweight 60-second periodic refresh remains as a fallback if Windows file watching is unavailable.
+The shield listens for atomic guardian status snapshots and normally updates in well under a second without launching diagnostic processes. VS Code renews the shared daemon lease once every four minutes, while a 60-second refresh runs only if Windows file watching is unavailable. Alert sounds use native Windows multimedia playback rather than PowerShell or WPF.
 
 - `Codex Lid Guard: Enable`
 - `Codex Lid Guard: Disable and Restore Power Settings`
@@ -58,6 +58,6 @@ cargo test --manifest-path .\native\CodexLidGuard\Cargo.toml
 cargo build --release --manifest-path .\native\CodexLidGuard\Cargo.toml
 ```
 
-The native executable supports `status`, `restore`, `sound done`, and `sound request` for diagnostics. Logs are written to `%LOCALAPPDATA%\CodexLidGuard\guard.log`.
+The native executable supports `status`, `restore`, `sound done`, and `sound request` for diagnostics. Logs are written to `%LOCALAPPDATA%\CodexLidGuard\guard.log`, rotate at 1 MB, and the latest event-driven state is stored in `%LOCALAPPDATA%\CodexLidGuard\status.json`.
 
 The two bundled alert files come from Herdr 0.8.2 under Apache-2.0. See `extension/THIRD_PARTY_NOTICES.md` and the license distributed beside the packaged sounds.

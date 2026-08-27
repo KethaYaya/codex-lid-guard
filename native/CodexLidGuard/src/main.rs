@@ -68,11 +68,6 @@ fn run_hook(action: &str) {
             HookPayload::default()
         }
     };
-    if action.eq_ignore_ascii_case("sound-request") {
-        sound::start(AlertSound::Request);
-        println!("{}", r#"{"continue":true}"#);
-        return;
-    }
     let response = client::send(GuardRequest {
         action: action.to_string(),
         session_id: payload.session_id,
@@ -84,10 +79,8 @@ fn run_hook(action: &str) {
             "Hook '{action}' could not update the guardian: {}",
             response.message
         ));
-    } else if action.eq_ignore_ascii_case("release") {
-        sound::start(AlertSound::Done);
     }
-    println!("{}", r#"{"continue":true}"#);
+    println!("{{\"continue\":true}}");
 }
 
 fn run_sound(value: &str, write_response: bool) -> Result<(), Box<dyn std::error::Error>> {
