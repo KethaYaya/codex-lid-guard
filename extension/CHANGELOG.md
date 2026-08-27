@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10
+
+- Detected view-only Codex chat switches from the local extension's session-visibility events, so background-chat alerts no longer require a prompt in the newly selected chat.
+- Kept the check event-driven and content-free: Lid Guard reads only the latest active conversation ID when an alert is about to play.
+
 ## 0.1.9
 
 - Tracked the most recently messaged Codex chat in each VS Code window.

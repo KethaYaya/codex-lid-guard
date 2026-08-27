@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::logging;
 use crate::model::{GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION};
 use crate::sound::{self, AlertSound};
-use crate::{paths, win};
+use crate::{codex_log, paths, win};
 
 const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
 static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
@@ -372,6 +372,19 @@ fn origin_session_is_current(
     else {
         return true;
     };
+    match codex_log::view_state_for_session(session) {
+        Some(codex_log::ViewState::Active(active_session)) => {
+            if active_session != session {
+                logging::write("The alert belongs to a different chat than the active Codex view.");
+            }
+            return active_session == session;
+        }
+        Some(codex_log::ViewState::Inactive) => {
+            logging::write("The originating Codex chat is no longer visible.");
+            return false;
+        }
+        None => {}
+    }
     latest_session_matches(
         state
             .latest_session_by_window

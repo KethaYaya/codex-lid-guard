@@ -9,9 +9,9 @@ if you use  codex on VSCode, you can make codex work for you while the laptop li
 3. `Stop` releases that turn. Multiple simultaneous Codex turns are reference-counted, so protection stays active until the final one stops.
 4. The prior AC and battery values are restored exactly. If Windows reports that the lid is still closed, the guardian waits for the configured grace period (10 seconds by default) and requests sleep. A new Codex turn or an opened lid cancels that pending sleep.
 5. `SessionEnd` provides cleanup if a conversation closes without a normal stop event.
-6. Herdr's original `done` alert plays when a task stops. Its `request` alert plays for permission approvals and structured `request_user_input` prompts. By default, automatic alerts play when the originating VS Code window is minimized or covered, another VS Code window is focused, or another chat in that window has since sent a message. The current chat stays quiet. This focus filter and all alert sounds can be configured independently in VS Code settings.
+6. Herdr's original `done` alert plays when a task stops. Its `request` alert plays for permission approvals and structured `request_user_input` prompts. By default, automatic alerts play when the originating VS Code window is minimized or covered, another VS Code window is focused, or another chat is selected in that window. The current chat stays quiet. This focus filter and all alert sounds can be configured independently in VS Code settings.
 
-Codex's supported hooks do not emit an event for view-only sidebar navigation. If you switch to an idle chat without sending a message, Lid Guard cannot distinguish it from the original chat until that chat submits a prompt.
+For same-window chat detection, Lid Guard reads only the latest session-visibility event from the local Codex extension log when an alert is about to play. It does not poll the log or read prompt and response content.
 
 This uses [documented Codex lifecycle hooks](https://learn.chatgpt.com/docs/hooks). It does not scrape the Codex UI or guess based on background processes.
 

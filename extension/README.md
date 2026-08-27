@@ -12,9 +12,9 @@ The extension connects to Codex's official `UserPromptSubmit`, `PreToolUse`, `Pe
 - restores the saved settings after the final turn; and
 - sleeps after a short grace period if the lid remains closed.
 
-It also bundles Herdr's two original alerts: `done` plays when a Codex task completes, and `request` plays for permission approvals and structured `request_user_input` prompts. Automatic alerts play when the originating VS Code window is minimized or no longer in the foreground, or when another chat in the same window has since sent a message. The current chat stays quiet. Use **Codex Lid Guard: Test Alert Sounds** to hear both at any time. The `codexLidGuard.alertSoundsOnlyWhenUnfocused` setting controls the focus filter, while `codexLidGuard.alertSounds` disables sounds without disabling lid protection.
+It also bundles Herdr's two original alerts: `done` plays when a Codex task completes, and `request` plays for permission approvals and structured `request_user_input` prompts. Automatic alerts play when the originating VS Code window is minimized or no longer in the foreground, or when another chat is selected in the same window. The current chat stays quiet. Use **Codex Lid Guard: Test Alert Sounds** to hear both at any time. The `codexLidGuard.alertSoundsOnlyWhenUnfocused` setting controls the focus filter, while `codexLidGuard.alertSounds` disables sounds without disabling lid protection.
 
-Codex's supported hooks do not emit an event for view-only sidebar navigation. If you switch to an idle chat without sending a message, Lid Guard cannot distinguish it from the original chat until that chat submits a prompt.
+For same-window chat detection, Lid Guard reads only the latest session-visibility event from the local Codex extension log when an alert is about to play. It does not poll the log or read prompt and response content.
 
 Use the status-bar shield or the `Codex Lid Guard` commands in the Command Palette to inspect, disable, or immediately restore the power settings.
 

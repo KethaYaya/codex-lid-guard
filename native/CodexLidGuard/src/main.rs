@@ -4,6 +4,7 @@
 compile_error!("Codex Lid Guard supports Windows only.");
 
 mod client;
+mod codex_log;
 mod daemon;
 mod logging;
 mod model;
