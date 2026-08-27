@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6
+
+- Avoided status-file rewrites for read-only requests and unchanged snapshots, reducing background disk and file-watcher activity.
+- Engaged Windows' immediate stay-awake state before slower lid-policy work and skipped AC/DC policy writes that were already set to do nothing.
+- Recorded exactly which lid settings the guard changed so task completion restores only the values that need restoration.
+- Added an idle-only version handoff so an updated helper replaces an older daemon without interrupting active Codex turns.
+
 ## 0.1.5
 
 - Replaced PowerShell/WPF alert playback with native Windows multimedia playback scheduled inside the guardian daemon.

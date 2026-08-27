@@ -785,8 +785,28 @@ struct SavedPowerState {
     ac_lid_action: u32,
     #[serde(rename = "DcLidAction", alias = "dcLidAction")]
     dc_lid_action: u32,
+    #[serde(rename = "ChangedAcLidAction", alias = "changedAcLidAction", default)]
+    changed_ac_lid_action: Option<bool>,
+    #[serde(rename = "ChangedDcLidAction", alias = "changedDcLidAction", default)]
+    changed_dc_lid_action: Option<bool>,
     #[serde(rename = "CapturedAt", alias = "capturedAt")]
     captured_at: String,
+}
+
+impl SavedPowerState {
+    fn changed_ac_lid_action(&self) -> bool {
+        self.changed_ac_lid_action
+            .unwrap_or(self.ac_lid_action != 0)
+    }
+
+    fn changed_dc_lid_action(&self) -> bool {
+        self.changed_dc_lid_action
+            .unwrap_or(self.dc_lid_action != 0)
+    }
+
+    fn changed_lid_policy(&self) -> bool {
+        self.changed_ac_lid_action() || self.changed_dc_lid_action()
+    }
 }
 
 pub struct PowerPolicy {
@@ -812,34 +832,51 @@ impl PowerPolicy {
         if self.guarding {
             return Ok(());
         }
-        let scheme = active_scheme()?;
-        let ac = power_read(true, &scheme)?;
-        let dc = power_read(false, &scheme)?;
-        let saved = SavedPowerState {
-            scheme: scheme.to_string(),
-            ac_lid_action: ac,
-            dc_lid_action: dc,
-            captured_at: local_timestamp(),
-        };
-        save_recovery(&saved)?;
-        self.saved = Some(saved.clone());
+        set_execution_state(true)?;
         let result = (|| {
-            power_write(true, &scheme, 0)?;
-            power_write(false, &scheme, 0)?;
-            power_activate(&scheme)?;
-            set_execution_state(true)?;
-            Ok(())
+            let scheme = active_scheme()?;
+            let ac = power_read(true, &scheme)?;
+            let dc = power_read(false, &scheme)?;
+            let saved = SavedPowerState {
+                scheme: scheme.to_string(),
+                ac_lid_action: ac,
+                dc_lid_action: dc,
+                changed_ac_lid_action: Some(ac != 0),
+                changed_dc_lid_action: Some(dc != 0),
+                captured_at: local_timestamp(),
+            };
+            if saved.changed_lid_policy() {
+                save_recovery(&saved)?;
+            }
+            self.saved = Some(saved.clone());
+            if saved.changed_ac_lid_action() {
+                power_write(true, &scheme, 0)?;
+            }
+            if saved.changed_dc_lid_action() {
+                power_write(false, &scheme, 0)?;
+            }
+            if saved.changed_lid_policy() {
+                power_activate(&scheme)?;
+            }
+            Ok(saved)
         })();
-        if let Err(cause) = result {
-            let _ = restore_power_state(&saved);
-            self.saved = None;
-            return Err(cause);
+        match result {
+            Ok(saved) => {
+                self.guarding = true;
+                logging::write(format!(
+                    "Guard acquired for power scheme {}; original lid actions AC={}, DC={}.",
+                    saved.scheme, saved.ac_lid_action, saved.dc_lid_action
+                ));
+                Ok(())
+            }
+            Err(cause) => {
+                if let Some(saved) = self.saved.take() {
+                    let _ = restore_power_state(&saved);
+                }
+                let _ = set_execution_state(false);
+                Err(cause)
+            }
         }
-        self.guarding = true;
-        logging::write(format!(
-            "Guard acquired for power scheme {scheme}; original lid actions AC={ac}, DC={dc}."
-        ));
-        Ok(())
     }
 
     pub fn release(&mut self) -> io::Result<()> {
@@ -851,10 +888,12 @@ impl PowerPolicy {
         let state = self.saved.clone().or_else(load_recovery);
         if let Some(state) = state {
             restore_power_state(&state)?;
-            logging::write(format!(
-                "Restored power scheme {} lid actions AC={}, DC={}.",
-                state.scheme, state.ac_lid_action, state.dc_lid_action
-            ));
+            if state.changed_lid_policy() {
+                logging::write(format!(
+                    "Restored power scheme {} lid actions AC={}, DC={}.",
+                    state.scheme, state.ac_lid_action, state.dc_lid_action
+                ));
+            }
         }
         self.saved = None;
         self.guarding = false;
@@ -1038,15 +1077,21 @@ fn load_recovery() -> Option<SavedPowerState> {
 }
 
 fn restore_power_state(state: &SavedPowerState) -> io::Result<()> {
-    let scheme = Guid::parse(&state.scheme).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the recovery record contains an invalid power scheme GUID",
-        )
-    })?;
-    power_write(true, &scheme, state.ac_lid_action)?;
-    power_write(false, &scheme, state.dc_lid_action)?;
-    power_activate(&scheme)?;
+    if state.changed_lid_policy() {
+        let scheme = Guid::parse(&state.scheme).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the recovery record contains an invalid power scheme GUID",
+            )
+        })?;
+        if state.changed_ac_lid_action() {
+            power_write(true, &scheme, state.ac_lid_action)?;
+        }
+        if state.changed_dc_lid_action() {
+            power_write(false, &scheme, state.dc_lid_action)?;
+        }
+        power_activate(&scheme)?;
+    }
     match std::fs::remove_file(paths::recovery_file()) {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1288,6 +1333,37 @@ mod tests {
         assert_eq!(std::fs::read(&destination).unwrap(), b"second");
         std::fs::remove_file(destination).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_recovery_records_infer_only_the_lid_actions_that_changed() {
+        let state: SavedPowerState = serde_json::from_str(
+            r#"{
+                "Scheme":"381b4222-f694-41f0-9685-ff5bb260df2e",
+                "AcLidAction":1,
+                "DcLidAction":0,
+                "CapturedAt":"now"
+            }"#,
+        )
+        .unwrap();
+        assert!(state.changed_ac_lid_action());
+        assert!(!state.changed_dc_lid_action());
+        assert!(state.changed_lid_policy());
+    }
+
+    #[test]
+    fn current_recovery_records_preserve_explicit_change_flags() {
+        let state = SavedPowerState {
+            scheme: "381b4222-f694-41f0-9685-ff5bb260df2e".into(),
+            ac_lid_action: 1,
+            dc_lid_action: 1,
+            changed_ac_lid_action: Some(false),
+            changed_dc_lid_action: Some(false),
+            captured_at: "now".into(),
+        };
+        let round_trip: SavedPowerState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(!round_trip.changed_lid_policy());
     }
 
     #[test]

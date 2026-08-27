@@ -26,6 +26,7 @@ pub struct GuardRequest {
 pub struct GuardResponse {
     pub protocol_version: u32,
     pub daemon_path: Option<String>,
+    pub daemon_version: Option<String>,
     pub ok: bool,
     pub message: String,
     pub active_turns: usize,
@@ -39,6 +40,7 @@ impl Default for GuardResponse {
         Self {
             protocol_version: 0,
             daemon_path: None,
+            daemon_version: None,
             ok: false,
             message: String::new(),
             active_turns: 0,
@@ -144,5 +146,6 @@ mod tests {
         .unwrap();
         assert!(response.contains("activeTurns"));
         assert!(response.contains("protocolVersion"));
+        assert!(response.contains("daemonVersion"));
     }
 }

@@ -11,7 +11,7 @@ use crate::sound::{self, AlertSound};
 use crate::{paths, win};
 
 const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
-static STATUS_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
 
 struct DaemonState {
     active_turns: HashSet<String>,
@@ -65,6 +65,7 @@ impl DaemonState {
             daemon_path: std::env::current_exe()
                 .ok()
                 .map(|value| value.to_string_lossy().into_owned()),
+            daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ok,
             message: message.into(),
             active_turns: self.active_turns.len(),
@@ -169,7 +170,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
     let action = request.action.to_ascii_lowercase();
     let mut sleep_schedule = None;
     let mut sound_schedule = None;
-    let response = {
+    let (response, should_publish_status) = {
         let Ok(mut state) = shared.lock() else {
             return failure("guardian state lock was poisoned");
         };
@@ -240,9 +241,13 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                 sound_schedule = Some(sound);
             }
         }
-        publish_status(&response);
-        response
+        let should_publish_status =
+            !matches!(action.as_str(), "status" | "sound-done" | "sound-request");
+        (response, should_publish_status)
     };
+    if should_publish_status {
+        publish_status(&response);
+    }
     if let Some((token, delay)) = sleep_schedule {
         spawn_sleep(shared, token, delay);
     }
@@ -332,15 +337,24 @@ fn spawn_sleep(shared: &Arc<Mutex<DaemonState>>, token: Arc<AtomicBool>, delay: 
 }
 
 fn publish_status(response: &GuardResponse) {
-    let Ok(_gate) = STATUS_GATE.get_or_init(|| Mutex::new(())).lock() else {
-        return;
-    };
     let Ok(bytes) = serde_json::to_vec(response) else {
         return;
     };
+    let Ok(mut cached) = STATUS_CACHE.get_or_init(|| Mutex::new(None)).lock() else {
+        return;
+    };
+    if !snapshot_changed(cached.as_deref(), &bytes) {
+        return;
+    }
     if let Err(cause) = win::atomic_write(&paths::status_file(), &bytes) {
         logging::write(format!("Could not publish guardian status: {cause}"));
+    } else {
+        *cached = Some(bytes);
     }
+}
+
+fn snapshot_changed(previous: Option<&[u8]>, next: &[u8]) -> bool {
+    previous != Some(next)
 }
 
 fn turn_key(request: &GuardRequest) -> String {
@@ -372,6 +386,7 @@ fn failure(message: impl Into<String>) -> GuardResponse {
         daemon_path: std::env::current_exe()
             .ok()
             .map(|value| value.to_string_lossy().into_owned()),
+        daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         message: message.into(),
         ..GuardResponse::default()
     }
@@ -403,5 +418,12 @@ mod tests {
         assert!(alerts.schedule(AlertSound::Request));
         assert!(!alerts.schedule(AlertSound::Request));
         assert!(alerts.schedule(AlertSound::Done));
+    }
+
+    #[test]
+    fn unchanged_status_snapshots_do_not_need_another_disk_write() {
+        assert!(!snapshot_changed(Some(b"same"), b"same"));
+        assert!(snapshot_changed(Some(b"before"), b"after"));
+        assert!(snapshot_changed(None, b"first"));
     }
 }

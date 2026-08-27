@@ -14,9 +14,19 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn send(request: GuardRequest) -> GuardResponse {
     let mut response = try_send(&request, Duration::from_millis(25));
-    if response.as_ref().is_some_and(|value| !is_compatible(value)) {
-        retire_legacy_daemon();
-        response = None;
+    if let Some(value) = response.as_ref() {
+        if !is_compatible(value) {
+            retire_legacy_daemon();
+            response = None;
+        } else if should_replace_idle_daemon(&request, value) {
+            logging::write(format!(
+                "Replacing idle guardian version {} with {}.",
+                value.daemon_version.as_deref().unwrap_or("legacy"),
+                env!("CARGO_PKG_VERSION")
+            ));
+            retire_legacy_daemon();
+            response = None;
+        }
     }
     if let Some(response) = response {
         return response;
@@ -89,12 +99,19 @@ fn is_compatible(response: &GuardResponse) -> bool {
     response.protocol_version == PROTOCOL_VERSION
 }
 
+fn should_replace_idle_daemon(request: &GuardRequest, response: &GuardResponse) -> bool {
+    request.action.eq_ignore_ascii_case("status")
+        && response.active_turns == 0
+        && response.daemon_version.as_deref() != Some(env!("CARGO_PKG_VERSION"))
+}
+
 fn failure(message: impl Into<String>) -> GuardResponse {
     GuardResponse {
         protocol_version: PROTOCOL_VERSION,
         daemon_path: std::env::current_exe()
             .ok()
             .map(|value| value.to_string_lossy().into_owned()),
+        daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         message: message.into(),
         ..GuardResponse::default()
     }
@@ -109,6 +126,7 @@ mod tests {
         let response = GuardResponse {
             protocol_version: PROTOCOL_VERSION,
             daemon_path: Some(r"C:\different\extension\CodexLidGuard.exe".into()),
+            daemon_version: Some(env!("CARGO_PKG_VERSION").into()),
             ..GuardResponse::default()
         };
         assert!(is_compatible(&response));
@@ -121,5 +139,50 @@ mod tests {
             ..GuardResponse::default()
         };
         assert!(!is_compatible(&response));
+    }
+
+    #[test]
+    fn idle_daemons_from_an_older_extension_are_replaced_on_status() {
+        let request = GuardRequest {
+            action: "status".into(),
+            ..GuardRequest::default()
+        };
+        let response = GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: Some("0.1.5".into()),
+            active_turns: 0,
+            ..GuardResponse::default()
+        };
+        assert!(should_replace_idle_daemon(&request, &response));
+    }
+
+    #[test]
+    fn older_daemons_are_never_replaced_while_a_turn_is_active() {
+        let request = GuardRequest {
+            action: "status".into(),
+            ..GuardRequest::default()
+        };
+        let response = GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: Some("0.1.5".into()),
+            active_turns: 1,
+            ..GuardResponse::default()
+        };
+        assert!(!should_replace_idle_daemon(&request, &response));
+    }
+
+    #[test]
+    fn release_requests_do_not_replace_the_daemon_that_processed_them() {
+        let request = GuardRequest {
+            action: "release".into(),
+            ..GuardRequest::default()
+        };
+        let response = GuardResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: Some("0.1.5".into()),
+            active_turns: 0,
+            ..GuardResponse::default()
+        };
+        assert!(!should_replace_idle_daemon(&request, &response));
     }
 }
