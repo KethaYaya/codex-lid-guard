@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
@@ -10,6 +10,8 @@ pub struct HookPayload {
     #[serde(rename = "turn_id")]
     pub turn_id: Option<String>,
     pub cwd: Option<String>,
+    #[serde(rename = "transcript_path")]
+    pub transcript_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -20,6 +22,7 @@ pub struct GuardRequest {
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
     pub cwd: Option<String>,
+    pub transcript_path: Option<String>,
     pub origin_window: Option<u64>,
 }
 
@@ -139,12 +142,14 @@ mod tests {
             session_id: Some("s".into()),
             turn_id: Some("t".into()),
             cwd: None,
+            transcript_path: Some(r"C:\rollout.jsonl".into()),
             origin_window: Some(42),
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("sessionId"));
         assert!(json.contains("turnId"));
         assert!(json.contains("originWindow"));
+        assert!(json.contains("transcriptPath"));
         assert!(json.contains("clientVersion"));
 
         let response = serde_json::to_string(&GuardResponse {

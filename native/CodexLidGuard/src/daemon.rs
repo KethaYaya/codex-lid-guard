@@ -5,16 +5,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::codex_transcript::TranscriptCursor;
 use crate::logging;
 use crate::model::{GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION};
 use crate::sound::{self, AlertSound};
 use crate::{codex_log, paths, win};
 
 const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
+const ACTIVE_TURN_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
 
 struct DaemonState {
     active_turns: HashMap<String, Option<u64>>,
+    transcript_cursors: HashMap<String, TranscriptCursor>,
     latest_session_by_window: HashMap<u64, String>,
     power_policy: win::PowerPolicy,
     lid_state: LidState,
@@ -47,6 +51,7 @@ impl DaemonState {
     fn new() -> Self {
         Self {
             active_turns: HashMap::new(),
+            transcript_cursors: HashMap::new(),
             latest_session_by_window: HashMap::new(),
             power_policy: win::PowerPolicy::new(),
             lid_state: LidState::Unknown,
@@ -113,11 +118,15 @@ pub fn run() -> io::Result<()> {
     }
 
     loop {
-        let can_exit = state
+        let has_active_turns = state
             .lock()
-            .map(|value| value.active_turns.is_empty() && value.pending_sleep.is_none())
+            .map(|value| !value.active_turns.is_empty())
             .unwrap_or(false);
-        let timeout = can_exit.then_some(Duration::from_secs(5 * 60));
+        let timeout = Some(if has_active_turns {
+            ACTIVE_TURN_RECONCILE_INTERVAL
+        } else {
+            IDLE_TIMEOUT
+        });
         match pipe.accept(timeout) {
             Ok(win::AcceptResult::Connected(connection)) => {
                 if let Err(cause) = handle_connection(connection, &state) {
@@ -125,6 +134,10 @@ pub fn run() -> io::Result<()> {
                 }
             }
             Ok(win::AcceptResult::TimedOut) => {
+                if has_active_turns {
+                    reconcile_terminal_turns(&state);
+                    continue;
+                }
                 let still_idle = state
                     .lock()
                     .map(|value| value.active_turns.is_empty() && value.pending_sleep.is_none())
@@ -141,6 +154,7 @@ pub fn run() -> io::Result<()> {
     if let Ok(mut state) = state.lock() {
         state.cancel_pending_sleep();
         state.active_turns.clear();
+        state.transcript_cursors.clear();
         state.latest_session_by_window.clear();
         if let Err(cause) = state.power_policy.release() {
             logging::write(format!("Power-policy cleanup failed: {cause}"));
@@ -201,6 +215,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             "release" => {
                 let key = turn_key(&request);
                 alert_window = state.active_turns.remove(&key).flatten();
+                state.transcript_cursors.remove(&key);
                 alert_session_is_current =
                     origin_session_is_current(&state, &request, alert_window);
                 logging::write(format!(
@@ -224,6 +239,9 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                 state
                     .active_turns
                     .retain(|key, _| !key.starts_with(&prefix));
+                state
+                    .transcript_cursors
+                    .retain(|key, _| !key.starts_with(&prefix));
                 logging::write(format!(
                     "Session released: {session}. Active turns: {}.",
                     state.active_turns.len()
@@ -241,6 +259,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             }
             "restore" => {
                 state.active_turns.clear();
+                state.transcript_cursors.clear();
                 state.latest_session_by_window.clear();
                 state.cancel_pending_sleep();
                 match state.power_policy.release() {
@@ -300,6 +319,9 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
     state
         .active_turns
         .retain(|candidate, _| !candidate.starts_with(&prefix) || candidate == &key);
+    state
+        .transcript_cursors
+        .retain(|candidate, _| !candidate.starts_with(&prefix) || candidate == &key);
     let replaced = previous_count.saturating_sub(state.active_turns.len());
     if replaced > 0 {
         logging::write(format!(
@@ -314,11 +336,21 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         }
         Entry::Occupied(_) => false,
     };
+    if let Some(cursor) = TranscriptCursor::new(
+        request.transcript_path.as_deref(),
+        request.turn_id.as_deref(),
+    ) {
+        state
+            .transcript_cursors
+            .entry(key.clone())
+            .or_insert(cursor);
+    }
     if inserted
         && state.active_turns.len() == 1
         && let Err(cause) = state.power_policy.acquire()
     {
         state.active_turns.remove(&key);
+        state.transcript_cursors.remove(&key);
         return state.snapshot(false, cause.to_string());
     }
     remember_latest_session(state, request);
@@ -330,6 +362,45 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         true,
         "Windows will stay awake until the Codex turn finishes.",
     )
+}
+
+fn reconcile_terminal_turns(shared: &Arc<Mutex<DaemonState>>) {
+    let mut sleep_schedule = None;
+    let response = {
+        let Ok(mut state) = shared.lock() else {
+            return;
+        };
+        let ended = state
+            .transcript_cursors
+            .iter_mut()
+            .filter_map(|(key, cursor)| cursor.reached_terminal_event().then(|| key.clone()))
+            .collect::<Vec<_>>();
+        if ended.is_empty() {
+            return;
+        }
+        for key in &ended {
+            state.active_turns.remove(key);
+            state.transcript_cursors.remove(key);
+            logging::write(format!(
+                "Recovered terminal turn after a missed hook: {key}. Active turns: {}.",
+                state.active_turns.len()
+            ));
+        }
+        if state.active_turns.is_empty() {
+            if let Err(cause) = state.power_policy.release() {
+                state.snapshot(false, cause.to_string())
+            } else {
+                sleep_schedule = prepare_sleep(&mut state);
+                state.snapshot(true, "Recovered a finished Codex turn.")
+            }
+        } else {
+            state.snapshot(true, "Recovered a finished Codex turn.")
+        }
+    };
+    publish_status(&response);
+    if let Some((token, delay)) = sleep_schedule {
+        spawn_sleep(shared, token, delay);
+    }
 }
 
 fn remember_latest_session(state: &mut DaemonState, request: &GuardRequest) {

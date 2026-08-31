@@ -1,6 +1,6 @@
 [package]
 name = "codex-lid-guard"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 description = "Windows lid and sleep guard for local Codex turns"
 license = "MIT"

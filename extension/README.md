@@ -12,6 +12,8 @@ The extension connects to Codex's official `UserPromptSubmit`, `PreToolUse`, `Pe
 - restores the saved settings after the final turn; and
 - sleeps after a short grace period if the lid remains closed.
 
+If Codex interrupts a turn without running its normal `Stop` hook, the guardian also recognizes the exact terminal lifecycle record in the hook-provided local transcript. This repairs the counter without imposing a timeout on legitimate long-running tasks.
+
 It also bundles Herdr's two original alerts: `done` plays when a Codex task completes, and `request` plays for permission approvals and structured `request_user_input` prompts. Automatic alerts play when the originating VS Code window is minimized or no longer in the foreground, or when another chat is selected in the same window. The current chat stays quiet. Use **Codex Lid Guard: Test Alert Sounds** to hear both at any time. The `codexLidGuard.alertSoundsOnlyWhenUnfocused` setting controls the focus filter, while `codexLidGuard.alertSounds` disables sounds without disabling lid protection.
 
 For same-window chat detection, Lid Guard reads only the latest session-visibility event from the local Codex extension log when an alert is about to play. It does not poll the log or read prompt and response content.

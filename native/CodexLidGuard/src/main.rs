@@ -5,6 +5,7 @@ compile_error!("Codex Lid Guard supports Windows only.");
 
 mod client;
 mod codex_log;
+mod codex_transcript;
 mod daemon;
 mod logging;
 mod model;
@@ -79,6 +80,7 @@ fn run_hook(action: &str) {
         session_id: payload.session_id,
         turn_id: payload.turn_id,
         cwd: payload.cwd,
+        transcript_path: payload.transcript_path,
         origin_window,
     });
     if !response.ok {
