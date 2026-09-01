@@ -4,6 +4,7 @@
 compile_error!("Codex Lid Guard supports Windows only.");
 
 mod client;
+mod codex_lifecycle;
 mod codex_log;
 mod codex_transcript;
 mod daemon;
@@ -46,28 +47,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
         )?,
         "menu" => {
-            let title = arguments
+            let theme = arguments
                 .get(1)
+                .and_then(|argument| argument.strip_prefix("--theme="))
+                .unwrap_or("dark");
+            let title_index = usize::from(
+                arguments
+                    .get(1)
+                    .is_some_and(|argument| argument.starts_with("--theme=")),
+            ) + 1;
+            let title = arguments
+                .get(title_index)
                 .map(String::as_str)
                 .unwrap_or("Codex awake");
-            let items = arguments.get(2..).unwrap_or_default();
-            let selected = win::show_context_menu(title, items)?;
+            let items = arguments.get(title_index + 1..).unwrap_or_default();
+            let selected = win::show_notification_popup(theme, title, items)?;
             println!("{}", serde_json::json!({ "selectedIndex": selected }));
         }
         "status" | "restore" | "focus" => {
-            let response = client::send(GuardRequest {
+            let mut response = client::send(GuardRequest {
                 action: command,
                 session_id: arguments.get(1).cloned(),
                 turn_id: arguments.get(2).cloned(),
                 ..GuardRequest::default()
             });
+            response.pipe_name = Some(paths::pipe_name());
             println!("{}", serde_json::to_string_pretty(&response)?);
             if !response.ok {
                 std::process::exit(1);
             }
         }
         "pre-acquire" => {
-            let response = client::send(GuardRequest {
+            let mut response = client::send(GuardRequest {
                 action: command,
                 session_id: arguments.get(1).cloned(),
                 turn_id: arguments.get(2).cloned(),
@@ -75,6 +86,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 origin_window: win::foreground_editor_window(),
                 ..GuardRequest::default()
             });
+            response.pipe_name = Some(paths::pipe_name());
             println!("{}", serde_json::to_string_pretty(&response)?);
             if !response.ok {
                 std::process::exit(1);
@@ -133,6 +145,7 @@ fn run_sound(value: &str, write_response: bool) -> Result<(), Box<dyn std::error
             daemon_path: std::env::current_exe()
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()),
+            pipe_name: Some(paths::pipe_name()),
             ok: played,
             message: if played {
                 format!("Played the {label} alert.")
@@ -151,7 +164,7 @@ fn run_sound(value: &str, write_response: bool) -> Result<(), Box<dyn std::error
 
 fn usage() {
     eprintln!(
-        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | sound done | sound request | status | restore | focus <session-id> <turn-id> | menu <title> <items...>]"
+        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | sound done | sound request | status | restore | focus <session-id> <turn-id> | menu [--theme=<theme>] <title> <items...>]"
     );
     std::process::exit(2);
 }

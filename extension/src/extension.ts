@@ -6,19 +6,23 @@ import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
 import {
   quotePowerShellLiteral,
+  guardHooksForPreference,
   readHooksDocument,
-  withGuardHooks,
   withoutGuardHooks,
   writeHooksDocument
 } from "./hookInstaller";
 import {
   focusHelperSession,
   GuardStatus,
+  isGuardianPipeName,
+  preAcquireGuardian,
   preAcquireHelper,
   readHelperStatus,
   runHelper,
   showHelperMenu,
   type GuardActiveItem,
+  type GuardMenuTheme,
+  warmGuardianPipe,
   writeHelperSettings
 } from "./helper";
 import {
@@ -47,11 +51,13 @@ let daemonLeaseTimer: NodeJS.Timeout | undefined;
 let statusWatcher: FSWatcher | undefined;
 let statusRefreshDebounce: NodeJS.Timeout | undefined;
 let codexTurnStartWatcher: CodexTurnStartWatcher | undefined;
+let guardianPipeName: string | undefined;
 let updatingEnabledSetting = false;
 let setupPromptOpen = false;
 const setupVersionStateKey = "hookSetupVersion";
 const setupTrustBaselineStateKey = "hookTrustBaseline";
 const hookSetupRevision = "herdr-alert-sounds-5";
+const optionalHooksSetting = "optionalHooks";
 
 type StoredTrustBaseline = {
   revision: string;
@@ -69,7 +75,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexLidGuard.disable", () => disable(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.showStatus", () => showStatus(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.restorePowerSettings", () => restorePowerSettings(context, statusBar)),
-    vscode.commands.registerCommand("codexLidGuard.finishSetup", () => finishSetup(context)),
+    vscode.commands.registerCommand("codexLidGuard.configureOptionalHooks", () => configureOptionalHooks(context, statusBar)),
+    // Keep the old command ID working for users with an existing keybinding.
+    vscode.commands.registerCommand("codexLidGuard.finishSetup", () => configureOptionalHooks(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.testAlertSounds", () => testAlertSounds(context)),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (!event.affectsConfiguration("codexLidGuard") || updatingEnabledSetting) {
@@ -102,6 +110,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (configuration().get<boolean>("enabled", true)) {
     await enable(context, statusBar, false);
   } else {
+    await syncOptionalHooks(context, helperPath(context), false).catch(() => undefined);
     setDisabled(statusBar);
   }
   await startCodexTurnStartWatcher(context, statusBar);
@@ -128,28 +137,31 @@ async function enable(
     const helper = helperPath(context);
     await fs.access(helper);
     await syncSettings();
-    const hooksPath = codexHooksPath();
-    const document = await readHooksDocument(hooksPath);
-    const installed = withGuardHooks(document, helper);
-    const hooksChanged = JSON.stringify(installed) !== JSON.stringify(document);
-    if (hooksChanged) {
-      await writeHooksDocument(hooksPath, installed);
-    }
+    const hooksChanged = await syncOptionalHooks(context, helper);
     await setEnabledSetting(true);
-    await refreshStatus(context, statusBar);
-
-    const storedSetupVersion = context.globalState.get<string>(setupVersionStateKey);
-    const setupRequired = hooksChanged || !setupStateMatchesRevision(storedSetupVersion, hookSetupRevision);
-    if (!setupRequired && storedSetupVersion !== setupStateVersion()) {
-      await context.globalState.update(setupVersionStateKey, setupStateVersion());
+    const status = await refreshStatus(context, statusBar);
+    if (isGuardianPipeName(status.pipeName)) {
+      await warmGuardianPipe(
+        status.pipeName,
+        String(context.extension.packageJSON.version)
+      ).catch(() => undefined);
     }
-    if (setupRequired) {
-      void promptToFinishSetup(context);
-    } else if (notify) {
+
+    if (configuration().get<boolean>(optionalHooksSetting, false)) {
+      const storedSetupVersion = context.globalState.get<string>(setupVersionStateKey);
+      const setupRequired = hooksChanged || !setupStateMatchesRevision(storedSetupVersion, hookSetupRevision);
+      if (!setupRequired && storedSetupVersion !== setupStateVersion()) {
+        await context.globalState.update(setupVersionStateKey, setupStateVersion());
+      }
+      if (setupRequired) {
+        void promptToFinishSetup(context);
+      }
+    }
+    if (notify) {
       const codex = vscode.extensions.getExtension("openai.chatgpt");
       const suffix = codex
-        ? "New Codex turns are now protected."
-        : "Hooks are ready; install or enable the OpenAI Codex extension to use them.";
+        ? "New Codex turns are protected without hook setup."
+        : "Install or enable the OpenAI Codex extension to monitor local turns.";
       void vscode.window.showInformationMessage(`Codex Lid Guard enabled. ${suffix}`);
     }
   } catch (error) {
@@ -168,7 +180,7 @@ async function promptToFinishSetup(context: vscode.ExtensionContext): Promise<vo
   setupPromptOpen = true;
   try {
     const choice = await vscode.window.showWarningMessage(
-      "Codex Lid Guard installed its task hooks. Codex requires you to review them once before automatic protection can start.",
+      "Optional Lid Guard alert hooks are installed. Codex requires you to review them before hook-based request alerts can run; lid protection is already active without them.",
       { modal: true },
       "Review Hooks",
       "Not Now"
@@ -225,7 +237,7 @@ async function promptToFinishSetup(context: vscode.ExtensionContext): Promise<vo
       }
 
       const retry = await vscode.window.showWarningMessage(
-        "Codex Lid Guard is still untrusted. Switch to the Codex terminal, open /hooks if needed, then press T to trust all five pending hooks. Return here afterward.",
+        "The optional hooks are still untrusted. Lid protection remains active. To enable hook-based request alerts, switch to the Codex terminal, open /hooks if needed, then press T to trust all five pending hooks.",
         "Check Again",
         "Later"
       );
@@ -249,8 +261,39 @@ async function waitForGuardTrustChange(before: GuardTrustHashes): Promise<boolea
   return false;
 }
 
-async function finishSetup(context: vscode.ExtensionContext): Promise<void> {
-  await promptToFinishSetup(context);
+async function configureOptionalHooks(
+  context: vscode.ExtensionContext,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  await setOptionalHooksSetting(true);
+  await enable(context, statusBar, false);
+}
+
+async function syncOptionalHooks(
+  context: vscode.ExtensionContext,
+  helper: string,
+  useHooks = configuration().get<boolean>(optionalHooksSetting, false)
+): Promise<boolean> {
+  const hooksPath = codexHooksPath();
+  let document: Awaited<ReturnType<typeof readHooksDocument>>;
+  try {
+    document = await readHooksDocument(hooksPath);
+  } catch (error) {
+    if (!useHooks) {
+      return false;
+    }
+    throw error;
+  }
+  const next = guardHooksForPreference(document, helper, useHooks);
+  const changed = JSON.stringify(next) !== JSON.stringify(document);
+  if (changed) {
+    await writeHooksDocument(hooksPath, next);
+  }
+  if (!useHooks) {
+    await context.globalState.update(setupVersionStateKey, undefined);
+    await context.globalState.update(setupTrustBaselineStateKey, undefined);
+  }
+  return changed;
 }
 
 async function disable(
@@ -360,7 +403,8 @@ async function showAwakeSessions(
       activeItems.map((item) => awakeSessionMenuLabel(
         item,
         codexSessionTitle(sessionTitles, item.sessionId)
-      ))
+      )),
+      activeMenuTheme()
     );
     if (selectedIndex !== undefined) {
       await openAwakeSession(context, activeItems[selectedIndex]);
@@ -527,7 +571,18 @@ async function startCodexTurnStartWatcher(
     }
     const pendingTurnId = `pending-${randomUUID()}`;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    void preAcquireHelper(helperPath(context), sessionId, pendingTurnId, cwd)
+    const helper = helperPath(context);
+    const acquire = guardianPipeName
+      ? preAcquireGuardian(
+        guardianPipeName,
+        String(context.extension.packageJSON.version),
+        sessionId,
+        pendingTurnId,
+        cwd
+      )
+      : preAcquireHelper(helper, sessionId, pendingTurnId, cwd);
+    void acquire
+      .catch(() => preAcquireHelper(helper, sessionId, pendingTurnId, cwd))
       .then((status) => updateStatusBar(statusBar, status))
       .catch(() => {
         // The trusted UserPromptSubmit hook remains the authoritative fallback.
@@ -541,6 +596,9 @@ function stopCodexTurnStartWatcher(): void {
 }
 
 function updateStatusBar(statusBar: vscode.StatusBarItem, status: GuardStatus): void {
+  if (isGuardianPipeName(status.pipeName)) {
+    guardianPipeName = status.pipeName;
+  }
   if (!status.ok) {
     setError(statusBar, status.message);
     return;
@@ -595,6 +653,19 @@ async function syncSettings(): Promise<void> {
 
 function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("codexLidGuard");
+}
+
+function activeMenuTheme(): GuardMenuTheme {
+  switch (vscode.window.activeColorTheme.kind) {
+    case vscode.ColorThemeKind.Light:
+      return "light";
+    case vscode.ColorThemeKind.HighContrast:
+      return "high-contrast";
+    case vscode.ColorThemeKind.HighContrastLight:
+      return "high-contrast-light";
+    default:
+      return "dark";
+  }
 }
 
 function helperPath(context: vscode.ExtensionContext): string {
@@ -663,6 +734,18 @@ async function setEnabledSetting(enabled: boolean): Promise<void> {
   updatingEnabledSetting = true;
   try {
     await configuration().update("enabled", enabled, vscode.ConfigurationTarget.Global);
+  } finally {
+    updatingEnabledSetting = false;
+  }
+}
+
+async function setOptionalHooksSetting(enabled: boolean): Promise<void> {
+  if (configuration().get<boolean>(optionalHooksSetting, false) === enabled) {
+    return;
+  }
+  updatingEnabledSetting = true;
+  try {
+    await configuration().update(optionalHooksSetting, enabled, vscode.ConfigurationTarget.Global);
   } finally {
     updatingEnabledSetting = false;
   }

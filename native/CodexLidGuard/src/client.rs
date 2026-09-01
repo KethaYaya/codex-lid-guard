@@ -134,6 +134,7 @@ fn failure(message: impl Into<String>) -> GuardResponse {
             .ok()
             .map(|value| value.to_string_lossy().into_owned()),
         daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        pipe_name: Some(paths::pipe_name()),
         message: message.into(),
         ..GuardResponse::default()
     }

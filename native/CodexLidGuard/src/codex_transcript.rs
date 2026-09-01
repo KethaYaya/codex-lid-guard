@@ -8,7 +8,7 @@ const MAX_APPENDED_BYTES: u64 = 256 * 1024;
 
 pub struct TranscriptCursor {
     path: PathBuf,
-    turn_id: String,
+    turn_id: Option<String>,
     offset: u64,
     pending_line: String,
 }
@@ -24,7 +24,22 @@ impl TranscriptCursor {
         let offset = fs::metadata(&path).map(|value| value.len()).unwrap_or(0);
         Some(Self {
             path,
-            turn_id: turn_id.to_string(),
+            turn_id: Some(turn_id.to_string()),
+            offset,
+            pending_line: String::new(),
+        })
+    }
+
+    pub fn new_for_session(path: Option<&str>) -> Option<Self> {
+        let path = path?.trim();
+        if path.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(path);
+        let offset = fs::metadata(&path).map(|value| value.len()).unwrap_or(0);
+        Some(Self {
+            path,
+            turn_id: None,
             offset,
             pending_line: String::new(),
         })
@@ -32,7 +47,7 @@ impl TranscriptCursor {
 
     pub fn reached_terminal_event(&mut self) -> bool {
         self.read_appended()
-            .is_ok_and(|value| has_terminal_event(&value, &self.turn_id))
+            .is_ok_and(|value| has_terminal_event(&value, self.turn_id.as_deref()))
     }
 
     fn read_appended(&mut self) -> std::io::Result<String> {
@@ -91,7 +106,7 @@ struct TranscriptEventPayload {
     turn_id: Option<String>,
 }
 
-fn has_terminal_event(value: &str, turn_id: &str) -> bool {
+fn has_terminal_event(value: &str, turn_id: Option<&str>) -> bool {
     value.lines().any(|line| {
         let Ok(event) = serde_json::from_str::<TranscriptEvent>(line) else {
             return false;
@@ -100,7 +115,7 @@ fn has_terminal_event(value: &str, turn_id: &str) -> bool {
             return false;
         };
         event.kind == "event_msg"
-            && payload.turn_id.as_deref() == Some(turn_id)
+            && turn_id.is_none_or(|turn_id| payload.turn_id.as_deref() == Some(turn_id))
             && matches!(payload.kind.as_str(), "task_complete" | "turn_aborted")
     })
 }
@@ -115,20 +130,21 @@ mod tests {
     #[test]
     fn exact_completed_turn_is_terminal() {
         let value = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a"}}"#;
-        assert!(has_terminal_event(value, "turn-a"));
-        assert!(!has_terminal_event(value, "turn-b"));
+        assert!(has_terminal_event(value, Some("turn-a")));
+        assert!(!has_terminal_event(value, Some("turn-b")));
+        assert!(has_terminal_event(value, None));
     }
 
     #[test]
     fn exact_aborted_turn_is_terminal() {
         let value = r#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-a","reason":"interrupted"}}"#;
-        assert!(has_terminal_event(value, "turn-a"));
+        assert!(has_terminal_event(value, Some("turn-a")));
     }
 
     #[test]
     fn ordinary_transcript_items_are_not_terminal() {
         let value = r#"{"type":"response_item","payload":{"type":"message","internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#;
-        assert!(!has_terminal_event(value, "turn-a"));
+        assert!(!has_terminal_event(value, Some("turn-a")));
     }
 
     #[test]
@@ -156,6 +172,29 @@ mod tests {
             .unwrap();
         file.flush().unwrap();
         assert!(cursor.reached_terminal_event());
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn session_cursor_accepts_the_next_terminal_turn_without_reading_message_fields() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-lid-guard-session-transcript-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        fs::write(&path, b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-a\"}}\n").unwrap();
+        let mut cursor = TranscriptCursor::new_for_session(path.to_str()).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"ignored\"}}\n").unwrap();
+        file.write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\"}}\n").unwrap();
+        file.flush().unwrap();
+
+        assert!(cursor.reached_terminal_event());
+
         drop(file);
         fs::remove_file(path).unwrap();
     }

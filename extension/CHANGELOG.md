@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.1.25
+
+- Removed mandatory Codex hook onboarding: native lifecycle metadata now protects turns by default with no console, review popup, or trust step.
+- Made lifecycle hooks an explicit optional setting for immediate permission/request alerts and redundant signals; existing Lid Guard hooks are removed automatically when the option is off.
+- Promoted the content-free extension-log fallback to a durable transcript-tracked turn, preventing the awake count from expiring before long or automatic work completes.
+- Added completion-alert handling to native terminal reconciliation so ordinary done alerts do not require hooks.
+
+## 0.1.24
+
+- Protected automatic continuations and queued turns through Codex's content-free indexed lifecycle metadata, including paths where no `UserPromptSubmit` or extension-log turn-start event is emitted.
+- Kept metadata-started turns protected until their normal stop hook or exact terminal lifecycle record, without imposing a timeout on legitimate long tasks.
+- Replaced the one-shot directory log subscription with a direct, self-healing file watcher and retained the 250 ms check only as a fallback.
+- Replaced the metadata watcher's fixed commit delay with event-driven adaptive retries, eliminating missed early WAL notifications while reducing steady-state detection to roughly 2 ms median.
+
+## 0.1.23
+
+- Warmed the guardian pipe once with a read-only status request during activation, removing the one-time first-prompt initialization penalty.
+
+## 0.1.22
+
+- Sent fast turn-start acquisitions directly to the running local guardian instead of launching a helper process for every prompt.
+- Reduced measured warm transport latency from 37 ms to about 8 ms and synthetic watcher-to-guard latency to about 10 ms.
+- Preserved the native helper fallback for daemon startup, upgrades, and transient pipe failures.
+
+## 0.1.21
+
+- Made the awake indicator react to newly written turn-start metadata immediately, including before Codex writes the line ending.
+- Added a low-cost 250 ms safety check for Windows file notifications that are delayed or coalesced.
+- Ignored delayed provisional acquisitions after the authoritative hook has already activated the same session, preventing false idle transitions.
+
+## 0.1.20
+
+- Restyled the active-session popup after Codex's recent-chats panel, without adding a search field.
+- Added a compact muted header and rounded neutral selection pills while retaining folder and session titles.
+
+## 0.1.19
+
+- Made the active-session popup subtly translucent while preserving crisp session controls.
+- Kept high-contrast themes fully opaque for accessibility.
+
+## 0.1.18
+
+- Replaced the system-framed active-session menu with a notification-style popup aligned to the bottom-right of the active VS Code window.
+- Matched dark, light, and high-contrast VS Code themes while removing the bright Windows menu border and cursor-relative offset.
+- Kept sessions as one-click, keyboard-navigable, screen-reader-visible buttons inside the popup.
+
 ## 0.1.17
 
 - Engaged the guardian directly from Codex's newly appended turn-start metadata, avoiding PowerShell hook startup and occasional cold-hook delays.

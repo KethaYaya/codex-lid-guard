@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const turnStartPattern = /\bReasoning summary turn-start config resolved\b.*\bconversationId=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\s|$)/iu;
+const WATCH_SAFETY_INTERVAL_MS = 250;
 
 export type CodexTurnStartWatcher = {
   dispose(): void;
@@ -29,9 +30,21 @@ export async function watchCodexTurnStarts(
 
   let offset = await fileSize(logPath);
   let remainder = "";
+  let remainderWasEmitted = false;
   let reading = false;
   let readAgain = false;
   let closed = false;
+  let watcher: FSWatcher | undefined;
+  let watcherRestartTimer: NodeJS.Timeout | undefined;
+
+  const emitTurnStart = (line: string): boolean => {
+    const sessionId = parseCodexTurnStart(line);
+    if (!sessionId) {
+      return false;
+    }
+    onTurnStart(sessionId);
+    return true;
+  };
 
   const readAppended = async (): Promise<void> => {
     if (closed) {
@@ -52,6 +65,7 @@ export async function watchCodexTurnStarts(
           if (size < offset) {
             offset = 0;
             remainder = "";
+            remainderWasEmitted = false;
           }
           if (size === offset) {
             continue;
@@ -61,13 +75,18 @@ export async function watchCodexTurnStarts(
           const { bytesRead } = await handle.read(buffer, 0, bytesToRead, offset);
           offset += bytesRead;
           const lines = `${remainder}${buffer.subarray(0, bytesRead).toString("utf8")}`.split(/\r?\n/u);
-          remainder = lines.pop() ?? "";
-          for (const line of lines) {
-            const sessionId = parseCodexTurnStart(line);
-            if (sessionId) {
-              onTurnStart(sessionId);
+          const nextRemainder = lines.pop() ?? "";
+          for (let index = 0; index < lines.length; index += 1) {
+            if (index === 0 && remainderWasEmitted) {
+              continue;
             }
+            emitTurnStart(lines[index]);
           }
+          const nextRemainderWasEmitted = lines.length === 0 && remainderWasEmitted
+            ? true
+            : emitTurnStart(nextRemainder);
+          remainder = nextRemainder;
+          remainderWasEmitted = nextRemainderWasEmitted;
         } catch {
           // The official UserPromptSubmit hook remains the authoritative fallback.
         } finally {
@@ -76,26 +95,70 @@ export async function watchCodexTurnStarts(
       } while (readAgain && !closed);
     } finally {
       reading = false;
+      // An event can land after the loop checks readAgain but before reading is
+      // cleared. Re-enter here so that append is not stranded until a later log.
+      if (readAgain && !closed) {
+        void readAppended();
+      }
     }
   };
 
-  let watcher: FSWatcher;
-  try {
-    watcher = watch(directory, { persistent: false }, (_event, filename) => {
-      if (!filename || filename.toString().toLowerCase() === "codex.log") {
+  const scheduleWatcherRestart = (): void => {
+    if (closed || watcherRestartTimer) {
+      return;
+    }
+    watcher?.close();
+    watcher = undefined;
+    watcherRestartTimer = setTimeout(() => {
+      watcherRestartTimer = undefined;
+      startWatcher();
+    }, 25);
+    watcherRestartTimer.unref();
+  };
+
+  const startWatcher = (): void => {
+    if (closed) {
+      return;
+    }
+    watcher?.close();
+    try {
+      watcher = watch(logPath, { persistent: false }, (event) => {
         void readAppended();
+        if (event === "rename") {
+          scheduleWatcherRestart();
+        }
+      });
+    } catch {
+      try {
+        watcher = watch(directory, { persistent: false }, (_event, filename) => {
+          if (!filename || filename.toString().toLowerCase() === "codex.log") {
+            void readAppended();
+            scheduleWatcherRestart();
+          }
+        });
+      } catch {
+        scheduleWatcherRestart();
+        return;
       }
-    });
-  } catch {
-    return undefined;
-  }
-  watcher.on("error", () => watcher.close());
+    }
+    watcher.on("error", scheduleWatcherRestart);
+  };
+
+  startWatcher();
+  // fs.watch can coalesce or omit notifications on Windows. This inexpensive
+  // metadata/read check bounds the delay without scanning Codex transcripts.
+  const safetyTimer = setInterval(() => void readAppended(), WATCH_SAFETY_INTERVAL_MS);
+  safetyTimer.unref();
   void readAppended();
 
   return {
     dispose(): void {
       closed = true;
-      watcher.close();
+      clearInterval(safetyTimer);
+      if (watcherRestartTimer) {
+        clearTimeout(watcherRestartTimer);
+      }
+      watcher?.close();
     }
   };
 }

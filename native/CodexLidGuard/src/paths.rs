@@ -31,6 +31,22 @@ pub fn status_file() -> PathBuf {
     data_directory().join("status.json")
 }
 
+pub fn codex_data_directory() -> PathBuf {
+    env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(|value| PathBuf::from(value).join(".codex")))
+        .unwrap_or_else(|| env::temp_dir().join(".codex"))
+}
+
+pub fn codex_logs_database() -> PathBuf {
+    codex_data_directory().join("logs_2.sqlite")
+}
+
+pub fn codex_state_database() -> PathBuf {
+    codex_data_directory().join("state_5.sqlite")
+}
+
 pub fn pipe_name() -> String {
     format!(r"\\.\pipe\CodexLidGuard.{}", session_key())
 }

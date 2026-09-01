@@ -18,7 +18,6 @@ use crate::paths;
 type Bool = i32;
 type ByteBool = u8;
 type Handle = *mut c_void;
-type Hmenu = *mut c_void;
 type Hwnd = *mut c_void;
 type Lparam = isize;
 type Lresult = isize;
@@ -54,28 +53,56 @@ const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
-const WM_NULL: u32 = 0x0000;
+const WM_ACTIVATE: u32 = 0x0006;
+const WM_PAINT: u32 = 0x000F;
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_DRAWITEM: u32 = 0x002B;
+const WM_SETFONT: u32 = 0x0030;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_COMMAND: u32 = 0x0111;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_NCDESTROY: u32 = 0x0082;
+const WM_APP_HOVER_SESSION: u32 = 0x8001;
 const SW_RESTORE: i32 = 9;
 const SW_SHOW: i32 = 5;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+const WS_EX_CONTROLPARENT: u32 = 0x0001_0000;
+const WS_EX_LAYERED: u32 = 0x0008_0000;
 const WS_POPUP: u32 = 0x8000_0000;
-const MF_DISABLED: u32 = 0x0002;
-const MF_OWNERDRAW: u32 = 0x0100;
-const MIM_BACKGROUND: u32 = 0x0000_0002;
-const TPM_RIGHTBUTTON: u32 = 0x0002;
-const TPM_BOTTOMALIGN: u32 = 0x0020;
-const TPM_NONOTIFY: u32 = 0x0080;
-const TPM_RETURNCMD: u32 = 0x0100;
-const WM_DRAWITEM: u32 = 0x002B;
-const WM_MEASUREITEM: u32 = 0x002C;
-const ODT_MENU: u32 = 1;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_TABSTOP: u32 = 0x0001_0000;
+const WS_GROUP: u32 = 0x0002_0000;
+const BS_OWNERDRAW: u32 = 0x0000_000B;
+const ODT_BUTTON: u32 = 4;
 const ODS_SELECTED: u32 = 0x0001;
+const ODS_FOCUS: u32 = 0x0010;
 const DT_VCENTER: u32 = 0x0004;
 const DT_SINGLELINE: u32 = 0x0020;
 const DT_NOPREFIX: u32 = 0x0800;
 const DT_END_ELLIPSIS: u32 = 0x8000;
 const TRANSPARENT: i32 = 1;
 const DEFAULT_GUI_FONT: i32 = 17;
+const NULL_PEN: i32 = 8;
+const GWLP_USERDATA: i32 = -21;
+const BN_CLICKED: usize = 0;
+const WA_INACTIVE: usize = 0;
+const VK_TAB: usize = 0x09;
+const VK_RETURN: usize = 0x0D;
+const VK_ESCAPE: usize = 0x1B;
+const VK_SPACE: usize = 0x20;
+const VK_UP: usize = 0x26;
+const VK_DOWN: usize = 0x28;
+const VK_SHIFT: i32 = 0x10;
+const TME_LEAVE: u32 = 0x0000_0002;
+const LWA_ALPHA: u32 = 0x0000_0002;
+const SESSION_BUTTON_ID: usize = 1_000;
+const NO_HOVERED_SESSION: usize = usize::MAX;
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+const DWMWA_BORDER_COLOR: u32 = 34;
+const DWMWCP_ROUND: u32 = 2;
 const PBT_POWERSETTINGCHANGE: usize = 0x8013;
 const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0;
 
@@ -211,7 +238,7 @@ struct Point {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Rect {
     left: i32,
     top: i32,
@@ -220,13 +247,13 @@ struct Rect {
 }
 
 #[repr(C)]
-struct MeasureItemStruct {
-    control_type: u32,
-    control_id: u32,
-    item_id: u32,
-    item_width: u32,
-    item_height: u32,
-    item_data: usize,
+struct PaintStruct {
+    device_context: Handle,
+    erase: Bool,
+    paint: Rect,
+    restore: Bool,
+    incremental_update: Bool,
+    reserved: [u8; 32],
 }
 
 #[repr(C)]
@@ -243,28 +270,42 @@ struct DrawItemStruct {
 }
 
 #[repr(C)]
-struct MenuInfo {
+struct TrackMouseEvent {
     size: u32,
-    mask: u32,
-    style: u32,
-    max_height: u32,
-    background: Handle,
-    context_help_id: u32,
-    menu_data: usize,
+    flags: u32,
+    track_window: Hwnd,
+    hover_time: u32,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum MenuItemKind {
-    Header,
-    Separator,
-    Session,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PopupTheme {
+    Dark,
+    Light,
+    HighContrast,
+    HighContrastLight,
 }
 
-struct MenuItemData {
-    text: Vec<u16>,
-    kind: MenuItemKind,
-    width: u32,
-    height: u32,
+#[derive(Clone, Copy)]
+struct PopupColors {
+    background: u32,
+    border: u32,
+    text: u32,
+    muted_text: u32,
+    hover_background: u32,
+    hover_text: u32,
+}
+
+struct NotificationPopupState {
+    title: Vec<u16>,
+    items: Vec<Vec<u16>>,
+    buttons: Vec<Hwnd>,
+    selected_index: Option<usize>,
+    hovered_index: Option<usize>,
+    colors: PopupColors,
+    font: Handle,
+    dpi: u32,
+    header_height: i32,
+    closing: bool,
 }
 
 #[repr(C)]
@@ -279,6 +320,8 @@ struct Message {
 }
 
 type WindowProcedure = unsafe extern "system" fn(Hwnd, u32, Wparam, Lparam) -> Lresult;
+type SubclassProcedure =
+    unsafe extern "system" fn(Hwnd, u32, Wparam, Lparam, usize, usize) -> Lresult;
 
 #[repr(C)]
 struct WindowClassExW {
@@ -428,7 +471,7 @@ unsafe extern "system" {
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn AppendMenuW(menu: Hmenu, flags: u32, item: usize, text: *const u16) -> Bool;
+    fn BeginPaint(window: Hwnd, paint: *mut PaintStruct) -> Handle;
     fn CreateWindowExW(
         extended_style: u32,
         class_name: *const u16,
@@ -446,8 +489,6 @@ unsafe extern "system" {
     fn DefWindowProcW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn AttachThreadInput(id_attach: u32, id_attach_to: u32, attach: Bool) -> Bool;
     fn BringWindowToTop(window: Hwnd) -> Bool;
-    fn CreatePopupMenu() -> Hmenu;
-    fn DestroyMenu(menu: Hmenu) -> Bool;
     fn DestroyWindow(window: Hwnd) -> Bool;
     fn DispatchMessageW(message: *const Message) -> Lresult;
     fn DrawTextW(
@@ -457,13 +498,24 @@ unsafe extern "system" {
         rectangle: *mut Rect,
         format: u32,
     ) -> i32;
+    fn EndPaint(window: Hwnd, paint: *const PaintStruct) -> Bool;
     fn FillRect(device_context: Handle, rectangle: *const Rect, brush: Handle) -> i32;
+    fn FrameRect(device_context: Handle, rectangle: *const Rect, brush: Handle) -> i32;
+    fn GetClientRect(window: Hwnd, rectangle: *mut Rect) -> Bool;
     fn GetCursorPos(point: *mut Point) -> Bool;
+    fn GetDlgCtrlID(window: Hwnd) -> i32;
+    fn GetDpiForWindow(window: Hwnd) -> u32;
+    fn GetFocus() -> Hwnd;
     fn GetForegroundWindow() -> Hwnd;
+    fn GetKeyState(key: i32) -> i16;
     fn GetMessageW(message: *mut Message, window: Hwnd, min: u32, max: u32) -> Bool;
+    fn GetWindowLongPtrW(window: Hwnd, index: i32) -> isize;
+    fn GetWindowRect(window: Hwnd, rectangle: *mut Rect) -> Bool;
     fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
+    fn InvalidateRect(window: Hwnd, rectangle: *const Rect, erase: Bool) -> Bool;
     fn IsIconic(window: Hwnd) -> Bool;
     fn IsWindow(window: Hwnd) -> Bool;
+    fn LoadCursorW(instance: Handle, cursor_name: *const u16) -> Handle;
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Bool;
     fn PostQuitMessage(exit_code: i32);
     fn RegisterClassExW(window_class: *const WindowClassExW) -> u16;
@@ -472,21 +524,18 @@ unsafe extern "system" {
         setting: *const Guid,
         flags: u32,
     ) -> Handle;
+    fn SendMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
+    fn SetFocus(window: Hwnd) -> Hwnd;
     fn TranslateMessage(message: *const Message) -> Bool;
-    fn TrackPopupMenu(
-        menu: Hmenu,
-        flags: u32,
-        x: i32,
-        y: i32,
-        reserved: i32,
-        owner: Hwnd,
-        rectangle: *const c_void,
-    ) -> u32;
     fn SetForegroundWindow(window: Hwnd) -> Bool;
-    fn SetMenuInfo(menu: Hmenu, information: *const MenuInfo) -> Bool;
+    fn SetLayeredWindowAttributes(window: Hwnd, color_key: u32, alpha: u8, flags: u32) -> Bool;
+    fn SetProcessDpiAwarenessContext(context: Handle) -> Bool;
+    fn SetWindowLongPtrW(window: Hwnd, index: i32, value: isize) -> isize;
     fn ShowWindow(window: Hwnd, command: i32) -> Bool;
+    fn TrackMouseEvent(event: *mut TrackMouseEvent) -> Bool;
     fn UnregisterClassW(class_name: *const u16, instance: Handle) -> Bool;
     fn UnregisterPowerSettingNotification(handle: Handle) -> Bool;
+    fn UpdateWindow(window: Hwnd) -> Bool;
 }
 
 #[link(name = "gdi32")]
@@ -494,9 +543,44 @@ unsafe extern "system" {
     fn CreateSolidBrush(color: u32) -> Handle;
     fn DeleteObject(object: Handle) -> Bool;
     fn GetStockObject(object: i32) -> Handle;
+    fn RoundRect(
+        device_context: Handle,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        width: i32,
+        height: i32,
+    ) -> Bool;
     fn SelectObject(device_context: Handle, object: Handle) -> Handle;
     fn SetBkMode(device_context: Handle, mode: i32) -> i32;
     fn SetTextColor(device_context: Handle, color: u32) -> u32;
+}
+
+#[link(name = "comctl32")]
+unsafe extern "system" {
+    fn DefSubclassProc(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
+    fn RemoveWindowSubclass(
+        window: Hwnd,
+        procedure: Option<SubclassProcedure>,
+        subclass_id: usize,
+    ) -> Bool;
+    fn SetWindowSubclass(
+        window: Hwnd,
+        procedure: Option<SubclassProcedure>,
+        subclass_id: usize,
+        reference_data: usize,
+    ) -> Bool;
+}
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(
+        window: Hwnd,
+        attribute: u32,
+        value: *const c_void,
+        value_size: u32,
+    ) -> i32;
 }
 
 fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
@@ -942,6 +1026,8 @@ pub struct PowerPolicy {
     guarding: bool,
     #[cfg(test)]
     recovery_enabled: bool,
+    #[cfg(test)]
+    system_changes_enabled: bool,
 }
 
 impl PowerPolicy {
@@ -951,6 +1037,8 @@ impl PowerPolicy {
             guarding: false,
             #[cfg(test)]
             recovery_enabled: true,
+            #[cfg(test)]
+            system_changes_enabled: true,
         };
         value.restore_stale();
         value
@@ -962,6 +1050,7 @@ impl PowerPolicy {
             saved: None,
             guarding: false,
             recovery_enabled: false,
+            system_changes_enabled: false,
         }
     }
 
@@ -971,6 +1060,10 @@ impl PowerPolicy {
 
     pub fn acquire(&mut self) -> io::Result<()> {
         if self.guarding {
+            return Ok(());
+        }
+        if !self.system_changes_are_enabled() {
+            self.guarding = true;
             return Ok(());
         }
         set_execution_state(true)?;
@@ -1021,6 +1114,11 @@ impl PowerPolicy {
     }
 
     pub fn release(&mut self) -> io::Result<()> {
+        if !self.system_changes_are_enabled() {
+            self.saved = None;
+            self.guarding = false;
+            return Ok(());
+        }
         let recovery_exists = self.recovery_is_enabled() && paths::recovery_file().exists();
         if !self.guarding && self.saved.is_none() && !recovery_exists {
             return Ok(());
@@ -1061,6 +1159,17 @@ impl PowerPolicy {
         #[cfg(test)]
         {
             self.recovery_enabled
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
+    fn system_changes_are_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.system_changes_enabled
         }
         #[cfg(not(test))]
         {
@@ -1267,114 +1376,196 @@ pub fn focus_editor_window(window: u64) -> bool {
     }
 }
 
-pub fn show_context_menu(title: &str, items: &[String]) -> io::Result<Option<usize>> {
+pub fn show_notification_popup(
+    theme: &str,
+    title: &str,
+    items: &[String],
+) -> io::Result<Option<usize>> {
     if items.is_empty() {
         return Ok(None);
     }
     unsafe {
-        let class_name = wide(format!("CodexLidGuardMenuWindow.{}", GetCurrentProcessId()));
+        let _ = SetProcessDpiAwarenessContext(-4isize as Handle);
+        let class_name = wide(format!(
+            "CodexLidGuardNotificationWindow.{}",
+            GetCurrentProcessId()
+        ));
         let instance = GetModuleHandleW(null());
         let window_class = WindowClassExW {
             size: size_of::<WindowClassExW>() as u32,
             style: 0,
-            window_procedure: Some(menu_owner_window_procedure),
+            window_procedure: Some(notification_popup_window_procedure),
             class_extra: 0,
             window_extra: 0,
             instance,
             icon: null_mut(),
-            cursor: null_mut(),
+            cursor: LoadCursorW(null_mut(), 32_512usize as *const u16),
             background: null_mut(),
             menu_name: null(),
             class_name: class_name.as_ptr(),
             small_icon: null_mut(),
         };
         if RegisterClassExW(&window_class) == 0 {
-            return Err(error("RegisterClassExW failed for the menu owner"));
-        }
-
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            UnregisterClassW(class_name.as_ptr(), instance);
-            return Err(error("CreatePopupMenu failed"));
+            return Err(error("RegisterClassExW failed for the notification popup"));
         }
 
         let previous_foreground = GetForegroundWindow();
-        let owner_name = wide("Codex Lid Guard Menu");
-        let owner = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+        let mut cursor: Point = zeroed();
+        if GetCursorPos(&mut cursor) == 0 {
+            UnregisterClassW(class_name.as_ptr(), instance);
+            return Err(error("GetCursorPos failed"));
+        }
+        let dpi = if previous_foreground.is_null() {
+            96
+        } else {
+            GetDpiForWindow(previous_foreground).max(96)
+        };
+        let gap = scale_dip(8, dpi);
+        let desired_width = scale_dip(450, dpi);
+        let header_height = scale_dip(36, dpi);
+        let row_height = scale_dip(34, dpi);
+        let rows_height = row_height.saturating_mul(items.len().min(i32::MAX as usize) as i32);
+        let popup_height = header_height
+            .saturating_add(rows_height)
+            .saturating_add(scale_dip(8, dpi));
+        let mut editor_bounds: Rect = zeroed();
+        if previous_foreground.is_null()
+            || GetWindowRect(previous_foreground, &mut editor_bounds) == 0
+        {
+            editor_bounds = Rect {
+                left: cursor.x.saturating_sub(desired_width),
+                top: cursor.y.saturating_sub(popup_height),
+                right: cursor.x.saturating_add(gap),
+                bottom: cursor.y.saturating_add(scale_dip(32, dpi)),
+            };
+        }
+        let available_width = editor_bounds
+            .right
+            .saturating_sub(editor_bounds.left)
+            .saturating_sub(gap.saturating_mul(2))
+            .max(1);
+        let popup_width = desired_width.min(available_width);
+        let popup_bounds =
+            notification_popup_bounds(editor_bounds, cursor, dpi, popup_width, popup_height);
+
+        let popup_theme = PopupTheme::parse(theme);
+        let mut state = Box::new(NotificationPopupState {
+            title: wide(normalize_menu_label(title)),
+            items: items
+                .iter()
+                .map(|item| wide(normalize_menu_label(item)))
+                .collect(),
+            buttons: Vec::with_capacity(items.len()),
+            selected_index: None,
+            hovered_index: None,
+            colors: popup_theme.colors(),
+            font: GetStockObject(DEFAULT_GUI_FONT),
+            dpi,
+            header_height,
+            closing: false,
+        });
+
+        let window_name = wide("Codex Lid Guard active sessions");
+        let popup = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT | WS_EX_LAYERED,
             class_name.as_ptr(),
-            owner_name.as_ptr(),
+            window_name.as_ptr(),
             WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            null_mut(),
+            popup_bounds.left,
+            popup_bounds.top,
+            popup_width,
+            popup_height,
+            previous_foreground,
             null_mut(),
             instance,
             null(),
         );
-        if owner.is_null() {
-            DestroyMenu(menu);
+        if popup.is_null() {
             UnregisterClassW(class_name.as_ptr(), instance);
-            return Err(error("CreateWindowExW failed for the menu owner"));
+            return Err(error("CreateWindowExW failed for the notification popup"));
+        }
+        SetWindowLongPtrW(
+            popup,
+            GWLP_USERDATA,
+            (&mut *state as *mut NotificationPopupState) as isize,
+        );
+
+        if SetLayeredWindowAttributes(popup, 0, popup_theme.opacity(), LWA_ALPHA) == 0 {
+            DestroyWindow(popup);
+            UnregisterClassW(class_name.as_ptr(), instance);
+            return Err(error(
+                "SetLayeredWindowAttributes failed for the notification popup",
+            ));
         }
 
-        let background = CreateSolidBrush(color_ref(31, 31, 31));
-        if background.is_null() {
-            DestroyWindow(owner);
-            DestroyMenu(menu);
-            UnregisterClassW(class_name.as_ptr(), instance);
-            return Err(error("CreateSolidBrush failed for the menu background"));
-        }
-
-        let item_width = context_menu_width(title, items);
-        let mut item_data = Vec::with_capacity(items.len() + 2);
-        item_data.push(Box::new(MenuItemData::new(
-            title,
-            MenuItemKind::Header,
-            item_width,
-        )));
-        item_data.push(Box::new(MenuItemData::new(
-            "",
-            MenuItemKind::Separator,
-            item_width,
-        )));
-        item_data.extend(
-            items
-                .iter()
-                .map(|label| Box::new(MenuItemData::new(label, MenuItemKind::Session, item_width))),
+        let dark_mode: Bool =
+            (popup_theme == PopupTheme::Dark || popup_theme == PopupTheme::HighContrast) as Bool;
+        let corner_preference = DWMWCP_ROUND;
+        let border_color = state.colors.border;
+        let _ = DwmSetWindowAttribute(
+            popup,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&raw const dark_mode).cast(),
+            size_of::<Bool>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            popup,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&raw const corner_preference).cast(),
+            size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            popup,
+            DWMWA_BORDER_COLOR,
+            (&raw const border_color).cast(),
+            size_of::<u32>() as u32,
         );
 
         let result = (|| {
-            let information = MenuInfo {
-                size: size_of::<MenuInfo>() as u32,
-                mask: MIM_BACKGROUND,
-                style: 0,
-                max_height: 0,
-                background,
-                context_help_id: 0,
-                menu_data: 0,
-            };
-            if SetMenuInfo(menu, &information) == 0 {
-                return Err(error("SetMenuInfo failed"));
-            }
-            for (index, data) in item_data.iter().enumerate() {
-                let identifier = index.saturating_sub(1);
-                let disabled = data.kind != MenuItemKind::Session;
-                let flags = MF_OWNERDRAW | if disabled { MF_DISABLED } else { 0 };
-                let item_pointer = (&**data as *const MenuItemData).cast::<u16>();
-                if AppendMenuW(menu, flags, identifier, item_pointer) == 0 {
-                    return Err(error("AppendMenuW failed"));
+            let button_class = wide("BUTTON");
+            let horizontal_inset = scale_dip(8, dpi);
+            let top_inset = scale_dip(2, dpi);
+            let button_width = popup_width.saturating_sub(horizontal_inset.saturating_mul(2));
+            for index in 0..state.items.len() {
+                let control_id = SESSION_BUTTON_ID + index;
+                let button = CreateWindowExW(
+                    0,
+                    button_class.as_ptr(),
+                    state.items[index].as_ptr(),
+                    WS_CHILD
+                        | WS_VISIBLE
+                        | WS_TABSTOP
+                        | BS_OWNERDRAW
+                        | if index == 0 { WS_GROUP } else { 0 },
+                    horizontal_inset,
+                    header_height
+                        .saturating_add(top_inset)
+                        .saturating_add(row_height.saturating_mul(index as i32)),
+                    button_width,
+                    row_height,
+                    popup,
+                    control_id as Handle,
+                    instance,
+                    null(),
+                );
+                if button.is_null() {
+                    return Err(error("CreateWindowExW failed for a session button"));
                 }
+                SendMessageW(button, WM_SETFONT, state.font as usize, 1);
+                if SetWindowSubclass(
+                    button,
+                    Some(session_button_subclass_procedure),
+                    index,
+                    popup as usize,
+                ) == 0
+                {
+                    return Err(error("SetWindowSubclass failed for a session button"));
+                }
+                state.buttons.push(button);
             }
 
-            let mut point: Point = zeroed();
-            if GetCursorPos(&mut point) == 0 {
-                return Err(error("GetCursorPos failed"));
-            }
-
-            ShowWindow(owner, SW_SHOW);
+            ShowWindow(popup, SW_SHOW);
+            UpdateWindow(popup);
             let current_thread = GetCurrentThreadId();
             let foreground_thread = if previous_foreground.is_null() {
                 0
@@ -1384,147 +1575,411 @@ pub fn show_context_menu(title: &str, items: &[String]) -> io::Result<Option<usi
             let attached_foreground = foreground_thread != 0
                 && foreground_thread != current_thread
                 && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
-            let focused = SetForegroundWindow(owner) != 0;
+            let focused = SetForegroundWindow(popup) != 0;
             if attached_foreground {
                 AttachThreadInput(current_thread, foreground_thread, 0);
             }
             if !focused {
-                return Err(error("SetForegroundWindow failed for the menu owner"));
+                return Err(error(
+                    "SetForegroundWindow failed for the notification popup",
+                ));
+            }
+            BringWindowToTop(popup);
+            if let Some(first_button) = state.buttons.first() {
+                SetFocus(*first_button);
             }
 
-            let selected = TrackPopupMenu(
-                menu,
-                TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_NONOTIFY | TPM_RETURNCMD,
-                point.x,
-                point.y,
-                0,
-                owner,
-                null(),
-            );
-            PostMessageW(owner, WM_NULL, 0, 0);
-            Ok((selected > 0).then_some(selected as usize - 1))
+            let mut message: Message = zeroed();
+            loop {
+                let message_result = GetMessageW(&mut message, null_mut(), 0, 0);
+                if message_result == -1 {
+                    return Err(error("GetMessageW failed for the notification popup"));
+                }
+                if message_result == 0 {
+                    break;
+                }
+                if message.message == WM_KEYDOWN {
+                    match message.wparam {
+                        VK_ESCAPE => {
+                            close_notification_popup(popup, &mut state, None);
+                            continue;
+                        }
+                        VK_UP => {
+                            focus_adjacent_session(&state, -1);
+                            continue;
+                        }
+                        VK_DOWN => {
+                            focus_adjacent_session(&state, 1);
+                            continue;
+                        }
+                        VK_TAB => {
+                            let direction = if GetKeyState(VK_SHIFT) < 0 { -1 } else { 1 };
+                            focus_adjacent_session(&state, direction);
+                            continue;
+                        }
+                        VK_RETURN | VK_SPACE => {
+                            let focused_window = GetFocus();
+                            let control_id = GetDlgCtrlID(focused_window);
+                            if control_id >= SESSION_BUTTON_ID as i32 {
+                                SendMessageW(
+                                    popup,
+                                    WM_COMMAND,
+                                    control_id as usize,
+                                    focused_window as isize,
+                                );
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            Ok(state.selected_index)
         })();
+        if IsWindow(popup) != 0 {
+            DestroyWindow(popup);
+        }
         if !previous_foreground.is_null() && IsWindow(previous_foreground) != 0 {
             SetForegroundWindow(previous_foreground);
         }
-        DestroyMenu(menu);
-        DeleteObject(background);
-        DestroyWindow(owner);
         UnregisterClassW(class_name.as_ptr(), instance);
         result
     }
 }
 
-impl MenuItemData {
-    fn new(value: &str, kind: MenuItemKind, width: u32) -> Self {
-        let text = normalize_menu_label(value)
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let height = match kind {
-            MenuItemKind::Header => 32,
-            MenuItemKind::Separator => 9,
-            MenuItemKind::Session => 36,
-        };
-        Self {
-            text,
-            kind,
-            width,
-            height,
+impl PopupTheme {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "light" => Self::Light,
+            "high-contrast" => Self::HighContrast,
+            "high-contrast-light" => Self::HighContrastLight,
+            _ => Self::Dark,
         }
     }
-}
 
-fn context_menu_width(title: &str, items: &[String]) -> u32 {
-    std::iter::once(title)
-        .chain(items.iter().map(String::as_str))
-        .map(|value| normalize_menu_label(value).encode_utf16().count() as u32 * 8 + 40)
-        .max()
-        .unwrap_or(260)
-        .clamp(260, 520)
+    fn colors(self) -> PopupColors {
+        match self {
+            Self::Dark => PopupColors {
+                background: color_ref(37, 37, 38),
+                border: color_ref(68, 68, 68),
+                text: color_ref(204, 204, 204),
+                muted_text: color_ref(156, 156, 156),
+                hover_background: color_ref(48, 48, 48),
+                hover_text: color_ref(255, 255, 255),
+            },
+            Self::Light => PopupColors {
+                background: color_ref(248, 248, 248),
+                border: color_ref(200, 200, 200),
+                text: color_ref(51, 51, 51),
+                muted_text: color_ref(97, 97, 97),
+                hover_background: color_ref(229, 229, 229),
+                hover_text: color_ref(0, 0, 0),
+            },
+            Self::HighContrast => PopupColors {
+                background: color_ref(0, 0, 0),
+                border: color_ref(255, 255, 255),
+                text: color_ref(255, 255, 255),
+                muted_text: color_ref(255, 255, 255),
+                hover_background: color_ref(0, 128, 128),
+                hover_text: color_ref(255, 255, 255),
+            },
+            Self::HighContrastLight => PopupColors {
+                background: color_ref(255, 255, 255),
+                border: color_ref(0, 0, 0),
+                text: color_ref(0, 0, 0),
+                muted_text: color_ref(0, 0, 0),
+                hover_background: color_ref(0, 0, 128),
+                hover_text: color_ref(255, 255, 255),
+            },
+        }
+    }
+
+    fn opacity(self) -> u8 {
+        match self {
+            Self::HighContrast | Self::HighContrastLight => 255,
+            Self::Dark | Self::Light => 235,
+        }
+    }
 }
 
 fn normalize_menu_label(value: &str) -> String {
     value.replace(['\r', '\n', '\t'], " ")
 }
 
-unsafe extern "system" fn menu_owner_window_procedure(
+fn scale_dip(value: i32, dpi: u32) -> i32 {
+    ((i64::from(value) * i64::from(dpi.max(96)) + 48) / 96)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn notification_popup_bounds(
+    editor: Rect,
+    cursor: Point,
+    dpi: u32,
+    width: i32,
+    height: i32,
+) -> Rect {
+    let gap = scale_dip(8, dpi);
+    let status_click_offset = scale_dip(19, dpi);
+    let status_band_top = editor.bottom.saturating_sub(scale_dip(80, dpi));
+    let cursor_is_in_status_band = cursor.x >= editor.left
+        && cursor.x <= editor.right
+        && cursor.y >= status_band_top
+        && cursor.y <= editor.bottom;
+    let desired_bottom = if cursor_is_in_status_band {
+        cursor.y.saturating_sub(status_click_offset)
+    } else {
+        editor.bottom.saturating_sub(scale_dip(34, dpi))
+    };
+    let right = editor.right.saturating_sub(gap);
+    let left = right
+        .saturating_sub(width)
+        .max(editor.left.saturating_add(gap));
+    let top = desired_bottom
+        .saturating_sub(height)
+        .max(editor.top.saturating_add(gap));
+    Rect {
+        left,
+        top,
+        right: left.saturating_add(width),
+        bottom: top.saturating_add(height),
+    }
+}
+
+unsafe extern "system" fn notification_popup_window_procedure(
     window: Hwnd,
     message: u32,
     wparam: Wparam,
     lparam: Lparam,
 ) -> Lresult {
     unsafe {
-        if message == WM_MEASUREITEM && lparam != 0 {
-            let measure = &mut *(lparam as *mut MeasureItemStruct);
-            if measure.control_type == ODT_MENU && measure.item_data != 0 {
-                let data = &*(measure.item_data as *const MenuItemData);
-                measure.item_width = data.width;
-                measure.item_height = data.height;
-                return 1;
-            }
+        let state_pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut NotificationPopupState;
+        if state_pointer.is_null() {
+            return DefWindowProcW(window, message, wparam, lparam);
         }
-        if message == WM_DRAWITEM && lparam != 0 {
-            let draw = &*(lparam as *const DrawItemStruct);
-            if draw.control_type == ODT_MENU && draw.item_data != 0 {
-                draw_context_menu_item(draw, &*(draw.item_data as *const MenuItemData));
+        let state = &mut *state_pointer;
+        match message {
+            WM_PAINT => {
+                paint_notification_popup(window, state);
                 return 1;
             }
+            WM_ERASEBKGND => return 1,
+            WM_DRAWITEM if lparam != 0 => {
+                let draw = &*(lparam as *const DrawItemStruct);
+                if draw.control_type == ODT_BUTTON {
+                    draw_notification_session(draw, state);
+                    return 1;
+                }
+            }
+            WM_COMMAND => {
+                let notification = (wparam >> 16) & 0xffff;
+                let control_id = wparam & 0xffff;
+                if notification == BN_CLICKED && control_id >= SESSION_BUTTON_ID {
+                    let selected = control_id - SESSION_BUTTON_ID;
+                    if selected < state.items.len() {
+                        close_notification_popup(window, state, Some(selected));
+                        return 0;
+                    }
+                }
+            }
+            WM_APP_HOVER_SESSION => {
+                let next = (wparam != NO_HOVERED_SESSION).then_some(wparam);
+                if next != state.hovered_index {
+                    if let Some(previous) = state.hovered_index
+                        && let Some(button) = state.buttons.get(previous)
+                    {
+                        InvalidateRect(*button, null(), 0);
+                    }
+                    state.hovered_index = next;
+                    if let Some(next) = next
+                        && let Some(button) = state.buttons.get(next)
+                    {
+                        InvalidateRect(*button, null(), 0);
+                    }
+                }
+                return 0;
+            }
+            WM_ACTIVATE if (wparam & 0xffff) == WA_INACTIVE && !state.closing => {
+                close_notification_popup(window, state, None);
+                return 0;
+            }
+            WM_CLOSE => {
+                close_notification_popup(window, state, None);
+                return 0;
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                return 0;
+            }
+            _ => {}
         }
         DefWindowProcW(window, message, wparam, lparam)
     }
 }
 
-unsafe fn draw_context_menu_item(draw: &DrawItemStruct, data: &MenuItemData) {
+unsafe extern "system" fn session_button_subclass_procedure(
+    window: Hwnd,
+    message: u32,
+    wparam: Wparam,
+    lparam: Lparam,
+    subclass_id: usize,
+    parent: usize,
+) -> Lresult {
     unsafe {
-        let selected = data.kind == MenuItemKind::Session && draw.item_state & ODS_SELECTED != 0;
-        let background_color = if selected {
-            color_ref(4, 57, 94)
-        } else {
-            color_ref(31, 31, 31)
-        };
-        let brush = CreateSolidBrush(background_color);
-        if !brush.is_null() {
-            FillRect(draw.device_context, &draw.item_rect, brush);
-            DeleteObject(brush);
+        match message {
+            WM_MOUSEMOVE => {
+                SendMessageW(parent as Hwnd, WM_APP_HOVER_SESSION, subclass_id, 0);
+                let mut tracking = TrackMouseEvent {
+                    size: size_of::<TrackMouseEvent>() as u32,
+                    flags: TME_LEAVE,
+                    track_window: window,
+                    hover_time: 0,
+                };
+                TrackMouseEvent(&mut tracking);
+            }
+            WM_MOUSELEAVE => {
+                SendMessageW(parent as Hwnd, WM_APP_HOVER_SESSION, NO_HOVERED_SESSION, 0);
+            }
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(window, Some(session_button_subclass_procedure), subclass_id);
+            }
+            _ => {}
+        }
+        DefSubclassProc(window, message, wparam, lparam)
+    }
+}
+
+unsafe fn close_notification_popup(
+    window: Hwnd,
+    state: &mut NotificationPopupState,
+    selection: Option<usize>,
+) {
+    if state.closing {
+        return;
+    }
+    state.selected_index = selection;
+    state.closing = true;
+    unsafe {
+        DestroyWindow(window);
+    }
+}
+
+unsafe fn focus_adjacent_session(state: &NotificationPopupState, direction: isize) {
+    if state.buttons.is_empty() {
+        return;
+    }
+    unsafe {
+        let focused = GetFocus();
+        let current = state
+            .buttons
+            .iter()
+            .position(|button| *button == focused)
+            .unwrap_or(0);
+        let count = state.buttons.len() as isize;
+        let next = (current as isize + direction).rem_euclid(count) as usize;
+        SetFocus(state.buttons[next]);
+        InvalidateRect(state.buttons[current], null(), 0);
+        InvalidateRect(state.buttons[next], null(), 0);
+    }
+}
+
+unsafe fn paint_notification_popup(window: Hwnd, state: &NotificationPopupState) {
+    unsafe {
+        let mut paint: PaintStruct = zeroed();
+        let device_context = BeginPaint(window, &mut paint);
+        if device_context.is_null() {
+            return;
+        }
+        let mut client: Rect = zeroed();
+        GetClientRect(window, &mut client);
+        fill_rectangle(device_context, &client, state.colors.background);
+
+        let border_brush = CreateSolidBrush(state.colors.border);
+        if !border_brush.is_null() {
+            FrameRect(device_context, &client, border_brush);
+            DeleteObject(border_brush);
         }
 
-        if data.kind == MenuItemKind::Separator {
-            let middle = (draw.item_rect.top + draw.item_rect.bottom) / 2;
-            let separator = Rect {
-                left: draw.item_rect.left + 12,
-                top: middle,
-                right: draw.item_rect.right - 12,
-                bottom: middle + 1,
-            };
-            let brush = CreateSolidBrush(color_ref(62, 62, 64));
-            if !brush.is_null() {
-                FillRect(draw.device_context, &separator, brush);
-                DeleteObject(brush);
-            }
+        SetBkMode(device_context, TRANSPARENT);
+        SetTextColor(device_context, state.colors.muted_text);
+        let previous_font = if state.font.is_null() {
+            null_mut()
+        } else {
+            SelectObject(device_context, state.font)
+        };
+
+        let mut title_rect = Rect {
+            left: scale_dip(16, state.dpi),
+            top: 0,
+            right: client.right.saturating_sub(scale_dip(16, state.dpi)),
+            bottom: state.header_height,
+        };
+        DrawTextW(
+            device_context,
+            state.title.as_ptr(),
+            wide_text_length(&state.title),
+            &mut title_rect,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+
+        if !previous_font.is_null() {
+            SelectObject(device_context, previous_font);
+        }
+        EndPaint(window, &paint);
+    }
+}
+
+unsafe fn draw_notification_session(draw: &DrawItemStruct, state: &NotificationPopupState) {
+    unsafe {
+        let control_id = GetDlgCtrlID(draw.item_window);
+        let Some(index) = (control_id >= SESSION_BUTTON_ID as i32)
+            .then_some(control_id as usize - SESSION_BUTTON_ID)
+            .filter(|index| *index < state.items.len())
+        else {
             return;
+        };
+        let pressed = draw.item_state & ODS_SELECTED != 0;
+        let focused = draw.item_state & ODS_FOCUS != 0;
+        let hovered = state.hovered_index == Some(index);
+        let highlighted = pressed || hovered || (state.hovered_index.is_none() && focused);
+        fill_rectangle(
+            draw.device_context,
+            &draw.item_rect,
+            state.colors.background,
+        );
+        if highlighted {
+            let mut pill = draw.item_rect;
+            let vertical_inset = scale_dip(2, state.dpi);
+            pill.top += vertical_inset;
+            pill.bottom -= vertical_inset;
+            fill_rounded_rectangle(
+                draw.device_context,
+                &pill,
+                state.colors.hover_background,
+                scale_dip(14, state.dpi),
+            );
         }
 
         SetBkMode(draw.device_context, TRANSPARENT);
-        let text_color = match (data.kind, selected) {
-            (_, true) => color_ref(255, 255, 255),
-            (MenuItemKind::Header, false) => color_ref(160, 160, 160),
-            _ => color_ref(204, 204, 204),
+        let text_color = if highlighted {
+            state.colors.hover_text
+        } else {
+            state.colors.text
         };
         SetTextColor(draw.device_context, text_color);
-        let font = GetStockObject(DEFAULT_GUI_FONT);
-        let previous_font = if font.is_null() {
+        let previous_font = if state.font.is_null() {
             null_mut()
         } else {
-            SelectObject(draw.device_context, font)
+            SelectObject(draw.device_context, state.font)
         };
         let mut text_rect = draw.item_rect;
-        text_rect.left += 14;
-        text_rect.right -= 14;
+        text_rect.left += scale_dip(12, state.dpi);
+        text_rect.right -= scale_dip(12, state.dpi);
         DrawTextW(
             draw.device_context,
-            data.text.as_ptr(),
-            data.text.len().saturating_sub(1).min(i32::MAX as usize) as i32,
+            state.items[index].as_ptr(),
+            wide_text_length(&state.items[index]),
             &mut text_rect,
             DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
@@ -1532,6 +1987,57 @@ unsafe fn draw_context_menu_item(draw: &DrawItemStruct, data: &MenuItemData) {
             SelectObject(draw.device_context, previous_font);
         }
     }
+}
+
+unsafe fn fill_rectangle(device_context: Handle, rectangle: &Rect, color: u32) {
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        if !brush.is_null() {
+            FillRect(device_context, rectangle, brush);
+            DeleteObject(brush);
+        }
+    }
+}
+
+unsafe fn fill_rounded_rectangle(
+    device_context: Handle,
+    rectangle: &Rect,
+    color: u32,
+    radius: i32,
+) {
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        if brush.is_null() {
+            return;
+        }
+        let previous_brush = SelectObject(device_context, brush);
+        let null_pen = GetStockObject(NULL_PEN);
+        let previous_pen = if null_pen.is_null() {
+            null_mut()
+        } else {
+            SelectObject(device_context, null_pen)
+        };
+        RoundRect(
+            device_context,
+            rectangle.left,
+            rectangle.top,
+            rectangle.right,
+            rectangle.bottom,
+            radius.saturating_mul(2),
+            radius.saturating_mul(2),
+        );
+        if !previous_pen.is_null() {
+            SelectObject(device_context, previous_pen);
+        }
+        if !previous_brush.is_null() {
+            SelectObject(device_context, previous_brush);
+        }
+        DeleteObject(brush);
+    }
+}
+
+fn wide_text_length(value: &[u16]) -> i32 {
+    value.len().saturating_sub(1).min(i32::MAX as usize) as i32
 }
 
 const fn color_ref(red: u8, green: u8, blue: u8) -> u32 {
@@ -1866,9 +2372,10 @@ mod tests {
     }
 
     #[test]
-    fn isolated_test_power_policy_cannot_read_production_recovery_state() {
+    fn isolated_test_power_policy_cannot_touch_production_power_state() {
         let policy = PowerPolicy::new_for_test();
         assert!(!policy.recovery_is_enabled());
+        assert!(!policy.system_changes_are_enabled());
     }
 
     #[test]
@@ -1877,6 +2384,47 @@ mod tests {
             normalize_menu_label("Research & Development\nSession"),
             "Research & Development Session"
         );
+    }
+
+    #[test]
+    fn notification_popup_is_right_aligned_above_the_status_bar() {
+        let bounds = notification_popup_bounds(
+            Rect {
+                left: 0,
+                top: 0,
+                right: 1230,
+                bottom: 715,
+            },
+            Point { x: 1100, y: 694 },
+            144,
+            675,
+            114,
+        );
+
+        assert_eq!(
+            bounds,
+            Rect {
+                left: 543,
+                top: 551,
+                right: 1218,
+                bottom: 665,
+            }
+        );
+    }
+
+    #[test]
+    fn notification_popup_theme_follows_vscode_theme_kind() {
+        assert_eq!(PopupTheme::parse("light"), PopupTheme::Light);
+        assert_eq!(PopupTheme::parse("high-contrast"), PopupTheme::HighContrast);
+        assert_eq!(
+            PopupTheme::parse("high-contrast-light"),
+            PopupTheme::HighContrastLight
+        );
+        assert_eq!(PopupTheme::parse("unknown"), PopupTheme::Dark);
+        assert_eq!(PopupTheme::Dark.opacity(), 235);
+        assert_eq!(PopupTheme::Light.opacity(), 235);
+        assert_eq!(PopupTheme::HighContrast.opacity(), 255);
+        assert_eq!(PopupTheme::HighContrastLight.opacity(), 255);
     }
 
     #[test]

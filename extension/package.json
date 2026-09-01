@@ -3,7 +3,7 @@
   "displayName": "Codex Lid Guard",
   "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
   "icon": "images/codex-lid-guard-logo.png",
-  "version": "0.1.17",
+  "version": "0.1.25",
   "publisher": "KethaYaya",
   "license": "MIT",
   "pricing": "Free",
@@ -73,8 +73,8 @@
         "title": "Codex Lid Guard: Restore Power Settings Now"
       },
       {
-        "command": "codexLidGuard.finishSetup",
-        "title": "Codex Lid Guard: Finish Codex Hook Setup"
+        "command": "codexLidGuard.configureOptionalHooks",
+        "title": "Codex Lid Guard: Enable Optional Hook Alerts"
       },
       {
         "command": "codexLidGuard.testAlertSounds",
@@ -97,7 +97,12 @@
         "codexLidGuard.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Install Codex lifecycle hooks and guard the laptop while local turns run."
+          "description": "Monitor local Codex turns and guard the laptop while they run. No Codex hook setup is required."
+        },
+        "codexLidGuard.optionalHooks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optionally install Codex hooks for immediate approval/request alerts and redundant lifecycle signals. Codex requires a one-time manual trust review when this is enabled."
         },
         "codexLidGuard.sleepWhenLidClosed": {
           "type": "boolean",

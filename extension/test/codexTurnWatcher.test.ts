@@ -62,3 +62,40 @@ test("watches only newly appended Codex turn-start events", async () => {
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("emits a turn start before the log line receives its trailing newline", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-turn-watcher-partial-"));
+  const logPath = path.join(directory, "Codex.log");
+  const sessionId = "01a05dc2-c025-7a60-aee6-451599e3a6cb";
+  await fs.writeFile(logPath, "", "utf8");
+
+  let watcher: Awaited<ReturnType<typeof watchCodexTurnStarts>> = undefined;
+  try {
+    const observed: string[] = [];
+    watcher = await watchCodexTurnStarts(logPath, (value) => observed.push(value));
+    assert.ok(watcher);
+    await fs.appendFile(
+      logPath,
+      `Reasoning summary turn-start config resolved conversationId=${sessionId} reasoningSummaryOverride=null`,
+      "utf8"
+    );
+    await waitFor(() => observed.length === 1);
+
+    await fs.appendFile(logPath, "\nnext log line\n", "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.deepEqual(observed, [sessionId]);
+  } finally {
+    watcher?.dispose();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error("turn-start watcher timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canonicalizeWindowsExecutablePath,
+  guardHooksForPreference,
   hasGuardHooks,
   hookMarker,
   isOurGroup,
@@ -64,4 +65,17 @@ test("uninstall removes only guard-owned groups", () => {
   const removed = withoutGuardHooks(installed);
   assert.equal(hasGuardHooks(removed), false);
   assert.match(JSON.stringify(removed), /keep-me/);
+});
+
+test("the default no-hook preference removes previous Lid Guard hooks", () => {
+  const existing = { hooks: { Stop: [{ hooks: [{ type: "command", command: "keep-me" }] }] } };
+  const installed = withGuardHooks(existing, "C:\\Guard\\CodexLidGuard.exe");
+  const defaultPolicy = guardHooksForPreference(
+    installed,
+    "C:\\Guard\\CodexLidGuard.exe",
+    false
+  );
+
+  assert.equal(hasGuardHooks(defaultPolicy), false);
+  assert.match(JSON.stringify(defaultPolicy), /keep-me/);
 });

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, hash_map::Entry};
 use std::io;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -11,7 +12,7 @@ use crate::model::{
     ActiveTurnInfo, GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION,
 };
 use crate::sound::{self, AlertSound};
-use crate::{codex_log, paths, win};
+use crate::{client, codex_lifecycle, codex_log, paths, win};
 
 const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
 const ACTIVE_TURN_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
@@ -99,6 +100,7 @@ impl DaemonState {
                 .ok()
                 .map(|value| value.to_string_lossy().into_owned()),
             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            pipe_name: Some(paths::pipe_name()),
             ok,
             message: message.into(),
             active_turns: self.active_turns.len(),
@@ -143,6 +145,39 @@ pub fn run() -> io::Result<()> {
     if let Ok(state) = state.lock() {
         publish_status(&state.snapshot(true, "Guardian daemon ready."));
     }
+    let lifecycle_state = Arc::clone(&state);
+    let _lifecycle_watcher = codex_lifecycle::start(move |start| {
+        let session_id = start.session_id;
+        let request = GuardRequest {
+            action: "metadata-acquire".to_string(),
+            session_id: Some(session_id.clone()),
+            turn_id: Some(format!("pending-metadata-{}", start.row_id)),
+            cwd: start.cwd,
+            transcript_path: start.transcript_path,
+            ..GuardRequest::default()
+        };
+        let _ = handle_request(&lifecycle_state, request);
+        // Window discovery is deliberately after acquisition so UI bookkeeping
+        // cannot add latency to the power-protection path.
+        if let Some(origin_window) = win::foreground_editor_window() {
+            let _ = handle_request(
+                &lifecycle_state,
+                GuardRequest {
+                    action: "associate-window".to_string(),
+                    session_id: Some(session_id),
+                    origin_window: Some(origin_window),
+                    ..GuardRequest::default()
+                },
+            );
+        }
+        // The guard is already active; this read-only request only interrupts a
+        // five-minute idle accept so terminal reconciliation switches to its
+        // normal two-second active cadence.
+        let _ = client::send(GuardRequest {
+            action: "status".to_string(),
+            ..GuardRequest::default()
+        });
+    });
 
     loop {
         let has_active_turns = state
@@ -227,7 +262,7 @@ fn shield_newer_daemon_from_legacy_status(request: &GuardRequest, response: &mut
     }
 }
 
-fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> GuardResponse {
+fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -> GuardResponse {
     let action = request.action.to_ascii_lowercase();
     let mut sleep_schedule = None;
     let mut sound_schedule = None;
@@ -241,12 +276,13 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
         let response = match action.as_str() {
             "acquire" => acquire(&mut state, &request),
             "pre-acquire" => {
-                let response = acquire(&mut state, &request);
-                if response.ok {
+                let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
+                if acquired && !durable {
                     pre_acquire_expiry = Some(turn_key(&request));
                 }
                 response
             }
+            "metadata-acquire" => pre_acquire(&mut state, &mut request).0,
             "release" => {
                 let key = turn_key(&request);
                 alert_window = state
@@ -254,6 +290,13 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                     .remove(&key)
                     .and_then(|turn| turn.origin_window);
                 state.transcript_cursors.remove(&key);
+                let removed_provisionals = remove_session_provisionals(&mut state, &request);
+                if removed_provisionals > 0 {
+                    logging::write(format!(
+                        "Released {removed_provisionals} metadata turn(s) for session {}.",
+                        request.session_id.as_deref().unwrap_or("unknown-session")
+                    ));
+                }
                 alert_session_is_current =
                     origin_session_is_current(&state, &request, alert_window);
                 logging::write(format!(
@@ -309,6 +352,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
             }
             "status" => state.snapshot(true, "Status read."),
             "focus" => focus_turn(&state, &request),
+            "associate-window" => associate_window(&mut state, &request),
             "sound-done" => state.snapshot(true, "Completion alert scheduled."),
             "sound-request" => {
                 alert_window = origin_window_for_request(&state, &request);
@@ -336,7 +380,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
         }
         let should_publish_status = !matches!(
             action.as_str(),
-            "status" | "focus" | "sound-done" | "sound-request"
+            "status" | "focus" | "associate-window" | "sound-done" | "sound-request"
         );
         (response, should_publish_status)
     };
@@ -424,10 +468,20 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
             false
         }
     };
-    if let Some(cursor) = TranscriptCursor::new(
-        request.transcript_path.as_deref(),
-        request.turn_id.as_deref(),
-    ) {
+    let cursor = if request.action.eq_ignore_ascii_case("metadata-acquire")
+        || request
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| turn_id.starts_with("pending-metadata-"))
+    {
+        TranscriptCursor::new_for_session(request.transcript_path.as_deref())
+    } else {
+        TranscriptCursor::new(
+            request.transcript_path.as_deref(),
+            request.turn_id.as_deref(),
+        )
+    };
+    if let Some(cursor) = cursor {
         state
             .transcript_cursors
             .entry(key.clone())
@@ -452,6 +506,66 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
     )
 }
 
+fn pre_acquire(state: &mut DaemonState, request: &mut GuardRequest) -> (GuardResponse, bool, bool) {
+    let prefix = session_prefix(request);
+    let has_authoritative_turn = state
+        .active_turns
+        .iter()
+        .any(|(key, turn)| key.starts_with(&prefix) && !turn.info.turn_id.starts_with("pending-"));
+    if has_authoritative_turn {
+        logging::write(format!(
+            "Ignored late provisional acquisition for session {} because its authoritative turn is already active.",
+            prefix.trim_end_matches(':')
+        ));
+        return (
+            state.snapshot(true, "The authoritative Codex turn is already active."),
+            false,
+            true,
+        );
+    }
+    let has_metadata_turn = state.active_turns.iter().any(|(key, turn)| {
+        key.starts_with(&prefix) && turn.info.turn_id.starts_with("pending-metadata-")
+    });
+    if request.action.eq_ignore_ascii_case("pre-acquire") && has_metadata_turn {
+        return (
+            state.snapshot(true, "The Codex metadata turn is already active."),
+            false,
+            true,
+        );
+    }
+
+    if request.action.eq_ignore_ascii_case("pre-acquire")
+        && let Some(session_id) = request.session_id.as_deref()
+    {
+        let (transcript_path, cwd) = codex_lifecycle::session_metadata(session_id);
+        attach_session_metadata(request, transcript_path, cwd);
+    }
+
+    let response = acquire(state, request);
+    let acquired = response.ok;
+    let durable = request.transcript_path.is_some()
+        && request
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| turn_id.starts_with("pending-metadata-"));
+    (response, acquired, durable)
+}
+
+fn attach_session_metadata(
+    request: &mut GuardRequest,
+    transcript_path: Option<String>,
+    cwd: Option<String>,
+) {
+    if request.cwd.is_none() {
+        request.cwd = cwd;
+    }
+    if let Some(transcript_path) = transcript_path.filter(|value| Path::new(value).is_file()) {
+        request.transcript_path = Some(transcript_path);
+        let pending_id = request.turn_id.as_deref().unwrap_or("log");
+        request.turn_id = Some(format!("pending-metadata-log-{pending_id}"));
+    }
+}
+
 fn remove_stale_session_turns(state: &mut DaemonState, prefix: &str, key: &str) -> usize {
     let previous_count = state.active_turns.len();
     state
@@ -463,8 +577,24 @@ fn remove_stale_session_turns(state: &mut DaemonState, prefix: &str, key: &str) 
     previous_count.saturating_sub(state.active_turns.len())
 }
 
+fn remove_session_provisionals(state: &mut DaemonState, request: &GuardRequest) -> usize {
+    let prefix = session_prefix(request);
+    let keys = state
+        .active_turns
+        .iter()
+        .filter(|(key, turn)| key.starts_with(&prefix) && turn.info.turn_id.starts_with("pending-"))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in &keys {
+        state.active_turns.remove(key);
+        state.transcript_cursors.remove(key);
+    }
+    keys.len()
+}
+
 fn reconcile_terminal_turns(shared: &Arc<Mutex<DaemonState>>) {
     let mut sleep_schedule = None;
+    let mut sound_schedule = false;
     let response = {
         let Ok(mut state) = shared.lock() else {
             return;
@@ -477,13 +607,27 @@ fn reconcile_terminal_turns(shared: &Arc<Mutex<DaemonState>>) {
         if ended.is_empty() {
             return;
         }
+        let mut alert_candidate = None;
         for key in &ended {
-            state.active_turns.remove(key);
+            if let Some(turn) = state.active_turns.remove(key) {
+                alert_candidate.get_or_insert((turn.origin_window, turn.info.session_id));
+            }
             state.transcript_cursors.remove(key);
             logging::write(format!(
                 "Recovered terminal turn after a missed hook: {key}. Active turns: {}.",
                 state.active_turns.len()
             ));
+        }
+        if let Some((origin_window, session_id)) = alert_candidate {
+            let request = GuardRequest {
+                session_id: Some(session_id),
+                origin_window,
+                ..GuardRequest::default()
+            };
+            let session_is_current = origin_session_is_current(&state, &request, origin_window);
+            sound_schedule =
+                should_play_automatic_alert(AlertSound::Done, origin_window, session_is_current)
+                    && state.schedule_alert(AlertSound::Done);
         }
         if state.active_turns.is_empty() {
             if let Err(cause) = state.power_policy.release() {
@@ -499,6 +643,9 @@ fn reconcile_terminal_turns(shared: &Arc<Mutex<DaemonState>>) {
     publish_status(&response);
     if let Some((token, delay)) = sleep_schedule {
         spawn_sleep(shared, token, delay);
+    }
+    if sound_schedule {
+        sound::start(AlertSound::Done);
     }
 }
 
@@ -544,6 +691,20 @@ fn focus_turn(state: &DaemonState, request: &GuardRequest) -> GuardResponse {
     } else {
         state.snapshot(false, "Could not focus the originating editor window.")
     }
+}
+
+fn associate_window(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
+    let Some(window) = request.origin_window else {
+        return state.snapshot(false, "The originating editor window is unavailable.");
+    };
+    let prefix = session_prefix(request);
+    for (key, turn) in &mut state.active_turns {
+        if key.starts_with(&prefix) && turn.origin_window.is_none() {
+            turn.origin_window = Some(window);
+        }
+    }
+    remember_latest_session(state, request);
+    state.snapshot(true, "Associated the Codex turn with its editor window.")
 }
 
 fn origin_session_is_current(
@@ -747,6 +908,7 @@ fn failure(message: impl Into<String>) -> GuardResponse {
             .ok()
             .map(|value| value.to_string_lossy().into_owned()),
         daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        pipe_name: Some(paths::pipe_name()),
         message: message.into(),
         ..GuardResponse::default()
     }
@@ -770,6 +932,139 @@ mod tests {
             ..GuardRequest::default()
         };
         assert_eq!(turn_key(&request), "session:turn");
+    }
+
+    #[test]
+    fn log_pre_acquires_become_durable_when_session_metadata_is_available() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let transcript = std::env::temp_dir().join(format!(
+            "codex-lid-guard-log-fallback-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&transcript, b"").unwrap();
+        let mut request = GuardRequest {
+            action: "pre-acquire".into(),
+            session_id: Some("session".into()),
+            turn_id: Some("pending-fast".into()),
+            ..GuardRequest::default()
+        };
+
+        attach_session_metadata(
+            &mut request,
+            Some(transcript.to_string_lossy().into_owned()),
+            Some(r"C:\workspace".into()),
+        );
+
+        assert_eq!(
+            request.turn_id.as_deref(),
+            Some("pending-metadata-log-pending-fast")
+        );
+        assert_eq!(request.transcript_path.as_deref(), transcript.to_str());
+        assert_eq!(request.cwd.as_deref(), Some(r"C:\workspace"));
+        std::fs::remove_file(transcript).unwrap();
+    }
+
+    #[test]
+    fn editor_window_is_associated_after_the_guard_is_already_active() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:pending-metadata-1".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-metadata-1".into(),
+                    cwd: None,
+                },
+                origin_window: None,
+                sequence: 1,
+            },
+        );
+        let request = GuardRequest {
+            action: "associate-window".into(),
+            session_id: Some("session".into()),
+            origin_window: Some(42),
+            ..GuardRequest::default()
+        };
+
+        let response = associate_window(&mut state, &request);
+
+        assert!(response.ok);
+        assert_eq!(
+            state
+                .active_turns
+                .get("session:pending-metadata-1")
+                .and_then(|turn| turn.origin_window),
+            Some(42)
+        );
+        assert_eq!(
+            state.latest_session_by_window.get(&42).map(String::as_str),
+            Some("session")
+        );
+    }
+
+    #[test]
+    fn durable_log_fallback_waits_for_a_real_terminal_record() {
+        use std::io::Write as _;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let transcript = std::env::temp_dir().join(format!(
+            "codex-lid-guard-durable-fallback-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(
+            &transcript,
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"real-turn\"}}\n",
+        )
+        .unwrap();
+        let mut state = DaemonState::new_for_test();
+        let mut request = GuardRequest {
+            action: "pre-acquire".into(),
+            session_id: Some("session-without-index-entry".into()),
+            turn_id: Some("pending-metadata-log-fast".into()),
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            ..GuardRequest::default()
+        };
+
+        let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
+
+        assert!(response.ok);
+        assert!(acquired);
+        assert!(durable);
+        let key = turn_key(&request);
+        assert!(state.active_turns.contains_key(&key));
+        assert!(
+            !state
+                .transcript_cursors
+                .get_mut(&key)
+                .unwrap()
+                .reached_terminal_event()
+        );
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        file.write_all(
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"real-turn\"}}\n",
+        )
+        .unwrap();
+        file.flush().unwrap();
+        assert!(
+            state
+                .transcript_cursors
+                .get_mut(&key)
+                .unwrap()
+                .reached_terminal_event()
+        );
+
+        drop(file);
+        std::fs::remove_file(transcript).unwrap();
     }
 
     #[test]
@@ -839,6 +1134,101 @@ mod tests {
         assert_eq!(replaced, 1);
         assert!(!state.active_turns.contains_key("session:pending-1"));
         assert!(state.active_turns.contains_key("other:turn"));
+    }
+
+    #[test]
+    fn late_provisional_turn_does_not_replace_an_authoritative_turn() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:turn-1".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "turn-1".into(),
+                    cwd: Some(r"C:\workspace".into()),
+                },
+                origin_window: Some(42),
+                sequence: 1,
+            },
+        );
+        let mut request = GuardRequest {
+            action: "pre-acquire".into(),
+            session_id: Some("session".into()),
+            turn_id: Some("pending-late".into()),
+            cwd: Some(r"C:\workspace".into()),
+            origin_window: Some(42),
+            ..GuardRequest::default()
+        };
+
+        let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
+
+        assert!(response.ok);
+        assert!(!acquired);
+        assert!(durable);
+        assert_eq!(state.active_turns.len(), 1);
+        assert!(state.active_turns.contains_key("session:turn-1"));
+        assert!(!state.active_turns.contains_key("session:pending-late"));
+    }
+
+    #[test]
+    fn exact_release_removes_a_metadata_turn_for_the_same_session() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:pending-metadata-42".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-metadata-42".into(),
+                    cwd: None,
+                },
+                origin_window: None,
+                sequence: 1,
+            },
+        );
+        let request = GuardRequest {
+            action: "release".into(),
+            session_id: Some("session".into()),
+            turn_id: Some("real-turn".into()),
+            ..GuardRequest::default()
+        };
+
+        assert_eq!(remove_session_provisionals(&mut state, &request), 1);
+        assert!(state.active_turns.is_empty());
+    }
+
+    #[test]
+    fn slower_log_pre_acquire_cannot_downgrade_a_metadata_turn() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:pending-metadata-42".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-metadata-42".into(),
+                    cwd: Some(r"C:\workspace".into()),
+                },
+                origin_window: None,
+                sequence: 1,
+            },
+        );
+        let mut request = GuardRequest {
+            action: "pre-acquire".into(),
+            session_id: Some("session".into()),
+            turn_id: Some("pending-log".into()),
+            ..GuardRequest::default()
+        };
+
+        let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
+
+        assert!(response.ok);
+        assert!(!acquired);
+        assert!(durable);
+        assert!(
+            state
+                .active_turns
+                .contains_key("session:pending-metadata-42")
+        );
+        assert!(!state.active_turns.contains_key("session:pending-log"));
     }
 
     #[test]

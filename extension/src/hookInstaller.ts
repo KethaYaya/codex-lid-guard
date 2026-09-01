@@ -102,6 +102,14 @@ export function withoutGuardHooks(document: HooksDocument): HooksDocument {
   return next;
 }
 
+export function guardHooksForPreference(
+  document: HooksDocument,
+  helperPath: string,
+  enabled: boolean
+): HooksDocument {
+  return enabled ? withGuardHooks(document, helperPath) : withoutGuardHooks(document);
+}
+
 export function hasGuardHooks(document: HooksDocument): boolean {
   if (!isRecord(document.hooks)) {
     return false;

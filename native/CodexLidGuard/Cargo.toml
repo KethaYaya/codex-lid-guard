@@ -1,6 +1,6 @@
 [package]
 name = "codex-lid-guard"
-version = "0.1.17"
+version = "0.1.25"
 edition = "2024"
 description = "Windows lid and sleep guard for local Codex turns"
 license = "MIT"
@@ -13,6 +13,8 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+notify = "8.2"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [profile.release]
 opt-level = 3

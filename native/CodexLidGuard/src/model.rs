@@ -40,6 +40,7 @@ pub struct GuardResponse {
     pub protocol_version: u32,
     pub daemon_path: Option<String>,
     pub daemon_version: Option<String>,
+    pub pipe_name: Option<String>,
     pub ok: bool,
     pub message: String,
     pub active_turns: usize,
@@ -55,6 +56,7 @@ impl Default for GuardResponse {
             protocol_version: 0,
             daemon_path: None,
             daemon_version: None,
+            pipe_name: None,
             ok: false,
             message: String::new(),
             active_turns: 0,
@@ -178,5 +180,6 @@ mod tests {
         assert!(response.contains("sessionId"));
         assert!(response.contains("protocolVersion"));
         assert!(response.contains("daemonVersion"));
+        assert!(response.contains("pipeName"));
     }
 }
