@@ -12,7 +12,7 @@ if you use  codex on VSCode, you can make codex work for you while the laptop li
 6. If an interrupted turn misses both cleanup hooks, the guardian recognizes that exact turn's terminal lifecycle record and releases it without timing out legitimate long-running work.
 7. Herdr's original `done` alert plays when a task stops. Its `request` alert plays for permission approvals and structured `request_user_input` prompts. By default, automatic alerts play when the originating VS Code window is minimized or covered, another VS Code window is focused, or another chat is selected in that window. The current chat stays quiet. This focus filter and all alert sounds can be configured independently in VS Code settings.
 
-For same-window chat detection, Lid Guard reads only the latest session-visibility event from the local Codex extension log when an alert is about to play. It does not poll the log or read prompt and response content.
+Lid Guard watches only newly appended turn-start and session-visibility metadata in the current window's local Codex extension log; it never reads prompt or response content. A turn-start event engages the already-running guardian directly, avoiding Windows shell startup, and the trusted `UserPromptSubmit` hook then supplies the authoritative turn details. If that hook never arrives, the provisional guard expires after 10 seconds.
 
 This uses [documented Codex lifecycle hooks](https://learn.chatgpt.com/docs/hooks). It does not scrape the Codex UI or guess based on background processes.
 
@@ -26,7 +26,7 @@ code --install-extension .\extension\codex-lid-guard.vsix
 
 The extension enables itself on first activation and merges its hook groups into `~/.codex/hooks.json`. Existing hook groups and unknown JSON fields are preserved. On installation or update, a persistent setup flow launches the interactive Codex CLI, where Codex automatically displays its **Hooks need review** screen. This terminal UI is keyboard-driven: press `T` to trust the five hooks; clicking the text does not activate it. The extension then closes the terminal and reloads VS Code. Codex's trust requirement cannot be silently bypassed by a VS Code extension.
 
-The status-bar shield shows whether the guardian is idle, protecting active turns, or waiting to sleep. These commands are available from the Command Palette:
+The status-bar shield shows whether the guardian is idle, protecting active turns, or waiting to sleep. While turns are active, click it to open a dark, VS Code-style menu directly above the shield with every active Codex session labeled as `folder — chat title`. Selecting a session switches to its originating editor window and opens that chat. Titles are read from Codex's local metadata index only when the menu opens; prompt and response content is not read. These commands are available from the Command Palette:
 
 The shield listens for atomic guardian status snapshots and normally updates in well under a second without launching diagnostic processes. VS Code renews the shared daemon lease once every four minutes, while a 60-second refresh runs only if Windows file watching is unavailable. Alert sounds use native Windows multimedia playback rather than PowerShell or WPF.
 

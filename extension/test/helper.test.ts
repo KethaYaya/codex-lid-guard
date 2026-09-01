@@ -13,12 +13,18 @@ test("reads an atomic guardian status snapshot", async () => {
       ok: true,
       message: "ready",
       activeTurns: 2,
+      activeItems: [{
+        sessionId: "12345678-1234-1234-1234-123456789abc",
+        turnId: "turn-1",
+        cwd: "C:\\workspace"
+      }],
       isGuarding: true,
       lidState: "closed",
       sleepPending: false
     }));
     const status = await readHelperStatus(statusPath);
     assert.equal(status.activeTurns, 2);
+    assert.equal(status.activeItems?.[0]?.sessionId, "12345678-1234-1234-1234-123456789abc");
     assert.equal(status.isGuarding, true);
     assert.equal(status.lidState, "closed");
   } finally {

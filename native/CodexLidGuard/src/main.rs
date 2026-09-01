@@ -45,9 +45,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             arguments.get(1).map(String::as_str).unwrap_or_default(),
             false,
         )?,
-        "status" | "restore" => {
+        "menu" => {
+            let title = arguments
+                .get(1)
+                .map(String::as_str)
+                .unwrap_or("Codex awake");
+            let items = arguments.get(2..).unwrap_or_default();
+            let selected = win::show_context_menu(title, items)?;
+            println!("{}", serde_json::json!({ "selectedIndex": selected }));
+        }
+        "status" | "restore" | "focus" => {
             let response = client::send(GuardRequest {
                 action: command,
+                session_id: arguments.get(1).cloned(),
+                turn_id: arguments.get(2).cloned(),
+                ..GuardRequest::default()
+            });
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            if !response.ok {
+                std::process::exit(1);
+            }
+        }
+        "pre-acquire" => {
+            let response = client::send(GuardRequest {
+                action: command,
+                session_id: arguments.get(1).cloned(),
+                turn_id: arguments.get(2).cloned(),
+                cwd: arguments.get(3).cloned(),
+                origin_window: win::foreground_editor_window(),
                 ..GuardRequest::default()
             });
             println!("{}", serde_json::to_string_pretty(&response)?);
@@ -126,7 +151,7 @@ fn run_sound(value: &str, write_response: bool) -> Result<(), Box<dyn std::error
 
 fn usage() {
     eprintln!(
-        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | sound done | sound request | status | restore]"
+        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | sound done | sound request | status | restore | focus <session-id> <turn-id> | menu <title> <items...>]"
     );
     std::process::exit(2);
 }

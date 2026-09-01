@@ -7,23 +7,33 @@ use std::time::{Duration, Instant};
 
 use crate::codex_transcript::TranscriptCursor;
 use crate::logging;
-use crate::model::{GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION};
+use crate::model::{
+    ActiveTurnInfo, GuardRequest, GuardResponse, GuardSettings, LidState, PROTOCOL_VERSION,
+};
 use crate::sound::{self, AlertSound};
 use crate::{codex_log, paths, win};
 
 const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
 const ACTIVE_TURN_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const PRE_ACQUIRE_TTL: Duration = Duration::from_secs(10);
 static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
 
 struct DaemonState {
-    active_turns: HashMap<String, Option<u64>>,
+    active_turns: HashMap<String, TrackedTurn>,
     transcript_cursors: HashMap<String, TranscriptCursor>,
     latest_session_by_window: HashMap<u64, String>,
+    next_turn_sequence: u64,
     power_policy: win::PowerPolicy,
     lid_state: LidState,
     pending_sleep: Option<Arc<AtomicBool>>,
     alerts: AlertSchedule,
+}
+
+struct TrackedTurn {
+    info: ActiveTurnInfo,
+    origin_window: Option<u64>,
+    sequence: u64,
 }
 
 #[derive(Default)]
@@ -49,15 +59,25 @@ impl AlertSchedule {
 
 impl DaemonState {
     fn new() -> Self {
+        Self::with_power_policy(win::PowerPolicy::new())
+    }
+
+    fn with_power_policy(power_policy: win::PowerPolicy) -> Self {
         Self {
             active_turns: HashMap::new(),
             transcript_cursors: HashMap::new(),
             latest_session_by_window: HashMap::new(),
-            power_policy: win::PowerPolicy::new(),
+            next_turn_sequence: 0,
+            power_policy,
             lid_state: LidState::Unknown,
             pending_sleep: None,
             alerts: AlertSchedule::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        Self::with_power_policy(win::PowerPolicy::new_for_test())
     }
 
     fn cancel_pending_sleep(&mut self) {
@@ -67,6 +87,12 @@ impl DaemonState {
     }
 
     fn snapshot(&self, ok: bool, message: impl Into<String>) -> GuardResponse {
+        let mut active_items = self
+            .active_turns
+            .values()
+            .map(|turn| (turn.sequence, turn.info.clone()))
+            .collect::<Vec<_>>();
+        active_items.sort_by_key(|item| std::cmp::Reverse(item.0));
         GuardResponse {
             protocol_version: PROTOCOL_VERSION,
             daemon_path: std::env::current_exe()
@@ -76,6 +102,7 @@ impl DaemonState {
             ok,
             message: message.into(),
             active_turns: self.active_turns.len(),
+            active_items: active_items.into_iter().map(|(_, info)| info).collect(),
             is_guarding: self.power_policy.is_guarding(),
             lid_state: self.lid_state.as_str().to_string(),
             sleep_pending: self
@@ -206,15 +233,26 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
     let mut sound_schedule = None;
     let mut alert_window = None;
     let mut alert_session_is_current = true;
+    let mut pre_acquire_expiry = None;
     let (response, should_publish_status) = {
         let Ok(mut state) = shared.lock() else {
             return failure("guardian state lock was poisoned");
         };
         let response = match action.as_str() {
             "acquire" => acquire(&mut state, &request),
+            "pre-acquire" => {
+                let response = acquire(&mut state, &request);
+                if response.ok {
+                    pre_acquire_expiry = Some(turn_key(&request));
+                }
+                response
+            }
             "release" => {
                 let key = turn_key(&request);
-                alert_window = state.active_turns.remove(&key).flatten();
+                alert_window = state
+                    .active_turns
+                    .remove(&key)
+                    .and_then(|turn| turn.origin_window);
                 state.transcript_cursors.remove(&key);
                 alert_session_is_current =
                     origin_session_is_current(&state, &request, alert_window);
@@ -270,6 +308,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                 }
             }
             "status" => state.snapshot(true, "Status read."),
+            "focus" => focus_turn(&state, &request),
             "sound-done" => state.snapshot(true, "Completion alert scheduled."),
             "sound-request" => {
                 alert_window = origin_window_for_request(&state, &request);
@@ -295,12 +334,17 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
                 sound_schedule = Some(sound);
             }
         }
-        let should_publish_status =
-            !matches!(action.as_str(), "status" | "sound-done" | "sound-request");
+        let should_publish_status = !matches!(
+            action.as_str(),
+            "status" | "focus" | "sound-done" | "sound-request"
+        );
         (response, should_publish_status)
     };
     if should_publish_status {
         publish_status(&response);
+    }
+    if let Some(key) = pre_acquire_expiry {
+        spawn_pre_acquire_expiry(shared, key);
     }
     if let Some((token, delay)) = sleep_schedule {
         spawn_sleep(shared, token, delay);
@@ -311,30 +355,74 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, request: GuardRequest) -> Gu
     response
 }
 
+fn spawn_pre_acquire_expiry(shared: &Arc<Mutex<DaemonState>>, key: String) {
+    let shared = Arc::clone(shared);
+    thread::spawn(move || {
+        thread::sleep(PRE_ACQUIRE_TTL);
+        let mut sleep_schedule = None;
+        let response = {
+            let Ok(mut state) = shared.lock() else {
+                return;
+            };
+            if state.active_turns.remove(&key).is_none() {
+                return;
+            }
+            state.transcript_cursors.remove(&key);
+            logging::write(format!(
+                "Provisional turn expired before the Codex hook arrived: {key}. Active turns: {}.",
+                state.active_turns.len()
+            ));
+            if state.active_turns.is_empty() {
+                if let Err(cause) = state.power_policy.release() {
+                    state.snapshot(false, cause.to_string())
+                } else {
+                    sleep_schedule = prepare_sleep(&mut state);
+                    state.snapshot(true, "Provisional Codex turn expired.")
+                }
+            } else {
+                state.snapshot(true, "Provisional Codex turn expired.")
+            }
+        };
+        publish_status(&response);
+        if let Some((token, delay)) = sleep_schedule {
+            spawn_sleep(&shared, token, delay);
+        }
+    });
+}
+
 fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
     let key = turn_key(request);
     let prefix = session_prefix(request);
     state.cancel_pending_sleep();
-    let previous_count = state.active_turns.len();
-    state
-        .active_turns
-        .retain(|candidate, _| !candidate.starts_with(&prefix) || candidate == &key);
-    state
-        .transcript_cursors
-        .retain(|candidate, _| !candidate.starts_with(&prefix) || candidate == &key);
-    let replaced = previous_count.saturating_sub(state.active_turns.len());
+    let replaced = remove_stale_session_turns(state, &prefix, &key);
     if replaced > 0 {
         logging::write(format!(
             "Removed {replaced} stale turn(s) for session {}.",
             prefix.trim_end_matches(':')
         ));
     }
+    let info = active_turn_info(request);
+    state.next_turn_sequence = state.next_turn_sequence.wrapping_add(1);
+    let sequence = state.next_turn_sequence;
     let inserted = match state.active_turns.entry(key.clone()) {
         Entry::Vacant(entry) => {
-            entry.insert(request.origin_window);
+            entry.insert(TrackedTurn {
+                info,
+                origin_window: request.origin_window,
+                sequence,
+            });
             true
         }
-        Entry::Occupied(_) => false,
+        Entry::Occupied(mut entry) => {
+            let turn = entry.get_mut();
+            if turn.origin_window.is_none() {
+                turn.origin_window = request.origin_window;
+            }
+            if turn.info.cwd.is_none() {
+                turn.info.cwd = info.cwd;
+            }
+            false
+        }
     };
     if let Some(cursor) = TranscriptCursor::new(
         request.transcript_path.as_deref(),
@@ -362,6 +450,17 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         true,
         "Windows will stay awake until the Codex turn finishes.",
     )
+}
+
+fn remove_stale_session_turns(state: &mut DaemonState, prefix: &str, key: &str) -> usize {
+    let previous_count = state.active_turns.len();
+    state
+        .active_turns
+        .retain(|candidate, _| !candidate.starts_with(prefix) || candidate == key);
+    state
+        .transcript_cursors
+        .retain(|candidate, _| !candidate.starts_with(prefix) || candidate == key);
+    previous_count.saturating_sub(state.active_turns.len())
 }
 
 fn reconcile_terminal_turns(shared: &Arc<Mutex<DaemonState>>) {
@@ -419,13 +518,32 @@ fn remember_latest_session(state: &mut DaemonState, request: &GuardRequest) {
 
 fn origin_window_for_request(state: &DaemonState, request: &GuardRequest) -> Option<u64> {
     let key = turn_key(request);
-    state.active_turns.get(&key).copied().flatten().or_else(|| {
-        let prefix = session_prefix(request);
-        state
-            .active_turns
-            .iter()
-            .find_map(|(key, window)| key.starts_with(&prefix).then_some(*window).flatten())
-    })
+    state
+        .active_turns
+        .get(&key)
+        .and_then(|turn| turn.origin_window)
+        .or_else(|| {
+            let prefix = session_prefix(request);
+            state.active_turns.iter().find_map(|(key, turn)| {
+                key.starts_with(&prefix)
+                    .then_some(turn.origin_window)
+                    .flatten()
+            })
+        })
+}
+
+fn focus_turn(state: &DaemonState, request: &GuardRequest) -> GuardResponse {
+    let Some(window) = origin_window_for_request(state, request) else {
+        return state.snapshot(
+            false,
+            "The originating editor window is no longer available.",
+        );
+    };
+    if win::focus_editor_window(window) {
+        state.snapshot(true, "Focused the originating editor window.")
+    } else {
+        state.snapshot(false, "Could not focus the originating editor window.")
+    }
 }
 
 fn origin_session_is_current(
@@ -590,6 +708,29 @@ fn turn_key(request: &GuardRequest) -> String {
     format!("{session}:{turn}")
 }
 
+fn active_turn_info(request: &GuardRequest) -> ActiveTurnInfo {
+    ActiveTurnInfo {
+        session_id: request
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("unknown-session")
+            .to_string(),
+        turn_id: request
+            .turn_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("current-turn")
+            .to_string(),
+        cwd: request
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    }
+}
+
 fn session_prefix(request: &GuardRequest) -> String {
     let session = request
         .session_id
@@ -629,6 +770,75 @@ mod tests {
             ..GuardRequest::default()
         };
         assert_eq!(turn_key(&request), "session:turn");
+    }
+
+    #[test]
+    fn active_turn_metadata_is_exposed_newest_first() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "older:turn".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "older".into(),
+                    turn_id: "turn".into(),
+                    cwd: Some(r"C:\older".into()),
+                },
+                origin_window: Some(1),
+                sequence: 1,
+            },
+        );
+        state.active_turns.insert(
+            "newer:turn".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "newer".into(),
+                    turn_id: "turn".into(),
+                    cwd: Some(r"C:\newer".into()),
+                },
+                origin_window: Some(2),
+                sequence: 2,
+            },
+        );
+
+        let snapshot = state.snapshot(true, "Status read.");
+        assert_eq!(snapshot.active_turns, 2);
+        assert_eq!(snapshot.active_items[0].session_id, "newer");
+        assert_eq!(snapshot.active_items[1].session_id, "older");
+    }
+
+    #[test]
+    fn authoritative_turn_key_removes_a_provisional_turn_for_the_same_session() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "other:turn".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "other".into(),
+                    turn_id: "turn".into(),
+                    cwd: None,
+                },
+                origin_window: None,
+                sequence: 1,
+            },
+        );
+        state.active_turns.insert(
+            "session:pending-1".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-1".into(),
+                    cwd: None,
+                },
+                origin_window: None,
+                sequence: 2,
+            },
+        );
+
+        let replaced = remove_stale_session_turns(&mut state, "session:", "session:turn-1");
+
+        assert_eq!(replaced, 1);
+        assert!(!state.active_turns.contains_key("session:pending-1"));
+        assert!(state.active_turns.contains_key("other:turn"));
     }
 
     #[test]

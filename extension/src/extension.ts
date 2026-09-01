@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
@@ -10,18 +11,42 @@ import {
   withoutGuardHooks,
   writeHooksDocument
 } from "./hookInstaller";
-import { GuardStatus, readHelperStatus, runHelper, writeHelperSettings } from "./helper";
+import {
+  focusHelperSession,
+  GuardStatus,
+  preAcquireHelper,
+  readHelperStatus,
+  runHelper,
+  showHelperMenu,
+  type GuardActiveItem,
+  writeHelperSettings
+} from "./helper";
 import {
   allGuardTrustHashesChanged,
   readGuardTrustHashes,
   setupStateMatchesRevision,
   type GuardTrustHashes
 } from "./trustVerifier";
+import {
+  awakeSessionDisplay,
+  awakeSessionMenuLabel,
+  codexSessionRoute
+} from "./sessionNavigation";
+import {
+  codexSessionTitle,
+  readCodexSessionTitles
+} from "./sessionIndex";
+import {
+  codexLogPathForExtensionLog,
+  type CodexTurnStartWatcher,
+  watchCodexTurnStarts
+} from "./codexTurnWatcher";
 
 let refreshTimer: NodeJS.Timeout | undefined;
 let daemonLeaseTimer: NodeJS.Timeout | undefined;
 let statusWatcher: FSWatcher | undefined;
 let statusRefreshDebounce: NodeJS.Timeout | undefined;
+let codexTurnStartWatcher: CodexTurnStartWatcher | undefined;
 let updatingEnabledSetting = false;
 let setupPromptOpen = false;
 const setupVersionStateKey = "hookSetupVersion";
@@ -69,6 +94,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({
     dispose: () => {
       stopStatusWatcher();
+      stopCodexTurnStartWatcher();
       stopFallbackRefresh();
       stopDaemonLease();
     }
@@ -78,6 +104,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   } else {
     setDisabled(statusBar);
   }
+  await startCodexTurnStartWatcher(context, statusBar);
   startDaemonLease(context, statusBar);
 
 }
@@ -86,6 +113,7 @@ export function deactivate(): void {
   stopDaemonLease();
   stopFallbackRefresh();
   stopStatusWatcher();
+  stopCodexTurnStartWatcher();
   // Do not stop the native guardian here: VS Code may close while Codex is still
   // finishing a local turn, and that is exactly when protection matters most.
 }
@@ -294,13 +322,111 @@ async function showStatus(context: vscode.ExtensionContext, statusBar: vscode.St
   try {
     const status = await refreshStatus(context, statusBar);
     const lid = status.lidState === "unknown" ? "lid state not reported yet" : `lid ${status.lidState}`;
-    const activity = status.isGuarding
-      ? `guarding ${status.activeTurns} Codex turn${status.activeTurns === 1 ? "" : "s"}`
-      : status.sleepPending ? "sleep pending" : "idle";
+    if (status.activeTurns > 0) {
+      await showAwakeSessions(context, status);
+      return;
+    }
+    const activity = status.sleepPending ? "sleep pending" : "idle";
     void vscode.window.showInformationMessage(`Codex Lid Guard: ${activity}; ${lid}.`);
   } catch (error) {
     setError(statusBar, messageOf(error));
     void vscode.window.showErrorMessage(`Could not read Codex Lid Guard status: ${messageOf(error)}`);
+  }
+}
+
+type AwakeSessionQuickPickItem = vscode.QuickPickItem & {
+  activeItem: GuardActiveItem;
+};
+
+async function showAwakeSessions(
+  context: vscode.ExtensionContext,
+  status: GuardStatus
+): Promise<void> {
+  const activeItems = status.activeItems ?? [];
+  if (activeItems.length === 0) {
+    await openCodexSidebar();
+    return;
+  }
+
+  const sessionTitles = await readCodexSessionTitles(
+    codexSessionIndexPath(),
+    activeItems.map((item) => item.sessionId)
+  ).catch(() => new Map<string, string>());
+
+  try {
+    const selectedIndex = await showHelperMenu(
+      helperPath(context),
+      `Codex awake · ${status.activeTurns}`,
+      activeItems.map((item) => awakeSessionMenuLabel(
+        item,
+        codexSessionTitle(sessionTitles, item.sessionId)
+      ))
+    );
+    if (selectedIndex !== undefined) {
+      await openAwakeSession(context, activeItems[selectedIndex]);
+    }
+    return;
+  } catch {
+    // Fall back to VS Code's Quick Pick if the native popup is unavailable.
+  }
+
+  const quickPickItems: AwakeSessionQuickPickItem[] = activeItems.map((activeItem) => ({
+    ...awakeSessionDisplay(
+      activeItem,
+      codexSessionTitle(sessionTitles, activeItem.sessionId)
+    ),
+    activeItem
+  }));
+  const selected = await vscode.window.showQuickPick(quickPickItems, {
+    title: `Codex awake · ${status.activeTurns}`,
+    placeHolder: "Select an awake Codex session to open",
+    matchOnDescription: true,
+    matchOnDetail: true
+  });
+  if (selected) {
+    await openAwakeSession(context, selected.activeItem);
+  }
+}
+
+async function openAwakeSession(
+  context: vscode.ExtensionContext,
+  activeItem: GuardActiveItem
+): Promise<void> {
+  try {
+    await focusHelperSession(
+      helperPath(context),
+      activeItem.sessionId,
+      activeItem.turnId
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } catch {
+    // The session route can still open in the current window when the original
+    // editor window has closed or Windows declines the focus request.
+  }
+
+  const route = codexSessionRoute(activeItem.sessionId);
+  if (route) {
+    try {
+      const opened = await vscode.env.openExternal(vscode.Uri.from({
+        scheme: "vscode",
+        authority: "openai.chatgpt",
+        path: route
+      }));
+      if (opened) {
+        return;
+      }
+    } catch {
+      // Fall through to Codex's supported public sidebar command.
+    }
+  }
+  await openCodexSidebar();
+}
+
+async function openCodexSidebar(): Promise<void> {
+  try {
+    await vscode.commands.executeCommand("chatgpt.openSidebar");
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Could not open Codex: ${messageOf(error)}`);
   }
 }
 
@@ -387,6 +513,31 @@ function stopStatusWatcher(): void {
     statusWatcher.close();
     statusWatcher = undefined;
   }
+}
+
+async function startCodexTurnStartWatcher(
+  context: vscode.ExtensionContext,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  stopCodexTurnStartWatcher();
+  const codexLogPath = codexLogPathForExtensionLog(context.logUri.fsPath);
+  codexTurnStartWatcher = await watchCodexTurnStarts(codexLogPath, (sessionId) => {
+    if (!configuration().get<boolean>("enabled", true)) {
+      return;
+    }
+    const pendingTurnId = `pending-${randomUUID()}`;
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    void preAcquireHelper(helperPath(context), sessionId, pendingTurnId, cwd)
+      .then((status) => updateStatusBar(statusBar, status))
+      .catch(() => {
+        // The trusted UserPromptSubmit hook remains the authoritative fallback.
+      });
+  });
+}
+
+function stopCodexTurnStartWatcher(): void {
+  codexTurnStartWatcher?.dispose();
+  codexTurnStartWatcher = undefined;
 }
 
 function updateStatusBar(statusBar: vscode.StatusBarItem, status: GuardStatus): void {
@@ -480,13 +631,19 @@ function helperStatusPath(): string {
 }
 
 function codexHooksPath(): string {
-  const codexHome = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
-  return path.join(codexHome, "hooks.json");
+  return path.join(codexHomePath(), "hooks.json");
 }
 
 function codexConfigPath(): string {
-  const codexHome = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
-  return path.join(codexHome, "config.toml");
+  return path.join(codexHomePath(), "config.toml");
+}
+
+function codexSessionIndexPath(): string {
+  return path.join(codexHomePath(), "session_index.jsonl");
+}
+
+function codexHomePath(): string {
+  return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
 }
 
 function ensureWindows(): void {

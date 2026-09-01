@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.17
+
+- Engaged the guardian directly from Codex's newly appended turn-start metadata, avoiding PowerShell hook startup and occasional cold-hook delays.
+- Kept the trusted synchronous `UserPromptSubmit` hook authoritative; it replaces the provisional turn automatically, while an unmatched provisional turn expires after 10 seconds.
+
+## 0.1.16
+
+- Labeled awake-session menu items with each Codex chat title, for example `CodexLidGuard — Fix stale Codex session status`.
+- Read titles from Codex's local metadata index only when the menu opens, with the short session ID retained as a fallback.
+
+## 0.1.15
+
+- Custom-drew the anchored awake-session menu with VS Code-style dark notification colors instead of inheriting Windows' light popup-menu theme.
+- Added dark session hover selection, muted header text, and a subtle separator while retaining native menu keyboard and dismissal behavior.
+
+## 0.1.14
+
+- Replaced the intermediate status notification with an anchored Windows menu that always lists active Codex sessions as menu items, including when only one session is active.
+- Kept VS Code's session picker as a fallback if Windows cannot display the anchored menu.
+
+## 0.1.13
+
+- Restored the native VS Code bottom-right notification when the status-bar item is clicked, with active-session navigation available from the notification.
+
+## 0.1.12
+
+- Made the awake status item list each protected Codex session with its workspace.
+- Added one-click switching to the originating editor window and exact Codex chat, with a sidebar fallback when exact navigation is unavailable.
+
 ## 0.1.11
 
 - Recovered interrupted or completed turns when Codex misses the `Stop` hook, preventing abandoned turns from keeping the awake-session count permanently elevated.

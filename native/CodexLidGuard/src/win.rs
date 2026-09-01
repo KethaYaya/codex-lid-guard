@@ -18,6 +18,7 @@ use crate::paths;
 type Bool = i32;
 type ByteBool = u8;
 type Handle = *mut c_void;
+type Hmenu = *mut c_void;
 type Hwnd = *mut c_void;
 type Lparam = isize;
 type Lresult = isize;
@@ -53,6 +54,28 @@ const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
+const WM_NULL: u32 = 0x0000;
+const SW_RESTORE: i32 = 9;
+const SW_SHOW: i32 = 5;
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+const WS_POPUP: u32 = 0x8000_0000;
+const MF_DISABLED: u32 = 0x0002;
+const MF_OWNERDRAW: u32 = 0x0100;
+const MIM_BACKGROUND: u32 = 0x0000_0002;
+const TPM_RIGHTBUTTON: u32 = 0x0002;
+const TPM_BOTTOMALIGN: u32 = 0x0020;
+const TPM_NONOTIFY: u32 = 0x0080;
+const TPM_RETURNCMD: u32 = 0x0100;
+const WM_DRAWITEM: u32 = 0x002B;
+const WM_MEASUREITEM: u32 = 0x002C;
+const ODT_MENU: u32 = 1;
+const ODS_SELECTED: u32 = 0x0001;
+const DT_VCENTER: u32 = 0x0004;
+const DT_SINGLELINE: u32 = 0x0020;
+const DT_NOPREFIX: u32 = 0x0800;
+const DT_END_ELLIPSIS: u32 = 0x8000;
+const TRANSPARENT: i32 = 1;
+const DEFAULT_GUI_FONT: i32 = 17;
 const PBT_POWERSETTINGCHANGE: usize = 0x8013;
 const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0;
 
@@ -188,6 +211,63 @@ struct Point {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[repr(C)]
+struct MeasureItemStruct {
+    control_type: u32,
+    control_id: u32,
+    item_id: u32,
+    item_width: u32,
+    item_height: u32,
+    item_data: usize,
+}
+
+#[repr(C)]
+struct DrawItemStruct {
+    control_type: u32,
+    control_id: u32,
+    item_id: u32,
+    item_action: u32,
+    item_state: u32,
+    item_window: Hwnd,
+    device_context: Handle,
+    item_rect: Rect,
+    item_data: usize,
+}
+
+#[repr(C)]
+struct MenuInfo {
+    size: u32,
+    mask: u32,
+    style: u32,
+    max_height: u32,
+    background: Handle,
+    context_help_id: u32,
+    menu_data: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MenuItemKind {
+    Header,
+    Separator,
+    Session,
+}
+
+struct MenuItemData {
+    text: Vec<u16>,
+    kind: MenuItemKind,
+    width: u32,
+    height: u32,
+}
+
+#[repr(C)]
 struct Message {
     window: Hwnd,
     message: u32,
@@ -250,6 +330,7 @@ unsafe extern "system" {
     fn DisconnectNamedPipe(pipe: Handle) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn GetCurrentProcessId() -> u32;
+    fn GetCurrentThreadId() -> u32;
     fn GetLastError() -> u32;
     fn GetLocalTime(time: *mut SystemTime);
     fn GetModuleHandleW(module_name: *const u16) -> Handle;
@@ -347,6 +428,7 @@ unsafe extern "system" {
 
 #[link(name = "user32")]
 unsafe extern "system" {
+    fn AppendMenuW(menu: Hmenu, flags: u32, item: usize, text: *const u16) -> Bool;
     fn CreateWindowExW(
         extended_style: u32,
         class_name: *const u16,
@@ -362,8 +444,21 @@ unsafe extern "system" {
         parameter: *const c_void,
     ) -> Hwnd;
     fn DefWindowProcW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
+    fn AttachThreadInput(id_attach: u32, id_attach_to: u32, attach: Bool) -> Bool;
+    fn BringWindowToTop(window: Hwnd) -> Bool;
+    fn CreatePopupMenu() -> Hmenu;
+    fn DestroyMenu(menu: Hmenu) -> Bool;
     fn DestroyWindow(window: Hwnd) -> Bool;
     fn DispatchMessageW(message: *const Message) -> Lresult;
+    fn DrawTextW(
+        device_context: Handle,
+        text: *const u16,
+        count: i32,
+        rectangle: *mut Rect,
+        format: u32,
+    ) -> i32;
+    fn FillRect(device_context: Handle, rectangle: *const Rect, brush: Handle) -> i32;
+    fn GetCursorPos(point: *mut Point) -> Bool;
     fn GetForegroundWindow() -> Hwnd;
     fn GetMessageW(message: *mut Message, window: Hwnd, min: u32, max: u32) -> Bool;
     fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
@@ -378,8 +473,30 @@ unsafe extern "system" {
         flags: u32,
     ) -> Handle;
     fn TranslateMessage(message: *const Message) -> Bool;
+    fn TrackPopupMenu(
+        menu: Hmenu,
+        flags: u32,
+        x: i32,
+        y: i32,
+        reserved: i32,
+        owner: Hwnd,
+        rectangle: *const c_void,
+    ) -> u32;
+    fn SetForegroundWindow(window: Hwnd) -> Bool;
+    fn SetMenuInfo(menu: Hmenu, information: *const MenuInfo) -> Bool;
+    fn ShowWindow(window: Hwnd, command: i32) -> Bool;
     fn UnregisterClassW(class_name: *const u16, instance: Handle) -> Bool;
     fn UnregisterPowerSettingNotification(handle: Handle) -> Bool;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn CreateSolidBrush(color: u32) -> Handle;
+    fn DeleteObject(object: Handle) -> Bool;
+    fn GetStockObject(object: i32) -> Handle;
+    fn SelectObject(device_context: Handle, object: Handle) -> Handle;
+    fn SetBkMode(device_context: Handle, mode: i32) -> i32;
+    fn SetTextColor(device_context: Handle, color: u32) -> u32;
 }
 
 fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
@@ -823,6 +940,8 @@ impl SavedPowerState {
 pub struct PowerPolicy {
     saved: Option<SavedPowerState>,
     guarding: bool,
+    #[cfg(test)]
+    recovery_enabled: bool,
 }
 
 impl PowerPolicy {
@@ -830,9 +949,20 @@ impl PowerPolicy {
         let mut value = Self {
             saved: None,
             guarding: false,
+            #[cfg(test)]
+            recovery_enabled: true,
         };
         value.restore_stale();
         value
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test() -> Self {
+        Self {
+            saved: None,
+            guarding: false,
+            recovery_enabled: false,
+        }
     }
 
     pub fn is_guarding(&self) -> bool {
@@ -891,12 +1021,15 @@ impl PowerPolicy {
     }
 
     pub fn release(&mut self) -> io::Result<()> {
-        let recovery_exists = paths::recovery_file().exists();
+        let recovery_exists = self.recovery_is_enabled() && paths::recovery_file().exists();
         if !self.guarding && self.saved.is_none() && !recovery_exists {
             return Ok(());
         }
         let _ = set_execution_state(false);
-        let state = self.saved.clone().or_else(load_recovery);
+        let state = self
+            .saved
+            .clone()
+            .or_else(|| self.recovery_is_enabled().then(load_recovery).flatten());
         if let Some(state) = state {
             restore_power_state(&state)?;
             if state.changed_lid_policy() {
@@ -912,12 +1045,26 @@ impl PowerPolicy {
     }
 
     fn restore_stale(&mut self) {
+        if !self.recovery_is_enabled() {
+            return;
+        }
         let Some(stale) = load_recovery() else {
             return;
         };
         logging::write("Found an interrupted guard session; restoring its saved lid policy.");
         if let Err(cause) = restore_power_state(&stale) {
             logging::write(format!("Could not restore the saved power policy: {cause}"));
+        }
+    }
+
+    fn recovery_is_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.recovery_enabled
+        }
+        #[cfg(not(test))]
+        {
+            true
         }
     }
 }
@@ -1071,6 +1218,324 @@ pub fn is_window_focused(window: u64) -> bool {
             && IsIconic(window) == 0
             && GetForegroundWindow() == window
     }
+}
+
+pub fn focus_editor_window(window: u64) -> bool {
+    let window = window as usize as Hwnd;
+    unsafe {
+        if window.is_null() || IsWindow(window) == 0 {
+            return false;
+        }
+        let mut process_id = 0;
+        let target_thread = GetWindowThreadProcessId(window, &mut process_id);
+        if target_thread == 0
+            || process_id == 0
+            || process_executable_name(process_id)
+                .as_deref()
+                .is_none_or(|executable| !is_supported_editor_process(executable))
+        {
+            return false;
+        }
+
+        let current_thread = GetCurrentThreadId();
+        let foreground = GetForegroundWindow();
+        let foreground_thread = if foreground.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, null_mut())
+        };
+        let attached_foreground = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+        let attached_target = target_thread != current_thread
+            && target_thread != foreground_thread
+            && AttachThreadInput(current_thread, target_thread, 1) != 0;
+
+        if IsIconic(window) != 0 {
+            ShowWindow(window, SW_RESTORE);
+        }
+        BringWindowToTop(window);
+        SetForegroundWindow(window);
+
+        if attached_target {
+            AttachThreadInput(current_thread, target_thread, 0);
+        }
+        if attached_foreground {
+            AttachThreadInput(current_thread, foreground_thread, 0);
+        }
+        GetForegroundWindow() == window
+    }
+}
+
+pub fn show_context_menu(title: &str, items: &[String]) -> io::Result<Option<usize>> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    unsafe {
+        let class_name = wide(format!("CodexLidGuardMenuWindow.{}", GetCurrentProcessId()));
+        let instance = GetModuleHandleW(null());
+        let window_class = WindowClassExW {
+            size: size_of::<WindowClassExW>() as u32,
+            style: 0,
+            window_procedure: Some(menu_owner_window_procedure),
+            class_extra: 0,
+            window_extra: 0,
+            instance,
+            icon: null_mut(),
+            cursor: null_mut(),
+            background: null_mut(),
+            menu_name: null(),
+            class_name: class_name.as_ptr(),
+            small_icon: null_mut(),
+        };
+        if RegisterClassExW(&window_class) == 0 {
+            return Err(error("RegisterClassExW failed for the menu owner"));
+        }
+
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            UnregisterClassW(class_name.as_ptr(), instance);
+            return Err(error("CreatePopupMenu failed"));
+        }
+
+        let previous_foreground = GetForegroundWindow();
+        let owner_name = wide("Codex Lid Guard Menu");
+        let owner = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            class_name.as_ptr(),
+            owner_name.as_ptr(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            null_mut(),
+            null_mut(),
+            instance,
+            null(),
+        );
+        if owner.is_null() {
+            DestroyMenu(menu);
+            UnregisterClassW(class_name.as_ptr(), instance);
+            return Err(error("CreateWindowExW failed for the menu owner"));
+        }
+
+        let background = CreateSolidBrush(color_ref(31, 31, 31));
+        if background.is_null() {
+            DestroyWindow(owner);
+            DestroyMenu(menu);
+            UnregisterClassW(class_name.as_ptr(), instance);
+            return Err(error("CreateSolidBrush failed for the menu background"));
+        }
+
+        let item_width = context_menu_width(title, items);
+        let mut item_data = Vec::with_capacity(items.len() + 2);
+        item_data.push(Box::new(MenuItemData::new(
+            title,
+            MenuItemKind::Header,
+            item_width,
+        )));
+        item_data.push(Box::new(MenuItemData::new(
+            "",
+            MenuItemKind::Separator,
+            item_width,
+        )));
+        item_data.extend(
+            items
+                .iter()
+                .map(|label| Box::new(MenuItemData::new(label, MenuItemKind::Session, item_width))),
+        );
+
+        let result = (|| {
+            let information = MenuInfo {
+                size: size_of::<MenuInfo>() as u32,
+                mask: MIM_BACKGROUND,
+                style: 0,
+                max_height: 0,
+                background,
+                context_help_id: 0,
+                menu_data: 0,
+            };
+            if SetMenuInfo(menu, &information) == 0 {
+                return Err(error("SetMenuInfo failed"));
+            }
+            for (index, data) in item_data.iter().enumerate() {
+                let identifier = index.saturating_sub(1);
+                let disabled = data.kind != MenuItemKind::Session;
+                let flags = MF_OWNERDRAW | if disabled { MF_DISABLED } else { 0 };
+                let item_pointer = (&**data as *const MenuItemData).cast::<u16>();
+                if AppendMenuW(menu, flags, identifier, item_pointer) == 0 {
+                    return Err(error("AppendMenuW failed"));
+                }
+            }
+
+            let mut point: Point = zeroed();
+            if GetCursorPos(&mut point) == 0 {
+                return Err(error("GetCursorPos failed"));
+            }
+
+            ShowWindow(owner, SW_SHOW);
+            let current_thread = GetCurrentThreadId();
+            let foreground_thread = if previous_foreground.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(previous_foreground, null_mut())
+            };
+            let attached_foreground = foreground_thread != 0
+                && foreground_thread != current_thread
+                && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+            let focused = SetForegroundWindow(owner) != 0;
+            if attached_foreground {
+                AttachThreadInput(current_thread, foreground_thread, 0);
+            }
+            if !focused {
+                return Err(error("SetForegroundWindow failed for the menu owner"));
+            }
+
+            let selected = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_NONOTIFY | TPM_RETURNCMD,
+                point.x,
+                point.y,
+                0,
+                owner,
+                null(),
+            );
+            PostMessageW(owner, WM_NULL, 0, 0);
+            Ok((selected > 0).then_some(selected as usize - 1))
+        })();
+        if !previous_foreground.is_null() && IsWindow(previous_foreground) != 0 {
+            SetForegroundWindow(previous_foreground);
+        }
+        DestroyMenu(menu);
+        DeleteObject(background);
+        DestroyWindow(owner);
+        UnregisterClassW(class_name.as_ptr(), instance);
+        result
+    }
+}
+
+impl MenuItemData {
+    fn new(value: &str, kind: MenuItemKind, width: u32) -> Self {
+        let text = normalize_menu_label(value)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let height = match kind {
+            MenuItemKind::Header => 32,
+            MenuItemKind::Separator => 9,
+            MenuItemKind::Session => 36,
+        };
+        Self {
+            text,
+            kind,
+            width,
+            height,
+        }
+    }
+}
+
+fn context_menu_width(title: &str, items: &[String]) -> u32 {
+    std::iter::once(title)
+        .chain(items.iter().map(String::as_str))
+        .map(|value| normalize_menu_label(value).encode_utf16().count() as u32 * 8 + 40)
+        .max()
+        .unwrap_or(260)
+        .clamp(260, 520)
+}
+
+fn normalize_menu_label(value: &str) -> String {
+    value.replace(['\r', '\n', '\t'], " ")
+}
+
+unsafe extern "system" fn menu_owner_window_procedure(
+    window: Hwnd,
+    message: u32,
+    wparam: Wparam,
+    lparam: Lparam,
+) -> Lresult {
+    unsafe {
+        if message == WM_MEASUREITEM && lparam != 0 {
+            let measure = &mut *(lparam as *mut MeasureItemStruct);
+            if measure.control_type == ODT_MENU && measure.item_data != 0 {
+                let data = &*(measure.item_data as *const MenuItemData);
+                measure.item_width = data.width;
+                measure.item_height = data.height;
+                return 1;
+            }
+        }
+        if message == WM_DRAWITEM && lparam != 0 {
+            let draw = &*(lparam as *const DrawItemStruct);
+            if draw.control_type == ODT_MENU && draw.item_data != 0 {
+                draw_context_menu_item(draw, &*(draw.item_data as *const MenuItemData));
+                return 1;
+            }
+        }
+        DefWindowProcW(window, message, wparam, lparam)
+    }
+}
+
+unsafe fn draw_context_menu_item(draw: &DrawItemStruct, data: &MenuItemData) {
+    unsafe {
+        let selected = data.kind == MenuItemKind::Session && draw.item_state & ODS_SELECTED != 0;
+        let background_color = if selected {
+            color_ref(4, 57, 94)
+        } else {
+            color_ref(31, 31, 31)
+        };
+        let brush = CreateSolidBrush(background_color);
+        if !brush.is_null() {
+            FillRect(draw.device_context, &draw.item_rect, brush);
+            DeleteObject(brush);
+        }
+
+        if data.kind == MenuItemKind::Separator {
+            let middle = (draw.item_rect.top + draw.item_rect.bottom) / 2;
+            let separator = Rect {
+                left: draw.item_rect.left + 12,
+                top: middle,
+                right: draw.item_rect.right - 12,
+                bottom: middle + 1,
+            };
+            let brush = CreateSolidBrush(color_ref(62, 62, 64));
+            if !brush.is_null() {
+                FillRect(draw.device_context, &separator, brush);
+                DeleteObject(brush);
+            }
+            return;
+        }
+
+        SetBkMode(draw.device_context, TRANSPARENT);
+        let text_color = match (data.kind, selected) {
+            (_, true) => color_ref(255, 255, 255),
+            (MenuItemKind::Header, false) => color_ref(160, 160, 160),
+            _ => color_ref(204, 204, 204),
+        };
+        SetTextColor(draw.device_context, text_color);
+        let font = GetStockObject(DEFAULT_GUI_FONT);
+        let previous_font = if font.is_null() {
+            null_mut()
+        } else {
+            SelectObject(draw.device_context, font)
+        };
+        let mut text_rect = draw.item_rect;
+        text_rect.left += 14;
+        text_rect.right -= 14;
+        DrawTextW(
+            draw.device_context,
+            data.text.as_ptr(),
+            data.text.len().saturating_sub(1).min(i32::MAX as usize) as i32,
+            &mut text_rect,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        if !previous_font.is_null() {
+            SelectObject(draw.device_context, previous_font);
+        }
+    }
+}
+
+const fn color_ref(red: u8, green: u8, blue: u8) -> u32 {
+    red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
 }
 
 fn process_executable_name(process_id: u32) -> Option<String> {
@@ -1398,6 +1863,20 @@ mod tests {
         assert!(is_supported_editor_process("VSCodium.exe"));
         assert!(is_supported_editor_process("Cursor.exe"));
         assert!(!is_supported_editor_process("notepad.exe"));
+    }
+
+    #[test]
+    fn isolated_test_power_policy_cannot_read_production_recovery_state() {
+        let policy = PowerPolicy::new_for_test();
+        assert!(!policy.recovery_is_enabled());
+    }
+
+    #[test]
+    fn native_menu_labels_preserve_ampersands_and_remove_control_characters() {
+        assert_eq!(
+            normalize_menu_label("Research & Development\nSession"),
+            "Research & Development Session"
+        );
     }
 
     #[test]
