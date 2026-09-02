@@ -12,6 +12,7 @@ import {
   writeHooksDocument
 } from "./hookInstaller";
 import {
+  daemonHandoffRequired,
   focusHelperSession,
   GuardStatus,
   isGuardianPipeName,
@@ -499,7 +500,14 @@ function startStatusWatcher(context: vscode.ExtensionContext, statusBar: vscode.
         statusRefreshDebounce = undefined;
         if (configuration().get<boolean>("enabled", true)) {
           void readHelperStatus(helperStatusPath())
-            .then((status) => updateStatusBar(statusBar, status))
+            .then(async (status) => {
+              const currentVersion = String(context.extension.packageJSON.version);
+              if (daemonHandoffRequired(status, currentVersion)) {
+                await refreshStatus(context, statusBar);
+                return;
+              }
+              updateStatusBar(statusBar, status);
+            })
             .catch(() => refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error))));
         }
       }, 25);

@@ -16,6 +16,8 @@ export type GuardActiveItem = {
 export type GuardStatus = {
   ok: boolean;
   message: string;
+  daemonPath?: string | null;
+  daemonVersion?: string | null;
   pipeName?: string | null;
   activeTurns: number;
   activeItems?: GuardActiveItem[];
@@ -23,6 +25,34 @@ export type GuardStatus = {
   lidState: "unknown" | "open" | "closed";
   sleepPending: boolean;
 };
+
+export function daemonHandoffRequired(
+  status: GuardStatus,
+  currentVersion: string
+): boolean {
+  if (status.activeTurns !== 0) {
+    return false;
+  }
+  const candidate = parseReleaseVersion(status.daemonVersion);
+  const current = parseReleaseVersion(currentVersion);
+  if (!candidate || !current) {
+    return status.daemonVersion !== currentVersion;
+  }
+  for (let index = 0; index < current.length; index += 1) {
+    if (candidate[index] !== current[index]) {
+      return candidate[index] < current[index];
+    }
+  }
+  return false;
+}
+
+function parseReleaseVersion(value: string | null | undefined): [number, number, number] | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+]|$)/u.exec(value ?? "");
+  if (!match) {
+    return undefined;
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
 
 export function isGuardianPipeName(value: string | null | undefined): value is string {
   return typeof value === "string" && GUARDIAN_PIPE_PATTERN.test(value);

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.30
+
+- Used both direct-file and directory notifications for Codex turn starts, improving Windows append reliability.
+- Reduced the fallback prompt-detection bound from 250 ms to 100 ms; normal detection remains event-driven.
+
+## 0.1.29
+
+- Reduced worst-case awake-indicator completion lag from two seconds to 250 ms while retaining the low-overhead native reconciliation path.
+
+## 0.1.28
+
+- Closed the final race between validating an active native lifecycle record and creating its completion cursor.
+- Kept long, high-output turns detectable even when their start record is beyond the initial transcript tail window.
+
+## 0.1.27
+
+- Activated Lid Guard with Codex views, conversation editors, and launch commands so immediate post-reload prompts are protected without eagerly activating in unrelated VS Code windows.
+- Replaced an idle older shared daemon immediately after its final active turn instead of waiting for the four-minute lease refresh.
+
+## 0.1.26
+
+- Prevented completion-time Codex metadata rows and hidden title-generation sessions from creating stale awake-session entries.
+- Kept the original terminal-event cursor when native metadata arrives after the fast extension-log signal.
+- Promoted still-running new-session turns to durable transcript tracking instead of letting their provisional count expire.
+
 ## 0.1.25
 
 - Removed mandatory Codex hook onboarding: native lifecycle metadata now protects turns by default with no console, review popup, or trust step.

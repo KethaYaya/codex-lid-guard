@@ -6,12 +6,30 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  daemonHandoffRequired,
   isGuardianPipeName,
   preAcquireGuardian,
   readHelperStatus,
   warmGuardianPipe,
   writeHelperSettings
 } from "../src/helper";
+
+test("hands an idle older daemon over to the installed helper", () => {
+  const status = {
+    ok: true,
+    message: "idle",
+    daemonVersion: "0.1.25",
+    activeTurns: 0,
+    isGuarding: false,
+    lidState: "open" as const,
+    sleepPending: false
+  };
+
+  assert.equal(daemonHandoffRequired(status, "0.1.26"), true);
+  assert.equal(daemonHandoffRequired({ ...status, activeTurns: 1 }, "0.1.26"), false);
+  assert.equal(daemonHandoffRequired({ ...status, daemonVersion: "0.1.26" }, "0.1.26"), false);
+  assert.equal(daemonHandoffRequired({ ...status, daemonVersion: "0.2.0" }, "0.1.26"), false);
+});
 
 test("accepts only the per-user local guardian pipe format", () => {
   assert.equal(isGuardianPipeName("\\\\.\\pipe\\CodexLidGuard.0123456789ABCDEF"), true);

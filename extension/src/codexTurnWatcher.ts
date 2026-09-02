@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const turnStartPattern = /\bReasoning summary turn-start config resolved\b.*\bconversationId=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\s|$)/iu;
-const WATCH_SAFETY_INTERVAL_MS = 250;
+const WATCH_SAFETY_INTERVAL_MS = 100;
 
 export type CodexTurnStartWatcher = {
   dispose(): void;
@@ -28,13 +28,14 @@ export async function watchCodexTurnStarts(
     return undefined;
   }
 
-  let offset = await fileSize(logPath);
+  let offset = (await existingFileSize(logPath)) ?? 0;
   let remainder = "";
   let remainderWasEmitted = false;
   let reading = false;
   let readAgain = false;
+  let checkingSize = false;
   let closed = false;
-  let watcher: FSWatcher | undefined;
+  let watchers: FSWatcher[] = [];
   let watcherRestartTimer: NodeJS.Timeout | undefined;
 
   const emitTurnStart = (line: string): boolean => {
@@ -107,8 +108,10 @@ export async function watchCodexTurnStarts(
     if (closed || watcherRestartTimer) {
       return;
     }
-    watcher?.close();
-    watcher = undefined;
+    for (const watcher of watchers) {
+      watcher.close();
+    }
+    watchers = [];
     watcherRestartTimer = setTimeout(() => {
       watcherRestartTimer = undefined;
       startWatcher();
@@ -120,34 +123,56 @@ export async function watchCodexTurnStarts(
     if (closed) {
       return;
     }
-    watcher?.close();
+    for (const watcher of watchers) {
+      watcher.close();
+    }
+    watchers = [];
     try {
-      watcher = watch(logPath, { persistent: false }, (event) => {
+      watchers.push(watch(logPath, { persistent: false }, (event) => {
         void readAppended();
         if (event === "rename") {
           scheduleWatcherRestart();
         }
-      });
-    } catch {
-      try {
-        watcher = watch(directory, { persistent: false }, (_event, filename) => {
-          if (!filename || filename.toString().toLowerCase() === "codex.log") {
-            void readAppended();
+      }));
+    } catch {}
+    try {
+      watchers.push(watch(directory, { persistent: false }, (event, filename) => {
+        if (!filename || filename.toString().toLowerCase() === "codex.log") {
+          void readAppended();
+          if (event === "rename") {
             scheduleWatcherRestart();
           }
-        });
-      } catch {
-        scheduleWatcherRestart();
-        return;
-      }
+        }
+      }));
+    } catch {}
+    if (watchers.length === 0) {
+      scheduleWatcherRestart();
+      return;
     }
-    watcher.on("error", scheduleWatcherRestart);
+    for (const watcher of watchers) {
+      watcher.on("error", scheduleWatcherRestart);
+    }
+  };
+
+  const checkForAppend = async (): Promise<void> => {
+    if (closed || checkingSize) {
+      return;
+    }
+    checkingSize = true;
+    try {
+      const size = await existingFileSize(logPath);
+      if (size !== undefined && size !== offset) {
+        await readAppended();
+      }
+    } finally {
+      checkingSize = false;
+    }
   };
 
   startWatcher();
   // fs.watch can coalesce or omit notifications on Windows. This inexpensive
   // metadata/read check bounds the delay without scanning Codex transcripts.
-  const safetyTimer = setInterval(() => void readAppended(), WATCH_SAFETY_INTERVAL_MS);
+  const safetyTimer = setInterval(() => void checkForAppend(), WATCH_SAFETY_INTERVAL_MS);
   safetyTimer.unref();
   void readAppended();
 
@@ -158,15 +183,18 @@ export async function watchCodexTurnStarts(
       if (watcherRestartTimer) {
         clearTimeout(watcherRestartTimer);
       }
-      watcher?.close();
+      for (const watcher of watchers) {
+        watcher.close();
+      }
+      watchers = [];
     }
   };
 }
 
-async function fileSize(filePath: string): Promise<number> {
+async function existingFileSize(filePath: string): Promise<number | undefined> {
   try {
     return (await fs.stat(filePath)).size;
   } catch {
-    return 0;
+    return undefined;
   }
 }

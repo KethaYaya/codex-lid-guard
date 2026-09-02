@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.30
+
+- Combined direct Codex-log and containing-directory notifications on Windows, avoiding delayed prompt acquisition when either watcher misses an append.
+- Tightened the low-frequency turn-start safety check from 250 ms to 100 ms while retaining event-driven acquisition as the primary path.
+
+## 0.1.29
+
+- Reduced worst-case terminal reconciliation latency from two seconds to 250 ms so the awake indicator clears almost immediately after Codex finishes.
+
+## 0.1.28
+
+- Made native lifecycle validation and transcript cursor creation atomic, closing the final narrow completion race while eliminating a duplicate transcript read.
+- Located the latest lifecycle state beyond the initial transcript tail window when a running turn produces unusually large output.
+
+## 0.1.27
+
+- Activated Lid Guard when a Codex view, conversation editor, or launch command is used, so a prompt sent immediately after reload cannot outrun turn tracking without adding work to unrelated VS Code windows.
+- Automatically handed an idle older shared daemon over to the installed version as soon as the active turn finished, eliminating persistent old-daemon sessions after upgrades.
+
+## 0.1.26
+
+- Prevented completion-time Codex metadata rows and hidden title-generation sessions from creating stale awake-session entries.
+- Preserved the extension log's existing transcript cursor when delayed native metadata arrives, so an already-observed terminal event cannot be skipped.
+- Promoted still-running provisional turns to transcript tracking when their session metadata becomes available, preventing new-session turns from expiring after 10 seconds.
+
 ## 0.1.25
 
 - Removed mandatory Codex hook onboarding: native lifecycle metadata now protects turns by default with no console, review popup, or trust step.

@@ -45,6 +45,37 @@ impl TranscriptCursor {
         })
     }
 
+    pub fn new_for_active_session(path: Option<&str>) -> Option<Self> {
+        let path = path.map(str::trim).filter(|value| !value.is_empty())?;
+        let path = PathBuf::from(path);
+        let length = fs::metadata(&path).ok()?.len();
+        let mut file = File::open(&path).ok()?;
+        let mut window = MAX_APPENDED_BYTES.min(length);
+        loop {
+            let start = length.saturating_sub(window);
+            file.seek(SeekFrom::Start(start)).ok()?;
+            let mut bytes = Vec::with_capacity((length - start) as usize);
+            file.read_to_end(&mut bytes).ok()?;
+            let mut value = String::from_utf8_lossy(&bytes).into_owned();
+            if start > 0 {
+                let first_newline = value.find('\n')?;
+                value.drain(..=first_newline);
+            }
+            if let Some(active) = latest_lifecycle_state(&value) {
+                return active.then_some(Self {
+                    path,
+                    turn_id: None,
+                    offset: length,
+                    pending_line: String::new(),
+                });
+            }
+            if start == 0 {
+                return None;
+            }
+            window = window.saturating_mul(2).min(length);
+        }
+    }
+
     pub fn reached_terminal_event(&mut self) -> bool {
         self.read_appended()
             .is_ok_and(|value| has_terminal_event(&value, self.turn_id.as_deref()))
@@ -118,6 +149,34 @@ fn has_terminal_event(value: &str, turn_id: Option<&str>) -> bool {
             && turn_id.is_none_or(|turn_id| payload.turn_id.as_deref() == Some(turn_id))
             && matches!(payload.kind.as_str(), "task_complete" | "turn_aborted")
     })
+}
+
+fn latest_lifecycle_state(value: &str) -> Option<bool> {
+    let mut active = false;
+    let mut found = false;
+    for line in value.lines() {
+        let Ok(event) = serde_json::from_str::<TranscriptEvent>(line) else {
+            continue;
+        };
+        let Some(payload) = event.payload else {
+            continue;
+        };
+        if event.kind != "event_msg" {
+            continue;
+        }
+        match payload.kind.as_str() {
+            "task_started" => {
+                found = true;
+                active = true;
+            }
+            "task_complete" | "turn_aborted" => {
+                found = true;
+                active = false;
+            }
+            _ => {}
+        }
+    }
+    found.then_some(active)
 }
 
 #[cfg(test)]
@@ -196,6 +255,80 @@ mod tests {
         assert!(cursor.reached_terminal_event());
 
         drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn completed_session_is_not_reported_as_active() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-lid-guard-completed-session-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-a\"}}\n\
+              {\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"turn_id\":\"turn-a\"}}\n",
+        )
+        .unwrap();
+
+        assert!(TranscriptCursor::new_for_active_session(path.to_str()).is_none());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn latest_unfinished_session_turn_is_reported_as_active() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-lid-guard-active-session-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"old\"}}\n\
+              {\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"old\"}}\n\
+              {\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"current\"}}\n\
+              {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"ignored\"}}\n",
+        )
+        .unwrap();
+
+        assert!(TranscriptCursor::new_for_active_session(path.to_str()).is_some());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn active_session_state_is_found_beyond_the_initial_tail_window() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-lid-guard-large-active-session-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        let mut transcript =
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"current\"}}\n"
+                .to_vec();
+        transcript.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"",
+        );
+        transcript.extend(std::iter::repeat_n(
+            b'x',
+            MAX_APPENDED_BYTES as usize + 1024,
+        ));
+        transcript.extend_from_slice(b"\"}}\n");
+        fs::write(&path, transcript).unwrap();
+
+        assert!(TranscriptCursor::new_for_active_session(path.to_str()).is_some());
+
         fs::remove_file(path).unwrap();
     }
 }

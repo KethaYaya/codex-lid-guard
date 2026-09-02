@@ -15,7 +15,7 @@ use crate::sound::{self, AlertSound};
 use crate::{client, codex_lifecycle, codex_log, paths, win};
 
 const SOUND_DEDUP_WINDOW: Duration = Duration::from_millis(750);
-const ACTIVE_TURN_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const ACTIVE_TURN_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const PRE_ACQUIRE_TTL: Duration = Duration::from_secs(10);
 static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
@@ -147,6 +147,15 @@ pub fn run() -> io::Result<()> {
     }
     let lifecycle_state = Arc::clone(&state);
     let _lifecycle_watcher = codex_lifecycle::start(move |start| {
+        let Some(cursor) =
+            TranscriptCursor::new_for_active_session(start.transcript_path.as_deref())
+        else {
+            logging::write(format!(
+                "Ignored inactive Codex lifecycle metadata row {} for session {}.",
+                start.row_id, start.session_id
+            ));
+            return;
+        };
         let session_id = start.session_id;
         let request = GuardRequest {
             action: "metadata-acquire".to_string(),
@@ -156,7 +165,13 @@ pub fn run() -> io::Result<()> {
             transcript_path: start.transcript_path,
             ..GuardRequest::default()
         };
+        let key = turn_key(&request);
         let _ = handle_request(&lifecycle_state, request);
+        if let Ok(mut state) = lifecycle_state.lock()
+            && state.active_turns.contains_key(&key)
+        {
+            state.transcript_cursors.insert(key, cursor);
+        }
         // Window discovery is deliberately after acquisition so UI bookkeeping
         // cannot add latency to the power-protection path.
         if let Some(origin_window) = win::foreground_editor_window() {
@@ -278,7 +293,10 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -
             "pre-acquire" => {
                 let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
                 if acquired && !durable {
-                    pre_acquire_expiry = Some(turn_key(&request));
+                    pre_acquire_expiry = Some((
+                        turn_key(&request),
+                        request.session_id.clone().unwrap_or_default(),
+                    ));
                 }
                 response
             }
@@ -387,8 +405,8 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -
     if should_publish_status {
         publish_status(&response);
     }
-    if let Some(key) = pre_acquire_expiry {
-        spawn_pre_acquire_expiry(shared, key);
+    if let Some((key, session_id)) = pre_acquire_expiry {
+        spawn_pre_acquire_expiry(shared, key, session_id);
     }
     if let Some((token, delay)) = sleep_schedule {
         spawn_sleep(shared, token, delay);
@@ -399,32 +417,52 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -
     response
 }
 
-fn spawn_pre_acquire_expiry(shared: &Arc<Mutex<DaemonState>>, key: String) {
+fn spawn_pre_acquire_expiry(shared: &Arc<Mutex<DaemonState>>, key: String, session_id: String) {
     let shared = Arc::clone(shared);
     thread::spawn(move || {
         thread::sleep(PRE_ACQUIRE_TTL);
+        let (transcript_path, cwd) = codex_lifecycle::session_metadata(&session_id);
+        let promotion = TranscriptCursor::new_for_active_session(transcript_path.as_deref())
+            .map(|cursor| (cursor, cwd));
         let mut sleep_schedule = None;
         let response = {
             let Ok(mut state) = shared.lock() else {
                 return;
             };
-            if state.active_turns.remove(&key).is_none() {
-                return;
-            }
-            state.transcript_cursors.remove(&key);
-            logging::write(format!(
-                "Provisional turn expired before the Codex hook arrived: {key}. Active turns: {}.",
-                state.active_turns.len()
-            ));
-            if state.active_turns.is_empty() {
-                if let Err(cause) = state.power_policy.release() {
-                    state.snapshot(false, cause.to_string())
+            if let Some((cursor, cwd)) = promotion {
+                let Some(turn) = state.active_turns.get_mut(&key) else {
+                    return;
+                };
+                if turn.info.cwd.is_none() {
+                    turn.info.cwd = cwd;
+                }
+                if !turn.info.turn_id.starts_with("pending-metadata-") {
+                    turn.info.turn_id = format!("pending-metadata-log-{}", turn.info.turn_id);
+                }
+                state.transcript_cursors.insert(key.clone(), cursor);
+                logging::write(format!(
+                    "Promoted provisional turn to transcript tracking: {key}."
+                ));
+                state.snapshot(true, "Codex turn tracking was confirmed.")
+            } else {
+                if state.active_turns.remove(&key).is_none() {
+                    return;
+                }
+                state.transcript_cursors.remove(&key);
+                logging::write(format!(
+                    "Provisional turn expired before the Codex hook arrived: {key}. Active turns: {}.",
+                    state.active_turns.len()
+                ));
+                if state.active_turns.is_empty() {
+                    if let Err(cause) = state.power_policy.release() {
+                        state.snapshot(false, cause.to_string())
+                    } else {
+                        sleep_schedule = prepare_sleep(&mut state);
+                        state.snapshot(true, "Provisional Codex turn expired.")
+                    }
                 } else {
-                    sleep_schedule = prepare_sleep(&mut state);
                     state.snapshot(true, "Provisional Codex turn expired.")
                 }
-            } else {
-                state.snapshot(true, "Provisional Codex turn expired.")
             }
         };
         publish_status(&response);
@@ -526,7 +564,7 @@ fn pre_acquire(state: &mut DaemonState, request: &mut GuardRequest) -> (GuardRes
     let has_metadata_turn = state.active_turns.iter().any(|(key, turn)| {
         key.starts_with(&prefix) && turn.info.turn_id.starts_with("pending-metadata-")
     });
-    if request.action.eq_ignore_ascii_case("pre-acquire") && has_metadata_turn {
+    if has_metadata_turn {
         return (
             state.snapshot(true, "The Codex metadata turn is already active."),
             false,
@@ -1229,6 +1267,45 @@ mod tests {
                 .contains_key("session:pending-metadata-42")
         );
         assert!(!state.active_turns.contains_key("session:pending-log"));
+    }
+
+    #[test]
+    fn late_metadata_acquire_cannot_reset_a_durable_log_cursor() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:pending-metadata-log-fast".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-metadata-log-fast".into(),
+                    cwd: Some(r"C:\workspace".into()),
+                },
+                origin_window: None,
+                sequence: 1,
+            },
+        );
+        let mut request = GuardRequest {
+            action: "metadata-acquire".into(),
+            session_id: Some("session".into()),
+            turn_id: Some("pending-metadata-42".into()),
+            ..GuardRequest::default()
+        };
+
+        let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
+
+        assert!(response.ok);
+        assert!(!acquired);
+        assert!(durable);
+        assert!(
+            state
+                .active_turns
+                .contains_key("session:pending-metadata-log-fast")
+        );
+        assert!(
+            !state
+                .active_turns
+                .contains_key("session:pending-metadata-42")
+        );
     }
 
     #[test]
