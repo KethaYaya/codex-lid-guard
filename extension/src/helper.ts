@@ -143,6 +143,18 @@ export async function focusHelperSession(
   return JSON.parse(stdout) as GuardStatus;
 }
 
+export async function associateHelperSession(
+  helperPath: string,
+  sessionId: string
+): Promise<GuardStatus> {
+  const { stdout } = await execFileAsync(helperPath, ["associate-window", sessionId], {
+    windowsHide: true,
+    timeout: 7000,
+    encoding: "utf8"
+  });
+  return JSON.parse(stdout) as GuardStatus;
+}
+
 export async function showHelperMenu(
   helperPath: string,
   title: string,

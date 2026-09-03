@@ -12,6 +12,7 @@ import {
   writeHooksDocument
 } from "./hookInstaller";
 import {
+  associateHelperSession,
   daemonHandoffRequired,
   focusHelperSession,
   GuardStatus,
@@ -587,7 +588,15 @@ async function startCodexTurnStartWatcher(
         sessionId,
         pendingTurnId,
         cwd
-      )
+      ).then((status) => {
+        if (status.ok) {
+          // Direct pipe acquisition avoids process-start latency, but only the
+          // native helper can identify this VS Code window. Bind it immediately
+          // so the session URI is later delivered to the originating window.
+          void associateHelperSession(helper, sessionId).catch(() => undefined);
+        }
+        return status;
+      })
       : preAcquireHelper(helper, sessionId, pendingTurnId, cwd);
     void acquire
       .catch(() => preAcquireHelper(helper, sessionId, pendingTurnId, cwd))

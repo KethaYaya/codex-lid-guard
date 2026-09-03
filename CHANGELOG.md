@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.31
+
+- Bound fast-path Codex turn acquisitions to their originating VS Code window, so selecting an awake session switches to the correct workspace before opening the chat.
+- Made prompt-time window associations authoritative over later metadata-watcher guesses, including when a direct pipe request succeeds but its response times out.
+
 ## 0.1.30
 
 - Combined direct Codex-log and containing-directory notifications on Windows, avoiding delayed prompt acquisition when either watcher misses an append.

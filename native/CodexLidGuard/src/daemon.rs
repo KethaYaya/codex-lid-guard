@@ -546,6 +546,12 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
 
 fn pre_acquire(state: &mut DaemonState, request: &mut GuardRequest) -> (GuardResponse, bool, bool) {
     let prefix = session_prefix(request);
+    if request.origin_window.is_some() {
+        // A helper fallback may arrive after direct pipe acquisition succeeded
+        // but its response timed out. Preserve the helper's authoritative HWND
+        // even when the provisional turn is already present.
+        let _ = associate_window(state, request);
+    }
     let has_authoritative_turn = state
         .active_turns
         .iter()
@@ -737,7 +743,9 @@ fn associate_window(state: &mut DaemonState, request: &GuardRequest) -> GuardRes
     };
     let prefix = session_prefix(request);
     for (key, turn) in &mut state.active_turns {
-        if key.starts_with(&prefix) && turn.origin_window.is_none() {
+        if key.starts_with(&prefix)
+            && (turn.origin_window.is_none() || request.origin_window_authoritative)
+        {
             turn.origin_window = Some(window);
         }
     }
@@ -1040,6 +1048,90 @@ mod tests {
         assert_eq!(
             state.latest_session_by_window.get(&42).map(String::as_str),
             Some("session")
+        );
+    }
+
+    #[test]
+    fn authoritative_editor_window_replaces_a_metadata_watcher_guess() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:pending-metadata-1".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-metadata-1".into(),
+                    cwd: None,
+                },
+                origin_window: Some(41),
+                sequence: 1,
+            },
+        );
+        let heuristic = GuardRequest {
+            action: "associate-window".into(),
+            session_id: Some("session".into()),
+            origin_window: Some(42),
+            ..GuardRequest::default()
+        };
+
+        let _ = associate_window(&mut state, &heuristic);
+        assert_eq!(
+            state
+                .active_turns
+                .get("session:pending-metadata-1")
+                .and_then(|turn| turn.origin_window),
+            Some(41)
+        );
+
+        let authoritative = GuardRequest {
+            origin_window_authoritative: true,
+            origin_window: Some(43),
+            ..heuristic
+        };
+        let _ = associate_window(&mut state, &authoritative);
+        assert_eq!(
+            state
+                .active_turns
+                .get("session:pending-metadata-1")
+                .and_then(|turn| turn.origin_window),
+            Some(43)
+        );
+    }
+
+    #[test]
+    fn helper_fallback_updates_an_existing_provisional_turn_window() {
+        let mut state = DaemonState::new_for_test();
+        state.active_turns.insert(
+            "session:pending-metadata-log-fast".into(),
+            TrackedTurn {
+                info: ActiveTurnInfo {
+                    session_id: "session".into(),
+                    turn_id: "pending-metadata-log-fast".into(),
+                    cwd: None,
+                },
+                origin_window: Some(41),
+                sequence: 1,
+            },
+        );
+        let mut request = GuardRequest {
+            action: "pre-acquire".into(),
+            session_id: Some("session".into()),
+            turn_id: Some("pending-fallback".into()),
+            origin_window: Some(42),
+            origin_window_authoritative: true,
+            ..GuardRequest::default()
+        };
+
+        let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
+
+        assert!(response.ok);
+        assert!(!acquired);
+        assert!(durable);
+        assert_eq!(
+            state
+                .active_turns
+                .get("session:pending-metadata-log-fast")
+                .and_then(|turn| turn.origin_window),
+            Some(42)
         );
     }
 

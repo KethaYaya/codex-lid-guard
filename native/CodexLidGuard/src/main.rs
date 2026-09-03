@@ -77,6 +77,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        "associate-window" => {
+            let mut response = client::send(GuardRequest {
+                action: command,
+                session_id: arguments.get(1).cloned(),
+                origin_window: win::foreground_editor_window(),
+                origin_window_authoritative: true,
+                ..GuardRequest::default()
+            });
+            response.pipe_name = Some(paths::pipe_name());
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            if !response.ok {
+                std::process::exit(1);
+            }
+        }
         "pre-acquire" => {
             let mut response = client::send(GuardRequest {
                 action: command,
@@ -84,6 +98,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 turn_id: arguments.get(2).cloned(),
                 cwd: arguments.get(3).cloned(),
                 origin_window: win::foreground_editor_window(),
+                origin_window_authoritative: true,
                 ..GuardRequest::default()
             });
             response.pipe_name = Some(paths::pipe_name());
@@ -119,6 +134,7 @@ fn run_hook(action: &str) {
         cwd: payload.cwd,
         transcript_path: payload.transcript_path,
         origin_window,
+        origin_window_authoritative: true,
     });
     if !response.ok {
         logging::write(format!(
@@ -164,7 +180,7 @@ fn run_sound(value: &str, write_response: bool) -> Result<(), Box<dyn std::error
 
 fn usage() {
     eprintln!(
-        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | sound done | sound request | status | restore | focus <session-id> <turn-id> | menu [--theme=<theme>] <title> <items...>]"
+        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | associate-window <session-id> | sound done | sound request | status | restore | focus <session-id> <turn-id> | menu [--theme=<theme>] <title> <items...>]"
     );
     std::process::exit(2);
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.31
+
+- Captured the originating VS Code window after fast direct acquisition so awake-session navigation returns to the session's actual workspace window.
+- Prevented later metadata discovery from replacing a prompt-time window association and repaired associations during direct-pipe fallback races.
+
 ## 0.1.30
 
 - Used both direct-file and directory notifications for Codex turn starts, improving Windows append reliability.

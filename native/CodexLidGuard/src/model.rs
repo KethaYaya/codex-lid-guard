@@ -32,6 +32,7 @@ pub struct GuardRequest {
     pub cwd: Option<String>,
     pub transcript_path: Option<String>,
     pub origin_window: Option<u64>,
+    pub origin_window_authoritative: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -156,11 +157,13 @@ mod tests {
             cwd: None,
             transcript_path: Some(r"C:\rollout.jsonl".into()),
             origin_window: Some(42),
+            origin_window_authoritative: true,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("sessionId"));
         assert!(json.contains("turnId"));
         assert!(json.contains("originWindow"));
+        assert!(json.contains("originWindowAuthoritative"));
         assert!(json.contains("transcriptPath"));
         assert!(json.contains("clientVersion"));
 
