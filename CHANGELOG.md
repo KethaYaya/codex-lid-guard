@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.34
+
+- Gave every currently running session a persistent theme-aware accent in the session menu.
+- Kept focused running sessions visually distinct with a brighter active accent, while completed focused sessions retain the normal selection color.
+
+## 0.1.33
+
+- Highlighted the menu row for the Codex session currently displayed in the VS Code window that opened the Lid Guard menu.
+- Preserved the normal first-row keyboard focus when the current chat is not present in the five-session menu.
+
+## 0.1.32
+
+- Kept the five most recently active Codex sessions in the Lid Guard menu so completed chats remain available for quick switching.
+- Continued to count only currently awake turns, while prioritizing all awake sessions ahead of completed history entries.
+- Loaded recent-session history only for interactive status-menu requests, leaving prompt acquisition and background monitoring performance unchanged.
+
 ## 0.1.31
 
 - Bound fast-path Codex turn acquisitions to their originating VS Code window, so selecting an awake session switches to the correct workspace before opening the chat.

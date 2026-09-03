@@ -4,6 +4,7 @@ import * as path from "node:path";
 
 const turnStartPattern = /\bReasoning summary turn-start config resolved\b.*\bconversationId=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\s|$)/iu;
 const WATCH_SAFETY_INTERVAL_MS = 100;
+const FOCUSED_SESSION_TAIL_BYTES = 256 * 1024;
 
 export type CodexTurnStartWatcher = {
   dispose(): void;
@@ -15,6 +16,41 @@ export function codexLogPathForExtensionLog(extensionLogDirectory: string): stri
 
 export function parseCodexTurnStart(line: string): string | undefined {
   return turnStartPattern.exec(line)?.[1]?.toLowerCase();
+}
+
+export function parseFocusedCodexSession(contents: string): string | undefined {
+  const lines = contents.split(/\r?\n/u);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!line.includes("thread_stream_view_activity_changed")) {
+      continue;
+    }
+    const active = /\bactive=(true|false)(?:\s|$)/iu.exec(line)?.[1]?.toLowerCase();
+    if (active === "false") {
+      return undefined;
+    }
+    if (active === "true") {
+      return /\bconversationId=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\s|$)/iu
+        .exec(line)?.[1]?.toLowerCase();
+    }
+  }
+  return undefined;
+}
+
+export async function readFocusedCodexSession(logPath: string): Promise<string | undefined> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(logPath, "r");
+    const size = (await handle.stat()).size;
+    const bytesToRead = Math.min(size, FOCUSED_SESSION_TAIL_BYTES);
+    const buffer = Buffer.allocUnsafe(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, size - bytesToRead);
+    return parseFocusedCodexSession(buffer.subarray(0, bytesRead).toString("utf8"));
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 export async function watchCodexTurnStarts(

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { GuardActiveItem } from "./helper";
+import type { GuardActiveItem, GuardRecentItem } from "./helper";
 
 const codexSessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -8,6 +8,73 @@ export type AwakeSessionDisplay = {
   description: string;
   detail: string;
 };
+
+export type SessionMenuEntry = {
+  activeItem: GuardActiveItem;
+  title?: string;
+  awake: boolean;
+};
+
+export function sessionMenuEntries(
+  activeItems: readonly GuardActiveItem[],
+  recentItems: readonly GuardRecentItem[],
+  limit = 5
+): SessionMenuEntry[] {
+  const entries: SessionMenuEntry[] = [];
+  const included = new Set<string>();
+
+  for (const activeItem of activeItems) {
+    const sessionId = normalizedSessionId(activeItem.sessionId);
+    if (!sessionId || included.has(sessionId)) {
+      continue;
+    }
+    const recent = recentItems.find(
+      (item) => normalizedSessionId(item.sessionId) === sessionId
+    );
+    entries.push({
+      activeItem,
+      title: normalizedTitle(recent?.title ?? undefined),
+      awake: true
+    });
+    included.add(sessionId);
+  }
+
+  const targetSize = Math.max(entries.length, Math.max(0, Math.trunc(limit)));
+  for (const recent of recentItems) {
+    if (entries.length >= targetSize) {
+      break;
+    }
+    const sessionId = normalizedSessionId(recent.sessionId);
+    if (!sessionId || included.has(sessionId)) {
+      continue;
+    }
+    entries.push({
+      activeItem: {
+        sessionId: recent.sessionId,
+        turnId: "",
+        cwd: recent.cwd
+      },
+      title: normalizedTitle(recent.title ?? undefined),
+      awake: false
+    });
+    included.add(sessionId);
+  }
+  return entries;
+}
+
+export function focusedSessionMenuIndex(
+  entries: readonly SessionMenuEntry[],
+  sessionId: string | undefined
+): number | undefined {
+  const normalized = normalizedSessionId(sessionId ?? "");
+  if (!normalized) {
+    return undefined;
+  }
+  const index = entries.findIndex(
+    (entry) => normalizedSessionId(entry.activeItem.sessionId) === normalized
+  );
+  return index >= 0 ? index : undefined;
+}
 
 export function awakeSessionDisplay(
   item: GuardActiveItem,
@@ -45,9 +112,13 @@ function normalizedTitle(value: string | undefined): string | undefined {
 }
 
 function sessionLocation(item: GuardActiveItem): { cwd: string | undefined; workspace: string } {
-  const cwd = item.cwd?.trim() || undefined;
+  const cwd = item.cwd?.trim().replace(/^\\\\\?\\/u, "") || undefined;
   return {
     cwd,
     workspace: cwd ? path.win32.basename(cwd) || cwd : "Codex session"
   };
+}
+
+function normalizedSessionId(value: string): string {
+  return value.trim().toLowerCase();
 }

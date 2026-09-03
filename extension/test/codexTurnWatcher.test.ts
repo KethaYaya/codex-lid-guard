@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import {
   codexLogPathForExtensionLog,
+  parseFocusedCodexSession,
   parseCodexTurnStart,
   watchCodexTurnStarts
 } from "../src/codexTurnWatcher";
@@ -26,6 +27,27 @@ test("locates the Codex log beside the current extension-host log", () => {
     result,
     "C:\\Users\\Test\\AppData\\Roaming\\Code\\logs\\run\\window1\\exthost\\openai.chatgpt\\Codex.log"
   );
+});
+
+test("finds the currently displayed Codex session from view activity", () => {
+  const first = "01a05ca7-d20c-7aa2-9fcb-e8bb2a0a78b8";
+  const current = "01a05cac-0f8c-7190-9962-fafaefda24ec";
+  const log = [
+    `thread_stream_view_activity_changed active=true conversationId=${first}`,
+    `thread_stream_view_activity_changed active=false conversationId=${first}`,
+    `thread_stream_view_activity_changed active=true conversationId=${current}`,
+    "unrelated trailing log entry"
+  ].join("\n");
+
+  assert.equal(parseFocusedCodexSession(log), current);
+});
+
+test("reports no focused session when the latest Codex view is inactive", () => {
+  const sessionId = "01a05ca7-d20c-7aa2-9fcb-e8bb2a0a78b8";
+  assert.equal(parseFocusedCodexSession([
+    `thread_stream_view_activity_changed active=true conversationId=${sessionId}`,
+    `thread_stream_view_activity_changed active=false conversationId=${sessionId}`
+  ].join("\n")), undefined);
 });
 
 test("watches only newly appended Codex turn-start events", async () => {

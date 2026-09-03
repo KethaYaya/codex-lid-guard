@@ -13,6 +13,12 @@ export type GuardActiveItem = {
   cwd?: string | null;
 };
 
+export type GuardRecentItem = {
+  sessionId: string;
+  cwd?: string | null;
+  title?: string | null;
+};
+
 export type GuardStatus = {
   ok: boolean;
   message: string;
@@ -21,6 +27,7 @@ export type GuardStatus = {
   pipeName?: string | null;
   activeTurns: number;
   activeItems?: GuardActiveItem[];
+  recentItems?: GuardRecentItem[];
   isGuarding: boolean;
   lidState: "unknown" | "open" | "closed";
   sleepPending: boolean;
@@ -101,7 +108,7 @@ export type GuardMenuTheme =
 
 export async function runHelper(
   helperPath: string,
-  action: "status" | "restore" | "sound-done" | "sound-request"
+  action: "status" | "status-with-recent" | "restore" | "sound-done" | "sound-request"
 ): Promise<GuardStatus> {
   const args = action.startsWith("sound-") ? ["sound", action.slice("sound-".length)] : [action];
   const { stdout } = await execFileAsync(helperPath, args, {
@@ -159,9 +166,23 @@ export async function showHelperMenu(
   helperPath: string,
   title: string,
   items: string[],
-  theme: GuardMenuTheme
+  theme: GuardMenuTheme,
+  initialIndex?: number,
+  activeIndices: readonly number[] = []
 ): Promise<number | undefined> {
-  const { stdout } = await execFileAsync(helperPath, ["menu", `--theme=${theme}`, title, ...items], {
+  const args = ["menu", `--theme=${theme}`];
+  if (initialIndex !== undefined && Number.isInteger(initialIndex)
+      && initialIndex >= 0 && initialIndex < items.length) {
+    args.push(`--selected=${initialIndex}`);
+  }
+  const validActiveIndices = activeIndices.filter(
+    (index) => Number.isInteger(index) && index >= 0 && index < items.length
+  );
+  if (validActiveIndices.length > 0) {
+    args.push(`--active=${validActiveIndices.join(",")}`);
+  }
+  args.push(title, ...items);
+  const { stdout } = await execFileAsync(helperPath, args, {
     windowsHide: true,
     encoding: "utf8"
   });

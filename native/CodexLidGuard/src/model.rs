@@ -10,6 +10,14 @@ pub struct ActiveTurnInfo {
     pub cwd: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Default, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RecentSessionInfo {
+    pub session_id: String,
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct HookPayload {
@@ -46,6 +54,7 @@ pub struct GuardResponse {
     pub message: String,
     pub active_turns: usize,
     pub active_items: Vec<ActiveTurnInfo>,
+    pub recent_items: Vec<RecentSessionInfo>,
     pub is_guarding: bool,
     pub lid_state: String,
     pub sleep_pending: bool,
@@ -62,6 +71,7 @@ impl Default for GuardResponse {
             message: String::new(),
             active_turns: 0,
             active_items: Vec::new(),
+            recent_items: Vec::new(),
             is_guarding: false,
             lid_state: "unknown".to_string(),
             sleep_pending: false,

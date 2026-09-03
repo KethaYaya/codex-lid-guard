@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
+use crate::model::RecentSessionInfo;
 use crate::{logging, paths};
 
 const TURN_HANDLER_TARGET: &str = "codex_core::session::handlers";
@@ -47,6 +48,15 @@ pub fn start(on_start: impl Fn(LifecycleStart) + Send + 'static) -> Option<Lifec
 pub fn session_metadata(session_id: &str) -> (Option<String>, Option<String>) {
     open_read_only(&paths::codex_state_database())
         .and_then(|connection| thread_metadata(&connection, session_id))
+        .unwrap_or_default()
+}
+
+pub fn recent_sessions(limit: usize) -> Vec<RecentSessionInfo> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    open_read_only(&paths::codex_state_database())
+        .and_then(|connection| recent_thread_metadata(&connection, limit.min(20)))
         .unwrap_or_default()
 }
 
@@ -310,6 +320,27 @@ fn thread_metadata(
         .map(|value| value.unwrap_or_default())
 }
 
+fn recent_thread_metadata(
+    connection: &Connection,
+    limit: usize,
+) -> rusqlite::Result<Vec<RecentSessionInfo>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT id, cwd, NULLIF(name, '')
+         FROM threads
+         WHERE archived = 0 AND thread_source = 'user'
+         ORDER BY updated_at_ms DESC, updated_at DESC
+         LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit as i64], |row| {
+        Ok(RecentSessionInfo {
+            session_id: row.get(0)?,
+            cwd: row.get(1)?,
+            title: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
 fn is_logs_database_path(candidate: &Path, logs_path: &Path) -> bool {
     candidate == logs_path
         || candidate == logs_path.with_extension("sqlite-wal")
@@ -368,6 +399,46 @@ mod tests {
         assert_eq!(
             thread_metadata(&connection, "missing").unwrap(),
             (None, None)
+        );
+    }
+
+    #[test]
+    fn recent_sessions_are_user_threads_in_activity_order() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    cwd TEXT,
+                    title TEXT,
+                    name TEXT,
+                    archived INTEGER NOT NULL,
+                    thread_source TEXT,
+                    updated_at INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                );
+                INSERT INTO threads VALUES
+                    ('older', 'C:\\older', 'Older prompt', 'Older title', 0, 'user', 1, 1000),
+                    ('newer', 'C:\\newer', 'Newer prompt', NULL, 0, 'user', 2, 2000),
+                    ('archived', 'C:\\archived', 'Archived', 'Archived', 1, 'user', 3, 3000),
+                    ('internal', 'C:\\internal', 'Internal', 'Internal', 0, 'subagent', 4, 4000);",
+            )
+            .unwrap();
+
+        assert_eq!(
+            recent_thread_metadata(&connection, 5).unwrap(),
+            vec![
+                RecentSessionInfo {
+                    session_id: "newer".into(),
+                    cwd: Some("C:\\newer".into()),
+                    title: None,
+                },
+                RecentSessionInfo {
+                    session_id: "older".into(),
+                    cwd: Some("C:\\older".into()),
+                    title: Some("Older title".into()),
+                },
+            ]
         );
     }
 

@@ -293,6 +293,9 @@ struct PopupColors {
     muted_text: u32,
     hover_background: u32,
     hover_text: u32,
+    active_background: u32,
+    active_hover_background: u32,
+    active_text: u32,
 }
 
 struct NotificationPopupState {
@@ -301,6 +304,7 @@ struct NotificationPopupState {
     buttons: Vec<Hwnd>,
     selected_index: Option<usize>,
     hovered_index: Option<usize>,
+    active_items: Vec<bool>,
     colors: PopupColors,
     font: Handle,
     dpi: u32,
@@ -1380,6 +1384,8 @@ pub fn show_notification_popup(
     theme: &str,
     title: &str,
     items: &[String],
+    initial_index: Option<usize>,
+    active_indices: &[usize],
 ) -> io::Result<Option<usize>> {
     if items.is_empty() {
         return Ok(None);
@@ -1458,6 +1464,7 @@ pub fn show_notification_popup(
             buttons: Vec::with_capacity(items.len()),
             selected_index: None,
             hovered_index: None,
+            active_items: notification_active_items(active_indices, items.len()),
             colors: popup_theme.colors(),
             font: GetStockObject(DEFAULT_GUI_FONT),
             dpi,
@@ -1585,8 +1592,8 @@ pub fn show_notification_popup(
                 ));
             }
             BringWindowToTop(popup);
-            if let Some(first_button) = state.buttons.first() {
-                SetFocus(*first_button);
+            if let Some(index) = notification_initial_index(initial_index, state.buttons.len()) {
+                SetFocus(state.buttons[index]);
             }
 
             let mut message: Message = zeroed();
@@ -1668,6 +1675,9 @@ impl PopupTheme {
                 muted_text: color_ref(156, 156, 156),
                 hover_background: color_ref(48, 48, 48),
                 hover_text: color_ref(255, 255, 255),
+                active_background: color_ref(75, 59, 16),
+                active_hover_background: color_ref(101, 77, 13),
+                active_text: color_ref(255, 220, 110),
             },
             Self::Light => PopupColors {
                 background: color_ref(248, 248, 248),
@@ -1676,6 +1686,9 @@ impl PopupTheme {
                 muted_text: color_ref(97, 97, 97),
                 hover_background: color_ref(229, 229, 229),
                 hover_text: color_ref(0, 0, 0),
+                active_background: color_ref(255, 235, 166),
+                active_hover_background: color_ref(255, 220, 112),
+                active_text: color_ref(86, 58, 0),
             },
             Self::HighContrast => PopupColors {
                 background: color_ref(0, 0, 0),
@@ -1684,6 +1697,9 @@ impl PopupTheme {
                 muted_text: color_ref(255, 255, 255),
                 hover_background: color_ref(0, 128, 128),
                 hover_text: color_ref(255, 255, 255),
+                active_background: color_ref(128, 64, 0),
+                active_hover_background: color_ref(176, 88, 0),
+                active_text: color_ref(255, 255, 0),
             },
             Self::HighContrastLight => PopupColors {
                 background: color_ref(255, 255, 255),
@@ -1692,6 +1708,9 @@ impl PopupTheme {
                 muted_text: color_ref(0, 0, 0),
                 hover_background: color_ref(0, 0, 128),
                 hover_text: color_ref(255, 255, 255),
+                active_background: color_ref(255, 225, 128),
+                active_hover_background: color_ref(255, 192, 0),
+                active_text: color_ref(0, 0, 0),
             },
         }
     }
@@ -1706,6 +1725,21 @@ impl PopupTheme {
 
 fn normalize_menu_label(value: &str) -> String {
     value.replace(['\r', '\n', '\t'], " ")
+}
+
+fn notification_initial_index(requested: Option<usize>, item_count: usize) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    Some(requested.filter(|index| *index < item_count).unwrap_or(0))
+}
+
+fn notification_active_items(indices: &[usize], item_count: usize) -> Vec<bool> {
+    let mut active = vec![false; item_count];
+    for index in indices.iter().copied().filter(|index| *index < item_count) {
+        active[index] = true;
+    }
+    active
 }
 
 fn scale_dip(value: i32, dpi: u32) -> i32 {
@@ -1943,12 +1977,13 @@ unsafe fn draw_notification_session(draw: &DrawItemStruct, state: &NotificationP
         let focused = draw.item_state & ODS_FOCUS != 0;
         let hovered = state.hovered_index == Some(index);
         let highlighted = pressed || hovered || (state.hovered_index.is_none() && focused);
+        let active = state.active_items.get(index).copied().unwrap_or(false);
         fill_rectangle(
             draw.device_context,
             &draw.item_rect,
             state.colors.background,
         );
-        if highlighted {
+        if highlighted || active {
             let mut pill = draw.item_rect;
             let vertical_inset = scale_dip(2, state.dpi);
             pill.top += vertical_inset;
@@ -1956,13 +1991,23 @@ unsafe fn draw_notification_session(draw: &DrawItemStruct, state: &NotificationP
             fill_rounded_rectangle(
                 draw.device_context,
                 &pill,
-                state.colors.hover_background,
+                if active {
+                    if highlighted {
+                        state.colors.active_hover_background
+                    } else {
+                        state.colors.active_background
+                    }
+                } else {
+                    state.colors.hover_background
+                },
                 scale_dip(14, state.dpi),
             );
         }
 
         SetBkMode(draw.device_context, TRANSPARENT);
-        let text_color = if highlighted {
+        let text_color = if active {
+            state.colors.active_text
+        } else if highlighted {
             state.colors.hover_text
         } else {
             state.colors.text
@@ -2384,6 +2429,23 @@ mod tests {
             normalize_menu_label("Research & Development\nSession"),
             "Research & Development Session"
         );
+    }
+
+    #[test]
+    fn notification_popup_focuses_the_requested_valid_session() {
+        assert_eq!(notification_initial_index(Some(3), 5), Some(3));
+        assert_eq!(notification_initial_index(Some(8), 5), Some(0));
+        assert_eq!(notification_initial_index(None, 5), Some(0));
+        assert_eq!(notification_initial_index(Some(0), 0), None);
+    }
+
+    #[test]
+    fn notification_popup_marks_all_valid_active_sessions() {
+        assert_eq!(
+            notification_active_items(&[0, 2, 2, 8], 4),
+            vec![true, false, true, false]
+        );
+        assert!(notification_active_items(&[0], 0).is_empty());
     }
 
     #[test]

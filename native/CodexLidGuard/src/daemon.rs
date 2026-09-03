@@ -105,6 +105,7 @@ impl DaemonState {
             message: message.into(),
             active_turns: self.active_turns.len(),
             active_items: active_items.into_iter().map(|(_, info)| info).collect(),
+            recent_items: Vec::new(),
             is_guarding: self.power_policy.is_guarding(),
             lid_state: self.lid_state.as_str().to_string(),
             sleep_pending: self

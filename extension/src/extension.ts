@@ -22,8 +22,8 @@ import {
   readHelperStatus,
   runHelper,
   showHelperMenu,
-  type GuardActiveItem,
   type GuardMenuTheme,
+  type GuardRecentItem,
   warmGuardianPipe,
   writeHelperSettings
 } from "./helper";
@@ -36,7 +36,10 @@ import {
 import {
   awakeSessionDisplay,
   awakeSessionMenuLabel,
-  codexSessionRoute
+  codexSessionRoute,
+  focusedSessionMenuIndex,
+  sessionMenuEntries,
+  type SessionMenuEntry
 } from "./sessionNavigation";
 import {
   codexSessionTitle,
@@ -44,6 +47,7 @@ import {
 } from "./sessionIndex";
 import {
   codexLogPathForExtensionLog,
+  readFocusedCodexSession,
   type CodexTurnStartWatcher,
   watchCodexTurnStarts
 } from "./codexTurnWatcher";
@@ -365,10 +369,15 @@ async function showStatus(context: vscode.ExtensionContext, statusBar: vscode.St
   }
 
   try {
-    const status = await refreshStatus(context, statusBar);
+    const focusedSessionPromise = readFocusedCodexSession(
+      codexLogPathForExtensionLog(context.logUri.fsPath)
+    );
+    const status = await refreshStatus(context, statusBar, true);
+    const focusedSessionId = await focusedSessionPromise;
+    const recentSessions = status.recentItems ?? [];
     const lid = status.lidState === "unknown" ? "lid state not reported yet" : `lid ${status.lidState}`;
-    if (status.activeTurns > 0) {
-      await showAwakeSessions(context, status);
+    if (status.activeTurns > 0 || recentSessions.length > 0) {
+      await showSessions(context, status, recentSessions, focusedSessionId);
       return;
     }
     const activity = status.sleepPending ? "sleep pending" : "idle";
@@ -379,75 +388,88 @@ async function showStatus(context: vscode.ExtensionContext, statusBar: vscode.St
   }
 }
 
-type AwakeSessionQuickPickItem = vscode.QuickPickItem & {
-  activeItem: GuardActiveItem;
+type SessionQuickPickItem = vscode.QuickPickItem & {
+  menuEntry: SessionMenuEntry;
 };
 
-async function showAwakeSessions(
+async function showSessions(
   context: vscode.ExtensionContext,
-  status: GuardStatus
+  status: GuardStatus,
+  recentSessions: readonly GuardRecentItem[],
+  focusedSessionId: string | undefined
 ): Promise<void> {
   const activeItems = status.activeItems ?? [];
-  if (activeItems.length === 0) {
+  const menuEntries = sessionMenuEntries(activeItems, recentSessions, 5);
+  if (menuEntries.length === 0) {
     await openCodexSidebar();
     return;
   }
 
   const sessionTitles = await readCodexSessionTitles(
     codexSessionIndexPath(),
-    activeItems.map((item) => item.sessionId)
+    menuEntries.map((entry) => entry.activeItem.sessionId)
   ).catch(() => new Map<string, string>());
+  const titleFor = (entry: SessionMenuEntry): string | undefined => entry.title
+    ?? codexSessionTitle(sessionTitles, entry.activeItem.sessionId);
+  const initialIndex = focusedSessionMenuIndex(menuEntries, focusedSessionId);
+  const activeIndices = menuEntries.flatMap((entry, index) => entry.awake ? [index] : []);
 
   try {
     const selectedIndex = await showHelperMenu(
       helperPath(context),
-      `Codex awake · ${status.activeTurns}`,
-      activeItems.map((item) => awakeSessionMenuLabel(
-        item,
-        codexSessionTitle(sessionTitles, item.sessionId)
+      `Codex sessions · ${status.activeTurns} awake`,
+      menuEntries.map((entry) => awakeSessionMenuLabel(
+        entry.activeItem,
+        titleFor(entry)
       )),
-      activeMenuTheme()
+      activeMenuTheme(),
+      initialIndex,
+      activeIndices
     );
     if (selectedIndex !== undefined) {
-      await openAwakeSession(context, activeItems[selectedIndex]);
+      await openSession(context, menuEntries[selectedIndex]);
     }
     return;
   } catch {
     // Fall back to VS Code's Quick Pick if the native popup is unavailable.
   }
 
-  const quickPickItems: AwakeSessionQuickPickItem[] = activeItems.map((activeItem) => ({
+  const quickPickItems: SessionQuickPickItem[] = menuEntries.map((menuEntry) => ({
     ...awakeSessionDisplay(
-      activeItem,
-      codexSessionTitle(sessionTitles, activeItem.sessionId)
+      menuEntry.activeItem,
+      titleFor(menuEntry)
     ),
-    activeItem
+    picked: focusedSessionMenuIndex([menuEntry], focusedSessionId) === 0,
+    menuEntry
   }));
   const selected = await vscode.window.showQuickPick(quickPickItems, {
-    title: `Codex awake · ${status.activeTurns}`,
-    placeHolder: "Select an awake Codex session to open",
+    title: `Codex sessions · ${status.activeTurns} awake`,
+    placeHolder: "Select a recent Codex session to open",
     matchOnDescription: true,
     matchOnDetail: true
   });
   if (selected) {
-    await openAwakeSession(context, selected.activeItem);
+    await openSession(context, selected.menuEntry);
   }
 }
 
-async function openAwakeSession(
+async function openSession(
   context: vscode.ExtensionContext,
-  activeItem: GuardActiveItem
+  menuEntry: SessionMenuEntry
 ): Promise<void> {
-  try {
-    await focusHelperSession(
-      helperPath(context),
-      activeItem.sessionId,
-      activeItem.turnId
-    );
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  } catch {
-    // The session route can still open in the current window when the original
-    // editor window has closed or Windows declines the focus request.
+  const activeItem = menuEntry.activeItem;
+  if (menuEntry.awake) {
+    try {
+      await focusHelperSession(
+        helperPath(context),
+        activeItem.sessionId,
+        activeItem.turnId
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch {
+      // The session route can still open in the current window when the original
+      // editor window has closed or Windows declines the focus request.
+    }
   }
 
   const route = codexSessionRoute(activeItem.sessionId);
@@ -478,9 +500,13 @@ async function openCodexSidebar(): Promise<void> {
 
 async function refreshStatus(
   context: vscode.ExtensionContext,
-  statusBar: vscode.StatusBarItem
+  statusBar: vscode.StatusBarItem,
+  includeRecent = false
 ): Promise<GuardStatus> {
-  const status = await runHelper(helperPath(context), "status");
+  const status = await runHelper(
+    helperPath(context),
+    includeRecent ? "status-with-recent" : "status"
+  );
   updateStatusBar(statusBar, status);
   return status;
 }
