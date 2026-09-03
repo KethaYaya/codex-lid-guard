@@ -7,6 +7,7 @@ import {
   codexLogPathForExtensionLog,
   parseFocusedCodexSession,
   parseCodexTurnStart,
+  parseViewedCodexSession,
   watchCodexTurnStarts
 } from "../src/codexTurnWatcher";
 
@@ -48,6 +49,50 @@ test("reports no focused session when the latest Codex view is inactive", () => 
     `thread_stream_view_activity_changed active=true conversationId=${sessionId}`,
     `thread_stream_view_activity_changed active=false conversationId=${sessionId}`
   ].join("\n")), undefined);
+});
+
+test("recognizes only active Codex view events as viewed sessions", () => {
+  const sessionId = "01a05ca7-d20c-7aa2-9fcb-e8bb2a0a78b8";
+  assert.equal(
+    parseViewedCodexSession(
+      `thread_stream_view_activity_changed active=true conversationId=${sessionId}`
+    ),
+    sessionId
+  );
+  assert.equal(
+    parseViewedCodexSession(
+      `thread_stream_view_activity_changed active=false conversationId=${sessionId}`
+    ),
+    undefined
+  );
+  assert.equal(
+    parseViewedCodexSession(`request active=true conversationId=${sessionId}`),
+    undefined
+  );
+});
+
+test("watches newly viewed Codex sessions", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-view-watcher-"));
+  const logPath = path.join(directory, "Codex.log");
+  const sessionId = "01a05cac-0f8c-7190-9962-fafaefda24ec";
+  await fs.writeFile(logPath, "", "utf8");
+
+  let watcher: Awaited<ReturnType<typeof watchCodexTurnStarts>> = undefined;
+  try {
+    const observed: string[] = [];
+    watcher = await watchCodexTurnStarts(logPath, () => undefined, (value) => observed.push(value));
+    assert.ok(watcher);
+    await fs.appendFile(
+      logPath,
+      `thread_stream_view_activity_changed active=true conversationId=${sessionId}\n`,
+      "utf8"
+    );
+    await waitFor(() => observed.length === 1);
+    assert.deepEqual(observed, [sessionId]);
+  } finally {
+    watcher?.dispose();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("watches only newly appended Codex turn-start events", async () => {

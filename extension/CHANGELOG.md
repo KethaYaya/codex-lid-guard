@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.35
+
+- Highlighted completed sessions that have not been viewed since finishing with a distinct theme-aware blue accent in the session menu.
+- Cleared the completion accent as soon as the chat is viewed, while preserving attention state across VS Code restarts without reading prompt or response content.
+
 ## 0.1.34
 
 - Gave every currently running session a persistent theme-aware accent in the session menu.

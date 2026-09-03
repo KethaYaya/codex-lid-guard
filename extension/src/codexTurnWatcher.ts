@@ -18,6 +18,15 @@ export function parseCodexTurnStart(line: string): string | undefined {
   return turnStartPattern.exec(line)?.[1]?.toLowerCase();
 }
 
+export function parseViewedCodexSession(line: string): string | undefined {
+  if (!line.includes("thread_stream_view_activity_changed")
+      || !/\bactive=true(?:\s|$)/iu.test(line)) {
+    return undefined;
+  }
+  return /\bconversationId=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\s|$)/iu
+    .exec(line)?.[1]?.toLowerCase();
+}
+
 export function parseFocusedCodexSession(contents: string): string | undefined {
   const lines = contents.split(/\r?\n/u);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -55,7 +64,8 @@ export async function readFocusedCodexSession(logPath: string): Promise<string |
 
 export async function watchCodexTurnStarts(
   logPath: string,
-  onTurnStart: (sessionId: string) => void
+  onTurnStart: (sessionId: string) => void,
+  onSessionViewed: (sessionId: string) => void = () => undefined
 ): Promise<CodexTurnStartWatcher | undefined> {
   const directory = path.dirname(logPath);
   try {
@@ -74,13 +84,19 @@ export async function watchCodexTurnStarts(
   let watchers: FSWatcher[] = [];
   let watcherRestartTimer: NodeJS.Timeout | undefined;
 
-  const emitTurnStart = (line: string): boolean => {
+  const emitLogEvents = (line: string): boolean => {
+    let emitted = false;
     const sessionId = parseCodexTurnStart(line);
-    if (!sessionId) {
-      return false;
+    if (sessionId) {
+      onTurnStart(sessionId);
+      emitted = true;
     }
-    onTurnStart(sessionId);
-    return true;
+    const viewedSessionId = parseViewedCodexSession(line);
+    if (viewedSessionId) {
+      onSessionViewed(viewedSessionId);
+      emitted = true;
+    }
+    return emitted;
   };
 
   const readAppended = async (): Promise<void> => {
@@ -117,11 +133,11 @@ export async function watchCodexTurnStarts(
             if (index === 0 && remainderWasEmitted) {
               continue;
             }
-            emitTurnStart(lines[index]);
+            emitLogEvents(lines[index]);
           }
           const nextRemainderWasEmitted = lines.length === 0 && remainderWasEmitted
             ? true
-            : emitTurnStart(nextRemainder);
+            : emitLogEvents(nextRemainder);
           remainder = nextRemainder;
           remainderWasEmitted = nextRemainderWasEmitted;
         } catch {

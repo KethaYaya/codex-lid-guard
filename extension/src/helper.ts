@@ -168,7 +168,8 @@ export async function showHelperMenu(
   items: string[],
   theme: GuardMenuTheme,
   initialIndex?: number,
-  activeIndices: readonly number[] = []
+  activeIndices: readonly number[] = [],
+  unviewedCompletedIndices: readonly number[] = []
 ): Promise<number | undefined> {
   const args = ["menu", `--theme=${theme}`];
   if (initialIndex !== undefined && Number.isInteger(initialIndex)
@@ -180,6 +181,12 @@ export async function showHelperMenu(
   );
   if (validActiveIndices.length > 0) {
     args.push(`--active=${validActiveIndices.join(",")}`);
+  }
+  const validUnviewedCompletedIndices = unviewedCompletedIndices.filter(
+    (index) => Number.isInteger(index) && index >= 0 && index < items.length
+  );
+  if (validUnviewedCompletedIndices.length > 0) {
+    args.push(`--unviewed=${validUnviewedCompletedIndices.join(",")}`);
   }
   args.push(title, ...items);
   const { stdout } = await execFileAsync(helperPath, args, {

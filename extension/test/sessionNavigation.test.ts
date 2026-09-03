@@ -5,7 +5,10 @@ import {
   awakeSessionMenuLabel,
   codexSessionRoute,
   focusedSessionMenuIndex,
-  sessionMenuEntries
+  normalizedSessionAttentionState,
+  sessionMenuEntries,
+  unviewedCompletedMenuIndices,
+  updatedSessionAttention
 } from "../src/sessionNavigation";
 
 test("builds an awake-session item from its Windows workspace", () => {
@@ -98,5 +101,69 @@ test("selects the focused session's menu row case-insensitively", () => {
   assert.equal(
     focusedSessionMenuIndex(entries, "cccccccc-cccc-cccc-cccc-cccccccccccc"),
     undefined
+  );
+});
+
+test("marks a completed session unviewed until its chat is viewed", () => {
+  const sessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const running = updatedSessionAttention(
+    normalizedSessionAttentionState(undefined),
+    [sessionId]
+  );
+  assert.deepEqual(running, {
+    activeSessionIds: [sessionId],
+    unviewedCompletedSessionIds: []
+  });
+  assert.deepEqual(updatedSessionAttention(running, [], [sessionId]), {
+    activeSessionIds: [],
+    unviewedCompletedSessionIds: []
+  });
+
+  const completed = updatedSessionAttention(running, []);
+  assert.deepEqual(completed, {
+    activeSessionIds: [],
+    unviewedCompletedSessionIds: [sessionId]
+  });
+
+  assert.deepEqual(updatedSessionAttention(completed, undefined, [sessionId]), {
+    activeSessionIds: [],
+    unviewedCompletedSessionIds: []
+  });
+});
+
+test("a new turn replaces an old completion highlight and can become unviewed again", () => {
+  const sessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const oldCompletion = normalizedSessionAttentionState({
+    activeSessionIds: [],
+    unviewedCompletedSessionIds: [sessionId.toUpperCase(), sessionId]
+  });
+  const runningAgain = updatedSessionAttention(oldCompletion, [sessionId]);
+  assert.deepEqual(runningAgain, {
+    activeSessionIds: [sessionId],
+    unviewedCompletedSessionIds: []
+  });
+  assert.deepEqual(updatedSessionAttention(runningAgain, []), {
+    activeSessionIds: [],
+    unviewedCompletedSessionIds: [sessionId]
+  });
+});
+
+test("colors only completed unviewed menu entries", () => {
+  const activeId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const completedId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const viewedId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const entries = sessionMenuEntries(
+    [{ sessionId: activeId, turnId: "turn" }],
+    [
+      { sessionId: activeId },
+      { sessionId: completedId },
+      { sessionId: viewedId }
+    ],
+    3
+  );
+
+  assert.deepEqual(
+    unviewedCompletedMenuIndices(entries, [activeId, completedId]),
+    [1]
   );
 });

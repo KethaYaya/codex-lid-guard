@@ -296,6 +296,9 @@ struct PopupColors {
     active_background: u32,
     active_hover_background: u32,
     active_text: u32,
+    unviewed_background: u32,
+    unviewed_hover_background: u32,
+    unviewed_text: u32,
 }
 
 struct NotificationPopupState {
@@ -305,6 +308,7 @@ struct NotificationPopupState {
     selected_index: Option<usize>,
     hovered_index: Option<usize>,
     active_items: Vec<bool>,
+    unviewed_items: Vec<bool>,
     colors: PopupColors,
     font: Handle,
     dpi: u32,
@@ -1386,6 +1390,7 @@ pub fn show_notification_popup(
     items: &[String],
     initial_index: Option<usize>,
     active_indices: &[usize],
+    unviewed_indices: &[usize],
 ) -> io::Result<Option<usize>> {
     if items.is_empty() {
         return Ok(None);
@@ -1465,6 +1470,7 @@ pub fn show_notification_popup(
             selected_index: None,
             hovered_index: None,
             active_items: notification_active_items(active_indices, items.len()),
+            unviewed_items: notification_active_items(unviewed_indices, items.len()),
             colors: popup_theme.colors(),
             font: GetStockObject(DEFAULT_GUI_FONT),
             dpi,
@@ -1678,6 +1684,9 @@ impl PopupTheme {
                 active_background: color_ref(75, 59, 16),
                 active_hover_background: color_ref(101, 77, 13),
                 active_text: color_ref(255, 220, 110),
+                unviewed_background: color_ref(18, 72, 107),
+                unviewed_hover_background: color_ref(24, 96, 142),
+                unviewed_text: color_ref(230, 246, 255),
             },
             Self::Light => PopupColors {
                 background: color_ref(248, 248, 248),
@@ -1689,6 +1698,9 @@ impl PopupTheme {
                 active_background: color_ref(255, 235, 166),
                 active_hover_background: color_ref(255, 220, 112),
                 active_text: color_ref(86, 58, 0),
+                unviewed_background: color_ref(0, 120, 212),
+                unviewed_hover_background: color_ref(0, 90, 158),
+                unviewed_text: color_ref(255, 255, 255),
             },
             Self::HighContrast => PopupColors {
                 background: color_ref(0, 0, 0),
@@ -1700,6 +1712,9 @@ impl PopupTheme {
                 active_background: color_ref(128, 64, 0),
                 active_hover_background: color_ref(176, 88, 0),
                 active_text: color_ref(255, 255, 0),
+                unviewed_background: color_ref(0, 64, 128),
+                unviewed_hover_background: color_ref(0, 96, 176),
+                unviewed_text: color_ref(255, 255, 255),
             },
             Self::HighContrastLight => PopupColors {
                 background: color_ref(255, 255, 255),
@@ -1711,6 +1726,9 @@ impl PopupTheme {
                 active_background: color_ref(255, 225, 128),
                 active_hover_background: color_ref(255, 192, 0),
                 active_text: color_ref(0, 0, 0),
+                unviewed_background: color_ref(0, 0, 128),
+                unviewed_hover_background: color_ref(0, 0, 200),
+                unviewed_text: color_ref(255, 255, 255),
             },
         }
     }
@@ -1978,12 +1996,13 @@ unsafe fn draw_notification_session(draw: &DrawItemStruct, state: &NotificationP
         let hovered = state.hovered_index == Some(index);
         let highlighted = pressed || hovered || (state.hovered_index.is_none() && focused);
         let active = state.active_items.get(index).copied().unwrap_or(false);
+        let unviewed = !active && state.unviewed_items.get(index).copied().unwrap_or(false);
         fill_rectangle(
             draw.device_context,
             &draw.item_rect,
             state.colors.background,
         );
-        if highlighted || active {
+        if highlighted || active || unviewed {
             let mut pill = draw.item_rect;
             let vertical_inset = scale_dip(2, state.dpi);
             pill.top += vertical_inset;
@@ -1997,6 +2016,12 @@ unsafe fn draw_notification_session(draw: &DrawItemStruct, state: &NotificationP
                     } else {
                         state.colors.active_background
                     }
+                } else if unviewed {
+                    if highlighted {
+                        state.colors.unviewed_hover_background
+                    } else {
+                        state.colors.unviewed_background
+                    }
                 } else {
                     state.colors.hover_background
                 },
@@ -2007,6 +2032,8 @@ unsafe fn draw_notification_session(draw: &DrawItemStruct, state: &NotificationP
         SetBkMode(draw.device_context, TRANSPARENT);
         let text_color = if active {
             state.colors.active_text
+        } else if unviewed {
+            state.colors.unviewed_text
         } else if highlighted {
             state.colors.hover_text
         } else {
@@ -2487,6 +2514,21 @@ mod tests {
         assert_eq!(PopupTheme::Light.opacity(), 235);
         assert_eq!(PopupTheme::HighContrast.opacity(), 255);
         assert_eq!(PopupTheme::HighContrastLight.opacity(), 255);
+    }
+
+    #[test]
+    fn unviewed_completion_colors_are_distinct_in_every_theme() {
+        for theme in [
+            PopupTheme::Dark,
+            PopupTheme::Light,
+            PopupTheme::HighContrast,
+            PopupTheme::HighContrastLight,
+        ] {
+            let colors = theme.colors();
+            assert_ne!(colors.unviewed_background, colors.background);
+            assert_ne!(colors.unviewed_background, colors.active_background);
+            assert_ne!(colors.unviewed_hover_background, colors.unviewed_background);
+        }
     }
 
     #[test]

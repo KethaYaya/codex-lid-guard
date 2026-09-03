@@ -2,6 +2,7 @@ import * as path from "node:path";
 import type { GuardActiveItem, GuardRecentItem } from "./helper";
 
 const codexSessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_UNVIEWED_COMPLETED_SESSIONS = 100;
 
 export type AwakeSessionDisplay = {
   label: string;
@@ -14,6 +15,66 @@ export type SessionMenuEntry = {
   title?: string;
   awake: boolean;
 };
+
+export type SessionAttentionState = {
+  activeSessionIds: string[];
+  unviewedCompletedSessionIds: string[];
+};
+
+export function normalizedSessionAttentionState(value: unknown): SessionAttentionState {
+  const candidate = value && typeof value === "object"
+    ? value as Partial<SessionAttentionState>
+    : {};
+  return {
+    activeSessionIds: normalizedSessionIds(candidate.activeSessionIds),
+    unviewedCompletedSessionIds: normalizedSessionIds(candidate.unviewedCompletedSessionIds)
+      .slice(-MAX_UNVIEWED_COMPLETED_SESSIONS)
+  };
+}
+
+export function updatedSessionAttention(
+  previous: SessionAttentionState,
+  activeSessionIds: readonly string[] | undefined,
+  viewedSessionIds: readonly string[] = []
+): SessionAttentionState {
+  const previousActive = normalizedSessionIds(previous.activeSessionIds);
+  const active = activeSessionIds === undefined
+    ? previousActive
+    : normalizedSessionIds(activeSessionIds);
+  const activeSet = new Set(active);
+  const viewedSet = new Set(normalizedSessionIds(viewedSessionIds));
+  const unviewed = new Set(normalizedSessionIds(previous.unviewedCompletedSessionIds));
+
+  for (const sessionId of activeSet) {
+    unviewed.delete(sessionId);
+  }
+  for (const sessionId of viewedSet) {
+    unviewed.delete(sessionId);
+  }
+  if (activeSessionIds !== undefined) {
+    for (const sessionId of previousActive) {
+      if (!activeSet.has(sessionId) && !viewedSet.has(sessionId)) {
+        unviewed.add(sessionId);
+      }
+    }
+  }
+
+  return {
+    activeSessionIds: active,
+    unviewedCompletedSessionIds: [...unviewed].slice(-MAX_UNVIEWED_COMPLETED_SESSIONS)
+  };
+}
+
+export function unviewedCompletedMenuIndices(
+  entries: readonly SessionMenuEntry[],
+  sessionIds: readonly string[]
+): number[] {
+  const unviewed = new Set(normalizedSessionIds(sessionIds));
+  return entries.flatMap((entry, index) => {
+    const sessionId = normalizedSessionId(entry.activeItem.sessionId);
+    return !entry.awake && unviewed.has(sessionId) ? [index] : [];
+  });
+}
 
 export function sessionMenuEntries(
   activeItems: readonly GuardActiveItem[],
@@ -121,4 +182,21 @@ function sessionLocation(item: GuardActiveItem): { cwd: string | undefined; work
 
 function normalizedSessionId(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function normalizedSessionIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized = new Set<string>();
+  for (const candidate of value) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const sessionId = normalizedSessionId(candidate);
+    if (sessionId) {
+      normalized.add(sessionId);
+    }
+  }
+  return [...normalized];
 }

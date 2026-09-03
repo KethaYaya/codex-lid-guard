@@ -50,6 +50,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut theme = "dark";
             let mut initial_index = None;
             let mut active_indices = Vec::new();
+            let mut unviewed_indices = Vec::new();
             let mut title_index = 1;
             while let Some(argument) = arguments.get(title_index) {
                 if let Some(value) = argument.strip_prefix("--theme=") {
@@ -58,6 +59,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     initial_index = value.parse::<usize>().ok();
                 } else if let Some(value) = argument.strip_prefix("--active=") {
                     active_indices = value
+                        .split(',')
+                        .filter_map(|index| index.parse::<usize>().ok())
+                        .collect();
+                } else if let Some(value) = argument.strip_prefix("--unviewed=") {
+                    unviewed_indices = value
                         .split(',')
                         .filter_map(|index| index.parse::<usize>().ok())
                         .collect();
@@ -71,8 +77,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map(String::as_str)
                 .unwrap_or("Codex awake");
             let items = arguments.get(title_index + 1..).unwrap_or_default();
-            let selected =
-                win::show_notification_popup(theme, title, items, initial_index, &active_indices)?;
+            let selected = win::show_notification_popup(
+                theme,
+                title,
+                items,
+                initial_index,
+                &active_indices,
+                &unviewed_indices,
+            )?;
             println!("{}", serde_json::json!({ "selectedIndex": selected }));
         }
         "recent-sessions" => {
@@ -213,7 +225,7 @@ fn run_sound(value: &str, write_response: bool) -> Result<(), Box<dyn std::error
 
 fn usage() {
     eprintln!(
-        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | associate-window <session-id> | recent-sessions [limit] | sound done | sound request | status | status-with-recent | restore | focus <session-id> <turn-id> | menu [--theme=<theme>] [--selected=<index>] [--active=<indices>] <title> <items...>]"
+        "Usage: CodexLidGuard [daemon | hook acquire | hook release | hook release-session | pre-acquire <session-id> <pending-turn-id> [cwd] | associate-window <session-id> | recent-sessions [limit] | sound done | sound request | status | status-with-recent | restore | focus <session-id> <turn-id> | menu [--theme=<theme>] [--selected=<index>] [--active=<indices>] [--unviewed=<indices>] <title> <items...>]"
     );
     std::process::exit(2);
 }

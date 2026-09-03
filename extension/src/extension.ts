@@ -38,7 +38,11 @@ import {
   awakeSessionMenuLabel,
   codexSessionRoute,
   focusedSessionMenuIndex,
+  normalizedSessionAttentionState,
   sessionMenuEntries,
+  unviewedCompletedMenuIndices,
+  updatedSessionAttention,
+  type SessionAttentionState,
   type SessionMenuEntry
 } from "./sessionNavigation";
 import {
@@ -60,8 +64,11 @@ let codexTurnStartWatcher: CodexTurnStartWatcher | undefined;
 let guardianPipeName: string | undefined;
 let updatingEnabledSetting = false;
 let setupPromptOpen = false;
+let sessionAttentionState = normalizedSessionAttentionState(undefined);
+let sessionAttentionPersistence = Promise.resolve();
 const setupVersionStateKey = "hookSetupVersion";
 const setupTrustBaselineStateKey = "hookTrustBaseline";
+const sessionAttentionStateKey = "sessionAttentionState";
 const hookSetupRevision = "herdr-alert-sounds-5";
 const optionalHooksSetting = "optionalHooks";
 
@@ -103,6 +110,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
 
+  sessionAttentionState = normalizedSessionAttentionState(
+    context.globalState.get<SessionAttentionState>(sessionAttentionStateKey)
+  );
+  sessionAttentionPersistence = Promise.resolve();
   await syncSettings();
   startStatusWatcher(context, statusBar);
   context.subscriptions.push({
@@ -315,6 +326,7 @@ async function disable(
     if (JSON.stringify(removed) !== JSON.stringify(document)) {
       await writeHooksDocument(hooksPath, removed);
     }
+    discardTrackedActiveSessions(context);
     await runHelper(helperPath(context), "restore");
     if (notify) {
       await setEnabledSetting(false);
@@ -331,6 +343,7 @@ async function disable(
 
 async function restorePowerSettings(context: vscode.ExtensionContext, statusBar: vscode.StatusBarItem): Promise<void> {
   try {
+    discardTrackedActiveSessions(context);
     const status = await runHelper(helperPath(context), "restore");
     updateStatusBar(statusBar, status);
     void vscode.window.showInformationMessage(status.message);
@@ -374,6 +387,9 @@ async function showStatus(context: vscode.ExtensionContext, statusBar: vscode.St
     );
     const status = await refreshStatus(context, statusBar, true);
     const focusedSessionId = await focusedSessionPromise;
+    if (focusedSessionId) {
+      recordViewedSession(context, focusedSessionId);
+    }
     const recentSessions = status.recentItems ?? [];
     const lid = status.lidState === "unknown" ? "lid state not reported yet" : `lid ${status.lidState}`;
     if (status.activeTurns > 0 || recentSessions.length > 0) {
@@ -413,6 +429,10 @@ async function showSessions(
     ?? codexSessionTitle(sessionTitles, entry.activeItem.sessionId);
   const initialIndex = focusedSessionMenuIndex(menuEntries, focusedSessionId);
   const activeIndices = menuEntries.flatMap((entry, index) => entry.awake ? [index] : []);
+  const unviewedIndices = unviewedCompletedMenuIndices(
+    menuEntries,
+    sessionAttentionState.unviewedCompletedSessionIds
+  );
 
   try {
     const selectedIndex = await showHelperMenu(
@@ -424,7 +444,8 @@ async function showSessions(
       )),
       activeMenuTheme(),
       initialIndex,
-      activeIndices
+      activeIndices,
+      unviewedIndices
     );
     if (selectedIndex !== undefined) {
       await openSession(context, menuEntries[selectedIndex]);
@@ -434,14 +455,23 @@ async function showSessions(
     // Fall back to VS Code's Quick Pick if the native popup is unavailable.
   }
 
-  const quickPickItems: SessionQuickPickItem[] = menuEntries.map((menuEntry) => ({
-    ...awakeSessionDisplay(
+  const unviewedIndexSet = new Set(unviewedIndices);
+  const quickPickItems: SessionQuickPickItem[] = menuEntries.map((menuEntry, index) => {
+    const display = awakeSessionDisplay(
       menuEntry.activeItem,
       titleFor(menuEntry)
-    ),
-    picked: focusedSessionMenuIndex([menuEntry], focusedSessionId) === 0,
-    menuEntry
-  }));
+    );
+    const unviewed = unviewedIndexSet.has(index);
+    return {
+      ...display,
+      description: unviewed ? `${display.description} · completed` : display.description,
+      iconPath: unviewed
+        ? new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("notificationsInfoIcon.foreground"))
+        : undefined,
+      picked: focusedSessionMenuIndex([menuEntry], focusedSessionId) === 0,
+      menuEntry
+    };
+  });
   const selected = await vscode.window.showQuickPick(quickPickItems, {
     title: `Codex sessions · ${status.activeTurns} awake`,
     placeHolder: "Select a recent Codex session to open",
@@ -481,6 +511,7 @@ async function openSession(
         path: route
       }));
       if (opened) {
+        recordViewedSession(context, activeItem.sessionId);
         return;
       }
     } catch {
@@ -498,6 +529,67 @@ async function openCodexSidebar(): Promise<void> {
   }
 }
 
+function handleGuardianStatus(
+  context: vscode.ExtensionContext,
+  statusBar: vscode.StatusBarItem,
+  status: GuardStatus
+): void {
+  if (status.ok) {
+    const previousUnviewed = new Set(sessionAttentionState.unviewedCompletedSessionIds);
+    const activeSessionIds = status.activeItems
+      ? status.activeItems.map((item) => item.sessionId)
+      : status.activeTurns === 0 ? [] : undefined;
+    updateSessionAttention(context, activeSessionIds);
+    const newlyCompleted = sessionAttentionState.unviewedCompletedSessionIds.filter(
+      (sessionId) => !previousUnviewed.has(sessionId)
+    );
+    if (newlyCompleted.length > 0) {
+      const codexLogPath = codexLogPathForExtensionLog(context.logUri.fsPath);
+      void readFocusedCodexSession(codexLogPath).then((sessionId) => {
+        if (sessionId && newlyCompleted.includes(sessionId)) {
+          recordViewedSession(context, sessionId);
+        }
+      });
+    }
+  }
+  updateStatusBar(statusBar, status);
+}
+
+function recordViewedSession(context: vscode.ExtensionContext, sessionId: string): void {
+  updateSessionAttention(context, undefined, [sessionId]);
+}
+
+function discardTrackedActiveSessions(context: vscode.ExtensionContext): void {
+  updateSessionAttention(
+    context,
+    [],
+    sessionAttentionState.activeSessionIds
+  );
+}
+
+function updateSessionAttention(
+  context: vscode.ExtensionContext,
+  activeSessionIds: readonly string[] | undefined,
+  viewedSessionIds: readonly string[] = []
+): void {
+  const next = updatedSessionAttention(
+    sessionAttentionState,
+    activeSessionIds,
+    viewedSessionIds
+  );
+  if (JSON.stringify(next) === JSON.stringify(sessionAttentionState)) {
+    return;
+  }
+  sessionAttentionState = next;
+  const snapshot: SessionAttentionState = {
+    activeSessionIds: [...next.activeSessionIds],
+    unviewedCompletedSessionIds: [...next.unviewedCompletedSessionIds]
+  };
+  sessionAttentionPersistence = sessionAttentionPersistence
+    .then(() => Promise.resolve(context.globalState.update(sessionAttentionStateKey, snapshot)))
+    .catch(() => undefined);
+}
+
 async function refreshStatus(
   context: vscode.ExtensionContext,
   statusBar: vscode.StatusBarItem,
@@ -507,7 +599,7 @@ async function refreshStatus(
     helperPath(context),
     includeRecent ? "status-with-recent" : "status"
   );
-  updateStatusBar(statusBar, status);
+  handleGuardianStatus(context, statusBar, status);
   return status;
 }
 
@@ -533,7 +625,7 @@ function startStatusWatcher(context: vscode.ExtensionContext, statusBar: vscode.
                 await refreshStatus(context, statusBar);
                 return;
               }
-              updateStatusBar(statusBar, status);
+              handleGuardianStatus(context, statusBar, status);
             })
             .catch(() => refreshStatus(context, statusBar).catch((error) => setError(statusBar, messageOf(error))));
         }
@@ -600,37 +692,45 @@ async function startCodexTurnStartWatcher(
 ): Promise<void> {
   stopCodexTurnStartWatcher();
   const codexLogPath = codexLogPathForExtensionLog(context.logUri.fsPath);
-  codexTurnStartWatcher = await watchCodexTurnStarts(codexLogPath, (sessionId) => {
-    if (!configuration().get<boolean>("enabled", true)) {
-      return;
-    }
-    const pendingTurnId = `pending-${randomUUID()}`;
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const helper = helperPath(context);
-    const acquire = guardianPipeName
-      ? preAcquireGuardian(
-        guardianPipeName,
-        String(context.extension.packageJSON.version),
-        sessionId,
-        pendingTurnId,
-        cwd
-      ).then((status) => {
-        if (status.ok) {
-          // Direct pipe acquisition avoids process-start latency, but only the
-          // native helper can identify this VS Code window. Bind it immediately
-          // so the session URI is later delivered to the originating window.
-          void associateHelperSession(helper, sessionId).catch(() => undefined);
-        }
-        return status;
-      })
-      : preAcquireHelper(helper, sessionId, pendingTurnId, cwd);
-    void acquire
-      .catch(() => preAcquireHelper(helper, sessionId, pendingTurnId, cwd))
-      .then((status) => updateStatusBar(statusBar, status))
-      .catch(() => {
-        // The trusted UserPromptSubmit hook remains the authoritative fallback.
-      });
-  });
+  codexTurnStartWatcher = await watchCodexTurnStarts(
+    codexLogPath,
+    (sessionId) => {
+      if (!configuration().get<boolean>("enabled", true)) {
+        return;
+      }
+      const pendingTurnId = `pending-${randomUUID()}`;
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const helper = helperPath(context);
+      const acquire = guardianPipeName
+        ? preAcquireGuardian(
+          guardianPipeName,
+          String(context.extension.packageJSON.version),
+          sessionId,
+          pendingTurnId,
+          cwd
+        ).then((status) => {
+          if (status.ok) {
+            // Direct pipe acquisition avoids process-start latency, but only the
+            // native helper can identify this VS Code window. Bind it immediately
+            // so the session URI is later delivered to the originating window.
+            void associateHelperSession(helper, sessionId).catch(() => undefined);
+          }
+          return status;
+        })
+        : preAcquireHelper(helper, sessionId, pendingTurnId, cwd);
+      void acquire
+        .catch(() => preAcquireHelper(helper, sessionId, pendingTurnId, cwd))
+        .then((status) => handleGuardianStatus(context, statusBar, status))
+        .catch(() => {
+          // The trusted UserPromptSubmit hook remains the authoritative fallback.
+        });
+    },
+    (sessionId) => recordViewedSession(context, sessionId)
+  );
+  const focusedSessionId = await readFocusedCodexSession(codexLogPath);
+  if (focusedSessionId) {
+    recordViewedSession(context, focusedSessionId);
+  }
 }
 
 function stopCodexTurnStartWatcher(): void {
