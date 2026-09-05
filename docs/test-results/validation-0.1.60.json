@@ -1,0 +1,35 @@
+{
+  "version": "0.1.60",
+  "logReaderTestsPassed": 10,
+  "overlayFeedTestsPassed": 14,
+  "daemonTestsPassed": 21,
+  "nativeFocusVisibilityTestsPassed": 1,
+  "clippy": "all targets passed with warnings denied",
+  "liveLogProbe": {
+    "requestedChats": 2,
+    "resolvedBeforeDiscoveryFix": 0,
+    "resolvedAfterDiscoveryFix": 2,
+    "initialReadMs": 44.2505,
+    "cachedReadMs": 5.0323,
+    "scope": "read-only probe compiled from the actual reader against live Codex logs"
+  },
+  "regressions": [
+    "running editor behind ten newer empty CLI run folders",
+    "cold reader recovers visibility before more than 2 MiB of output",
+    "cross-window notifications cannot claim another chat's view",
+    "appended partial events preserve the last complete state",
+    "oversized lines cannot manufacture view events or grow line buffers without bound",
+    "unchanged logs preserve view revisions",
+    "chat switching, hidden view, truncation and removed logs",
+    "focused matching chat hides; other sessions keep independent tabs"
+  ],
+  "nativeCachedMinimizeResponseMs": 23.6308,
+  "measurementLimit": "Reader results and owned native overlay visibility; live tabs require the updated helper to activate.",
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "690718dd85b668a8df51bd6c01bf304cd038f97114867536b3f8ae45a30f115c",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "confirmed active: live daemon reports 0.1.60",
+  "activationWorkerPid": 33536
+}

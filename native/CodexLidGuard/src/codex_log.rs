@@ -5,8 +5,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+#[cfg(test)]
 const LOG_TAIL_BYTES: u64 = 256 * 1024;
-const RECENT_RUNS_PER_PRODUCT: usize = 6;
+const MAX_VIEW_LOG_LINE_BYTES: usize = 64 * 1024;
 const PRODUCT_DATA_DIRECTORIES: &[&str] =
     &["Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"];
 
@@ -31,10 +32,13 @@ pub struct ViewStateReader {
 struct CachedView {
     size: u64,
     modified: Option<SystemTime>,
+    created: Option<SystemTime>,
     sessions: HashSet<String>,
     state: Option<ViewState>,
     event: Option<String>,
     revision: u64,
+    pending: Vec<u8>,
+    discarding_line: bool,
 }
 
 impl ViewStateReader {
@@ -64,51 +68,30 @@ impl ViewStateReader {
             };
             let size = metadata.len();
             let modified = metadata.modified().ok();
-            let previous = self.logs.get(&path);
-            if previous.is_none_or(|cached| cached.size != size || cached.modified != modified) {
-                let Ok(tail) = read_tail(&path) else {
+            let created = metadata.created().ok();
+            let cached = self
+                .logs
+                .entry(path.clone())
+                .or_insert_with(CachedView::new);
+            if size < cached.size
+                || cached.created != created
+                || (size == cached.size && cached.modified != modified)
+            {
+                *cached = CachedView::new();
+            }
+            if cached.size != size {
+                // Recover the latest view even when it predates the tail (for example
+                // after a helper upgrade). Subsequent checks read only appended bytes.
+                if cached
+                    .read_appended(&path, size, &mut self.next_revision)
+                    .is_err()
+                {
                     self.logs.remove(&path);
                     continue;
-                };
-                let mut observed: HashSet<String> = tail
-                    .lines()
-                    .filter_map(|line| field(line, "conversationId").map(str::to_owned))
-                    .collect();
-                let mut state = parse_latest_view_state(&tail);
-                let mut event = tail
-                    .lines()
-                    .rev()
-                    .find(|line| {
-                        line.contains("thread_stream_view_activity_changed")
-                            && parse_latest_view_state(line).is_some()
-                    })
-                    .map(str::to_owned);
-                if let Some(previous) = previous.filter(|cached| size > cached.size) {
-                    // A long-running chat can push its view event outside the tail.
-                    // Preserve that event while the same log is being appended.
-                    observed.extend(previous.sessions.intersection(sessions).cloned());
-                    state = state.or_else(|| previous.state.clone());
-                    event = event.or_else(|| previous.event.clone());
                 }
-                let revision =
-                    if let Some(previous) = previous.filter(|cached| cached.event == event) {
-                        previous.revision
-                    } else {
-                        self.next_revision += 1;
-                        self.next_revision
-                    };
-                self.logs.insert(
-                    path.clone(),
-                    CachedView {
-                        size,
-                        modified,
-                        sessions: observed,
-                        state,
-                        event,
-                        revision,
-                    },
-                );
             }
+            cached.modified = modified;
+            cached.created = created;
             let cached = &self.logs[&path];
             for session in cached.sessions.intersection(sessions) {
                 if resolved.insert(session.clone())
@@ -135,13 +118,81 @@ pub fn view_state_for_session(session_id: &str) -> Option<ViewState> {
     if session_id.trim().is_empty() {
         return None;
     }
-    let app_data = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    candidate_logs(&app_data).into_iter().find_map(|path| {
-        let tail = read_tail(&path).ok()?;
-        tail.contains(session_id)
-            .then(|| parse_latest_view_state(&tail))
-            .flatten()
-    })
+    ViewStateReader::default()
+        .for_sessions(&HashSet::from([session_id.to_owned()]))
+        .remove(session_id)
+        .map(|view| view.state)
+}
+
+impl CachedView {
+    fn new() -> Self {
+        Self {
+            size: 0,
+            modified: None,
+            created: None,
+            sessions: HashSet::new(),
+            state: None,
+            event: None,
+            revision: 0,
+            pending: Vec::new(),
+            discarding_line: false,
+        }
+    }
+
+    fn read_appended(&mut self, path: &Path, size: u64, revision: &mut u64) -> std::io::Result<()> {
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(self.size))?;
+        let mut buffer = [0u8; 16 * 1024];
+        while self.size < size {
+            let limit = (size - self.size).min(buffer.len() as u64) as usize;
+            let count = file.read(&mut buffer[..limit])?;
+            if count == 0 {
+                break;
+            }
+            self.consume(&buffer[..count], revision);
+            self.size += count as u64;
+        }
+        Ok(())
+    }
+
+    fn consume(&mut self, bytes: &[u8], revision: &mut u64) {
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let complete = part.last() == Some(&b'\n');
+            if !self.discarding_line {
+                if self.pending.len() + part.len() > MAX_VIEW_LOG_LINE_BYTES {
+                    self.pending.clear();
+                    self.discarding_line = true;
+                } else {
+                    self.pending.reserve_exact(part.len());
+                    self.pending.extend_from_slice(part);
+                    if complete {
+                        let line = String::from_utf8_lossy(&self.pending);
+                        let view = parse_latest_view_state(&line);
+                        // Global notifications mention chats belonging to other windows.
+                        // Only a view event or a local turn start establishes ownership.
+                        if (view.is_some()
+                            || line.contains("Reasoning summary turn-start config resolved"))
+                            && let Some(session) = field(&line, "conversationId")
+                        {
+                            self.sessions.insert(session.to_owned());
+                        }
+                        if let Some(view) = view {
+                            if self.event.as_deref() != Some(line.as_ref()) {
+                                *revision += 1;
+                                self.revision = *revision;
+                                self.event = Some(line.into_owned());
+                            }
+                            self.state = Some(view);
+                        }
+                        self.pending.clear();
+                    }
+                }
+            }
+            if complete {
+                self.discarding_line = false;
+            }
+        }
+    }
 }
 
 fn candidate_logs(app_data: &Path) -> Vec<PathBuf> {
@@ -151,13 +202,15 @@ fn candidate_logs(app_data: &Path) -> Vec<PathBuf> {
         let Ok(entries) = fs::read_dir(logs_root) else {
             continue;
         };
-        let mut runs = entries
+        let runs = entries
             .flatten()
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
-        runs.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
-        for run in runs.into_iter().take(RECENT_RUNS_PER_PRODUCT) {
+        // CLI invocations create newer run folders without editor windows. A
+        // still-open editor can belong to a much older run, so rank actual logs
+        // by their modification time instead of discarding older run folders.
+        for run in runs {
             let Ok(windows) = fs::read_dir(run) else {
                 continue;
             };
@@ -178,16 +231,6 @@ fn candidate_logs(app_data: &Path) -> Vec<PathBuf> {
     }
     candidates.sort_unstable_by_key(|candidate| Reverse(candidate.0));
     candidates.into_iter().map(|(_, path)| path).collect()
-}
-
-fn read_tail(path: &Path) -> std::io::Result<String> {
-    let mut file = File::open(path)?;
-    let length = file.metadata()?.len();
-    let start = length.saturating_sub(LOG_TAIL_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::with_capacity((length - start) as usize);
-    file.read_to_end(&mut bytes)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn parse_latest_view_state(value: &str) -> Option<ViewState> {
@@ -215,6 +258,136 @@ fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn running_editor_log_is_found_behind_newer_empty_cli_runs() {
+        let directory =
+            std::env::temp_dir().join(format!("codex-view-discovery-{}", std::process::id()));
+        let root = directory.join("Code/logs");
+        let owner = root.join("20260905T154651/window2/exthost/openai.chatgpt");
+        fs::create_dir_all(&owner).unwrap();
+        let log = owner.join("Codex.log");
+        fs::write(
+            &log,
+            "thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        let newer: Vec<_> = (0..10)
+            .map(|index| root.join(format!("20260905T22{index:04}")))
+            .collect();
+        for path in &newer {
+            fs::create_dir_all(path).unwrap();
+        }
+        let candidates = candidate_logs(&directory);
+        assert_eq!(candidates, vec![log.clone()]);
+        let views =
+            ViewStateReader::default().read_candidates(candidates, &HashSet::from(["one".into()]));
+        assert_eq!(views["one"].state, ViewState::Active("one".into()));
+        fs::remove_file(log).unwrap();
+        for path in newer {
+            fs::remove_dir(path).unwrap();
+        }
+        let mut path = owner;
+        loop {
+            fs::remove_dir(&path).unwrap();
+            if path == directory {
+                break;
+            }
+            path = path.parent().unwrap().to_owned();
+        }
+    }
+
+    #[test]
+    fn cold_reader_recovers_an_open_chat_before_a_long_log_tail() {
+        let path = std::env::temp_dir().join(format!("codex-view-cold-{}.log", std::process::id()));
+        let mut file = File::create(&path).unwrap();
+        file.write_all(
+            b"time=1 thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        for _ in 0..8 {
+            file.write_all(&vec![b'x'; LOG_TAIL_BYTES as usize])
+                .unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        let mut reader = ViewStateReader::default();
+        let sessions = HashSet::from(["one".into()]);
+        let first = reader.read_candidates(vec![path.clone()], &sessions)["one"].clone();
+        assert_eq!(first.state, ViewState::Active("one".into()));
+        assert_eq!(reader.logs[&path].size, path.metadata().unwrap().len());
+        assert!(reader.logs[&path].pending.capacity() <= MAX_VIEW_LOG_LINE_BYTES);
+        assert_eq!(
+            reader.read_candidates(vec![path.clone()], &sessions)["one"],
+            first
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(
+            b"time=2 thread_stream_view_activity_changed active=false conversationId=one\n",
+        )
+        .unwrap();
+        assert_eq!(
+            reader.read_candidates(vec![path.clone()], &sessions)["one"].state,
+            ViewState::Inactive
+        );
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn another_windows_broadcast_mentions_do_not_override_the_chats_own_view() {
+        let own = std::env::temp_dir().join(format!("codex-view-own-{}.log", std::process::id()));
+        let other =
+            std::env::temp_dir().join(format!("codex-view-other-{}.log", std::process::id()));
+        fs::write(
+            &own,
+            "thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        fs::write(&other, "thread_stream_view_activity_changed active=true conversationId=two\nthread notification conversationId=one\n").unwrap();
+        let mut reader = ViewStateReader::default();
+        let views = reader.read_candidates(
+            vec![other.clone(), own.clone()],
+            &HashSet::from(["one".into(), "two".into()]),
+        );
+        assert_eq!(views["one"].state, ViewState::Active("one".into()));
+        assert_eq!(views["two"].state, ViewState::Active("two".into()));
+        fs::remove_file(own).unwrap();
+        fs::remove_file(other).unwrap();
+    }
+
+    #[test]
+    fn appended_partial_events_and_oversized_noise_preserve_the_last_complete_view() {
+        let mut cache = CachedView::new();
+        let mut revision = 0;
+        cache.consume(
+            b"thread_stream_view_activity_changed active=true conversationId=one\n",
+            &mut revision,
+        );
+        cache.consume(
+            b"thread_stream_view_activity_changed active=false conversationId=",
+            &mut revision,
+        );
+        assert_eq!(cache.state, Some(ViewState::Active("one".into())));
+        cache.consume(b"one\n", &mut revision);
+        assert_eq!(cache.state, Some(ViewState::Inactive));
+        for _ in 0..10 {
+            cache.consume(&[b'x'; 16 * 1024], &mut revision);
+        }
+        cache.consume(
+            b" thread_stream_view_activity_changed active=true conversationId=wrong\n",
+            &mut revision,
+        );
+        assert_eq!(cache.state, Some(ViewState::Inactive));
+        assert!(!cache.sessions.contains("wrong"));
+        cache.consume(
+            b"thread_stream_view_activity_changed active=true conversationId=two\n",
+            &mut revision,
+        );
+        assert_eq!(cache.state, Some(ViewState::Active("two".into())));
+        assert!(cache.pending.capacity() <= MAX_VIEW_LOG_LINE_BYTES);
+        assert_eq!(revision, 3);
+    }
 
     #[test]
     fn view_revisions_ignore_log_growth_but_detect_a_new_event_for_the_same_chat() {
@@ -302,7 +475,11 @@ mod tests {
             "thread_stream_view_activity_changed active=true conversationId=one\n",
         )
         .unwrap();
-        fs::write(&newer, "turn-start conversationId=one\n").unwrap();
+        fs::write(
+            &newer,
+            "Reasoning summary turn-start config resolved conversationId=one\n",
+        )
+        .unwrap();
         let mut reader = ViewStateReader::default();
         let sessions = HashSet::from(["one".into()]);
         assert!(

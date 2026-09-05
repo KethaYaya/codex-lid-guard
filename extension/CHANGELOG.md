@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.60
+
+- Hide the matching overlay when its chat is open in the focused editor, even when newer command-line launches create empty log folders beside the running VS Code instance.
+- Recover visibility events from earlier in a long chat log after a helper restart, then read only appended bytes with bounded line buffering.
+- Resolve each chat from its own view and turn-start events; unrelated windows mentioning the same conversation no longer override its visibility.
+
 ## 0.1.59
 
 - Make hover and click expansion one continuous slide, presenting the panel position, visible size, shape, and pixels together. Keep the message at its original size and avoid a separate fill or resize after sliding.

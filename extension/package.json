@@ -3,7 +3,7 @@
   "displayName": "Codex Lid Guard",
   "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
   "icon": "images/codex-lid-guard-logo.png",
-  "version": "0.1.59",
+  "version": "0.1.60",
   "publisher": "KethaYaya",
   "license": "MIT",
   "pricing": "Free",
