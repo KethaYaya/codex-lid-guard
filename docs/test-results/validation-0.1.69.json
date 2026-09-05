@@ -1,0 +1,59 @@
+{
+  "version": "0.1.69",
+  "nativeTests": {
+    "passed": 134,
+    "failed": 0,
+    "ignored": 8
+  },
+  "explicitNativeTests": [
+    "native_close_button_and_escape_dismiss_only_the_selected_tab",
+    "native_keyboard_shortcuts_expand_open_and_hide_only_the_selected_chat"
+  ],
+  "closeBehaviorVerified": [
+    "X dismisses only its chat",
+    "release away from X cancels",
+    "Escape closes the keyboard-selected tab",
+    "stale cached frames do not reopen it",
+    "new turn permits the tab to return",
+    "other tabs remain visible",
+    "no chat activation or foreground change"
+  ],
+  "completionBehaviorVerified": [
+    "completion after a burst over 2 MB appears on first poll",
+    "older start records cannot restore busy after guardian completion",
+    "closing retains unread completion state",
+    "late final writes do not reopen a closed tab"
+  ],
+  "singleRunDispatchMilliseconds": {
+    "closeButton": 5.883,
+    "escape": 0.7085,
+    "limit": "Owned overlay test; not a general latency benchmark."
+  },
+  "clippy": "all targets passed with warnings denied",
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "visualReview": {
+    "dpi": 144,
+    "states": [
+      "busy",
+      "complete"
+    ],
+    "closeButtonVisible": true,
+    "completionDotSeparatedFromCloseButton": true
+  },
+  "packagePayloadVerified": true,
+  "installedFilesVerified": 18,
+  "helperSha256": "60c5ca2bd7625929beed92fced31088f42496eb20c294ac2c62d8b8ffd683f1d",
+  "helperActivation": {
+    "fromVersion": "0.1.68",
+    "liveVersion": "0.1.69",
+    "activeTurns": 2,
+    "isGuarding": true,
+    "originalPowerSettingsPreserved": true,
+    "currentLidActions": {
+      "AC": 0,
+      "DC": 0
+    },
+    "reloadSeconds": 1.074
+  },
+  "extensionReloadRequired": false
+}

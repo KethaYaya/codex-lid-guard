@@ -85,17 +85,21 @@ thread_local! {
 
 unsafe fn dispatch(action: Action) {
     unsafe {
-        let (binding, kind) = match action {
-            Action::Expand(binding) => (binding, 0),
-            Action::Open(binding) => (binding, 1),
-        };
         // No activation, layout or callback into another thread from the hook.
-        PostMessageW(
-            binding.window as Hwnd,
-            WM_OVERLAY_SHORTCUT,
-            binding.token,
-            kind,
-        );
+        let post = |binding: Binding, kind| {
+            PostMessageW(binding.window as Hwnd, WM_OVERLAY_SHORTCUT, binding.token, kind);
+        };
+        match action {
+            Action::Expand(binding) => post(binding, 0),
+            Action::Open(binding) => post(binding, 1),
+            Action::Close(binding) => post(binding, 2),
+            Action::Cycle { previous, selected } => {
+                if let Some(previous) = previous.filter(|previous| *previous != selected) {
+                    post(previous, 3); // Tuck the previous preview; keep its tab available.
+                }
+                post(selected, 0);
+            }
+        }
     }
 }
 

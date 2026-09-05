@@ -44,6 +44,7 @@ pub struct Card {
 #[derive(Clone)]
 pub struct Frame {
     pub session_id: Option<String>,
+    pub activity: u64,
     pub cards: Vec<Card>,
     pub window: Option<u64>,
     pub opacity: u8,
@@ -61,6 +62,7 @@ impl Frame {
     pub(crate) fn empty() -> Self {
         Self {
             session_id: None,
+            activity: 0,
             cards: vec![],
             window: None,
             opacity: 82,
@@ -103,6 +105,7 @@ struct Feed {
     views: codex_log::ViewStateReader,
     focus: FocusTransitions,
     opened: HashMap<u64, OpenedChat>,
+    dismissed: HashSet<String>,
 }
 
 struct OpenedChat {
@@ -199,6 +202,7 @@ impl Feed {
                         completion: None,
                     });
             if !tracked.source_active {
+                self.dismissed.remove(&session.id);
                 tracked.busy = true;
                 tracked.completion = None;
                 self.previews
@@ -220,6 +224,7 @@ impl Feed {
                 || session.completion.is_some()
                 || now.duration_since(session.last_active) < Duration::from_secs(600)
         });
+        self.dismissed.retain(|id| self.sessions.contains_key(id));
         let refresh_titles =
             !self.sessions.is_empty() && self.next_title_refresh.is_none_or(|next| now >= next);
         if refresh_titles {
@@ -251,6 +256,7 @@ impl Feed {
             for update in updates {
                 match update {
                     Update::Started => {
+                        self.dismissed.remove(id);
                         tracked.busy = true;
                         tracked.completion = None;
                         self.previews.retain(|preview| &preview.session != id);
@@ -317,6 +323,9 @@ impl Feed {
                     }
                 }
             }
+            // Draining an older task_started record must not resurrect a turn
+            // that the guardian has already observed finishing or stopping.
+            if !tracked.source_active { tracked.busy = false; }
             if tracked.busy && !self.previews.iter().any(|p| &p.session == id) {
                 self.next_id = self.next_id.wrapping_add(1);
                 self.previews.push_back(Preview {
@@ -360,6 +369,14 @@ impl Feed {
             frame.hidden_in_focus = frame.session_id.as_ref().is_some_and(|id| viewed.contains(id));
         }
         frames
+    }
+
+    fn dismiss(&mut self, target: &CardTarget, activity: u64) {
+        if self.sessions.get(&target.session_id).is_some_and(|tracked|
+            tracked.session.window == Some(target.window) && tracked.session.activity == activity) {
+            // Closing a notification does not mean the chat has been viewed.
+            self.dismissed.insert(target.session_id.clone());
+        }
     }
 
     fn acknowledge(&mut self, target: &CardTarget, viewed: Instant) {
@@ -466,7 +483,7 @@ impl Feed {
         let mut eligible: Vec<_> = self
             .sessions
             .iter()
-            .filter(|(id, _)| !viewed.contains(*id))
+            .filter(|(id, _)| !viewed.contains(*id) && !self.dismissed.contains(*id))
             .filter_map(|(id, tracked)| {
                 tracked
                     .session
@@ -502,6 +519,7 @@ impl Feed {
                 });
                 Frame {
                     session_id: Some(id.clone()),
+                    activity: tracked.session.activity,
                     cards: vec![card],
                     window: Some(window),
                     busy: tracked.busy,
@@ -544,7 +562,11 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) {
             .ok();
         let mut feed = Feed::default();
         let (viewed, acknowledgements) = std::sync::mpsc::channel();
+        let (dismissed, dismissals) = std::sync::mpsc::channel();
         let worker = FeedWorker::new(move |collapsed| {
+            for (target, activity) in dismissals.try_iter() {
+                feed.dismiss(&target, activity);
+            }
             for (target, at) in acknowledgements.try_iter() {
                 feed.acknowledge(&target, at);
             }
@@ -558,7 +580,7 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) {
         });
         for slot in 0..SESSION_LIMIT {
             let mut view = worker.view(slot);
-            let updates = view.updates();
+            let updates = view.updates().with_dismissals(dismissed.clone());
             let viewed = viewed.clone();
             let shortcuts = shortcuts.as_ref().map(|service| service.publisher(slot));
             std::thread::spawn(move || {
@@ -596,6 +618,7 @@ pub fn preview() -> io::Result<()> {
                 };
                 Frame {
                     session_id: Some(format!("preview-{slot}")),
+                    activity: 0,
                     cards: vec![Card {
                         id: 0,
                         label: format!("Codex Lid Guard \u{2014} {} preview", ["Build", "Review", "Tests"][slot]),
@@ -659,6 +682,16 @@ impl MessageCursor {
             self.offset = 0;
             self.pending.clear();
             self.discard_line = false;
+        }
+        if length.saturating_sub(self.offset) > READ_LIMIT {
+            // A large tool write must not delay completion behind pages of output.
+            // Previews show the latest updates, so skip the backlog at a line boundary.
+            self.offset = length - READ_LIMIT;
+            self.pending.clear();
+            file.seek(SeekFrom::Start(self.offset - 1))?;
+            let mut previous = [0];
+            file.read_exact(&mut previous)?;
+            self.discard_line = previous[0] != b'\n';
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
@@ -1226,6 +1259,92 @@ mod tests {
             2,
             "latest updates remain available when switching away again"
         );
+    }
+
+    #[test]
+    fn closing_one_session_keeps_it_hidden_until_a_new_turn_without_viewing_it() {
+        let now = Instant::now();
+        let path = std::env::temp_dir().join(format!("overlay-close-{}.jsonl", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        let mut feed = Feed::default();
+        let mut session = tracked("one", 1, now);
+        session.cursor = Some(MessageCursor::new(path.clone()).unwrap());
+        let other = tracked("two", 1, now);
+        let active = vec![session.session.clone(), other.session.clone()];
+        feed.sessions.insert("one".into(), session);
+        feed.sessions.insert("two".into(), other);
+        let settings = GuardSettings::default();
+        feed.test_poll(active.clone(), &settings, now, false);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#).unwrap();
+        feed.test_poll(active.clone(), &settings, now, false);
+        let target = CardTarget { window: 1, session_id: "one".into() };
+        feed.dismiss(&target, 99);
+        assert!(feed.dismissed.is_empty(), "a stale close must not dismiss another turn");
+        feed.dismiss(&target, 0);
+        assert!(feed.sessions["one"].completion.is_some(), "close is not viewed");
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Final write after completion"}}"#).unwrap();
+        feed.test_poll(active.clone(), &settings, now, false);
+        for _ in 0..3 {
+            let frames = feed.visible_frames(&settings, |_| true, &HashSet::new());
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].session_id.as_deref(), Some("two"));
+            assert!(frames[0].busy);
+        }
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_started"}}"#).unwrap();
+        feed.test_poll(active, &settings, now, false);
+        assert!(!feed.dismissed.contains("one"));
+        assert_eq!(feed.visible_frames(&settings, |_| true, &HashSet::new()).len(), 2);
+        assert!(feed.sessions["one"].busy);
+        assert!(feed.sessions["one"].completion.is_none());
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn completion_is_observed_on_the_first_poll_after_a_large_output_burst() {
+        let now = Instant::now();
+        let path = std::env::temp_dir().join(format!("overlay-burst-{}.jsonl", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        let mut session = tracked("one", 1, now);
+        session.cursor = Some(MessageCursor::new(path.clone()).unwrap());
+        let active = vec![session.session.clone()];
+        let mut feed = Feed::default();
+        feed.sessions.insert("one".into(), session);
+        let settings = GuardSettings::default();
+        feed.test_poll(active.clone(), &settings, now, false);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        // More than eight reader pages from a single tool write. Only lifecycle
+        // and assistant display records at the end matter to the notification.
+        write_event(&mut file, &"x".repeat(READ_LIMIT as usize * 8)).unwrap();
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Finished"}}"#).unwrap();
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#).unwrap();
+        feed.test_poll(active, &settings, now, false);
+        let frame = feed.test_frame(&settings, |_| true);
+        assert!(!frame.busy);
+        assert!(frame.attention);
+        assert_eq!(frame.cards[0].text, "Finished");
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn draining_a_start_record_cannot_make_a_finished_source_busy_again() {
+        let now = Instant::now();
+        let path = std::env::temp_dir().join(format!("overlay-drain-{}.jsonl", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        let mut session = tracked("one", 1, now);
+        session.cursor = Some(MessageCursor::new(path.clone()).unwrap());
+        session.source_active = true;
+        session.busy = true;
+        let mut feed = Feed::default();
+        feed.sessions.insert("one".into(), session);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_started"}}"#).unwrap();
+        feed.test_poll(vec![], &GuardSettings::default(), now, false);
+        assert!(!feed.sessions["one"].busy);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

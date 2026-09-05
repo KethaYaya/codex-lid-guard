@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.70
+
+- Cycle through visible overlay tabs with Copilot + Tab. Expand the selected preview, tuck the previous one, skip hidden tabs, and wrap after the last tab.
+- Press Enter to open the keyboard-selected chat and maximize its originating VS Code window. Keep the letter shortcuts and Escape dismissal working.
+- Support repeated Copilot key presses as well as holding the key, without capturing ordinary Tab or Enter input outside an active shortcut.
+
+## 0.1.69
+
+- Add a close button to expanded overlays. Close the selected panel and tab until its next turn, without opening or stopping the chat.
+- Press Escape after Copilot plus the first shortcut letter to close that tab. Unselected, expired, or cancelled shortcuts leave other applications alone.
+- Catch up to the latest bounded transcript tail after large output bursts so completion is visible on the next refresh. Prevent older start records from making an already finished turn look busy again.
+
 ## 0.1.68
 
 - Open the exact Codex conversation editor from an overlay or session menu, reusing its existing tab and editor group when several chats share a project window.

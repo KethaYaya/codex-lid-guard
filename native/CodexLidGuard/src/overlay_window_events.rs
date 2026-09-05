@@ -104,10 +104,28 @@ impl Drop for WindowEvents {
 pub struct OverlayUpdates {
     destination: Arc<AtomicUsize>,
     wake: SyncSender<()>,
+    dismissals: Option<mpsc::Sender<(crate::overlay::CardTarget, u64)>>,
 }
 impl OverlayUpdates {
     pub(crate) fn new(destination: Arc<AtomicUsize>, wake: SyncSender<()>) -> Self {
-        Self { destination, wake }
+        Self {
+            destination,
+            wake,
+            dismissals: None,
+        }
+    }
+    pub(crate) fn with_dismissals(
+        mut self,
+        dismissals: mpsc::Sender<(crate::overlay::CardTarget, u64)>,
+    ) -> Self {
+        self.dismissals = Some(dismissals);
+        self
+    }
+    pub(super) fn dismiss(&self, target: crate::overlay::CardTarget, activity: u64) {
+        if let Some(dismissals) = &self.dismissals {
+            let _ = dismissals.send((target, activity));
+            self.refresh();
+        }
     }
     pub(super) fn attach(&self, window: Hwnd) {
         self.destination.store(window as usize, Ordering::Release);

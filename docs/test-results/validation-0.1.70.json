@@ -1,0 +1,49 @@
+{
+  "version": "0.1.70",
+  "nativeTests": {
+    "passed": 138,
+    "failed": 0,
+    "ignored": 9
+  },
+  "explicitNativeTests": [
+    "native_copilot_tab_cycles_previews_and_enter_opens_the_exact_chat",
+    "native_close_button_and_escape_dismiss_only_the_selected_tab"
+  ],
+  "shortcutBehaviorVerified": [
+    "Tab cycles all three previews and wraps",
+    "hidden or disappeared tabs are skipped",
+    "separate Copilot presses continue from the previous selection",
+    "a single tab remains selected",
+    "the previous preview tucks away while all tabs remain visible",
+    "slide geometry remains flush with the display edge",
+    "cycling does not activate a chat or change the foreground window",
+    "Enter dispatches the exact selected session even when targets share an editor window",
+    "Enter auto-repeat does not open twice",
+    "ordinary or expired Tab and Enter input passes through",
+    "a replaced selection cannot open the wrong chat",
+    "close button and Escape dismissal still work"
+  ],
+  "singleRunDispatchMilliseconds": {
+    "cycleExpansion": [25.5389, 25.0154, 22.9435, 21.1318, 20.6774],
+    "enter": 6.0901,
+    "limit": "Owned overlay test with simulated shortcut events and activation callback; not a general latency benchmark or real editor launch measurement."
+  },
+  "clippy": "all targets passed with warnings denied",
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "installedFilesVerified": 18,
+  "helperSha256": "ef43863f2a2895bed7ebaa4c97ca607b2960f82fa66caee0fa4703bdeca7152f",
+  "helperActivation": {
+    "fromVersion": "0.1.69",
+    "liveVersion": "0.1.70",
+    "activeTurns": 2,
+    "isGuarding": true,
+    "originalPowerSettingsPreserved": true,
+    "currentLidActions": {
+      "AC": 0,
+      "DC": 0
+    },
+    "reloadSeconds": 0.954
+  },
+  "extensionReloadRequired": false
+}

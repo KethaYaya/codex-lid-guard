@@ -20,6 +20,12 @@ use overlay_frame_timer::FrameTimer;
 #[cfg(test)]
 #[path = "overlay_open_tests.rs"]
 mod open_tests;
+#[cfg(test)]
+#[path = "overlay_close_tests.rs"]
+mod close_tests;
+#[cfg(test)]
+#[path = "overlay_cycle_tests.rs"]
+mod cycle_tests;
 
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -31,6 +37,8 @@ const WM_CAPTURECHANGED: u32 = 0x0215;
 const WM_SETCURSOR: u32 = 0x0020;
 const WM_APP_OPEN_OVERLAY_CARD: u32 = 0x8002;
 const WM_APP_EXPAND_OVERLAY: u32 = 0x8003;
+const WM_APP_CLOSE_OVERLAY: u32 = 0x800c;
+const WM_APP_COLLAPSE_OVERLAY: u32 = 0x800d;
 const WM_TIMER: u32 = 0x0113;
 const WM_MOUSEACTIVATE: u32 = 0x0021;
 const SWP_NOACTIVATE: u32 = 0x0010;
@@ -149,6 +157,8 @@ struct OverlayState {
     collapsed: bool,
     hover_open: Option<HoverOpen>,
     tab_pressed: bool,
+    close_pressed: bool,
+    activity: u64,
     layout: Option<DockLayout>,
     busy: bool,
     attention: bool,
@@ -517,6 +527,8 @@ fn run_overlay_inner(
             collapsed: false,
             hover_open: None,
             tab_pressed: false,
+            close_pressed: false,
+            activity: 0,
             layout: None,
             busy: false,
             attention: false,
@@ -570,6 +582,7 @@ fn run_overlay_inner(
             let mut dock_request = 0;
             let mut arrival = None;
             let mut opened_overlay: Option<OpenedOverlay> = None;
+            let mut dismissed_overlay: Option<(String, u64)> = None;
             let mut opening: Option<Opening> = None;
             let mut transitions = Transitions::new(GetForegroundWindow() as usize as u64);
             let mut last_transition = None;
@@ -577,7 +590,7 @@ fn run_overlay_inner(
             let mut hidden_in_focus = false;
             loop {
                 let real = Instant::now();
-                let now = clock.advance(real, state.clicks.frozen() || state.tab_pressed || opening.is_some());
+                let now = clock.advance(real, state.clicks.frozen() || state.tab_pressed || state.close_pressed || opening.is_some());
                 if let Some(open) = &mut opening {
                     if open.result.is_none() { open.result = open.request.poll(); }
                     // Fallback for already focused editors or missing native events.
@@ -623,6 +636,17 @@ fn run_overlay_inner(
                 }
                 if refresh && !closing && opening.is_none() {
                     let mut frame = next_frame(state.collapsed);
+                    if let Some((session, activity)) = &dismissed_overlay {
+                        if frame.session_id.as_ref() == Some(session) && frame.activity == *activity {
+                            frame.cards.clear();
+                        } else {
+                            dismissed_overlay = None;
+                        }
+                    }
+                    if state.activity != frame.activity {
+                        state.close_pressed = false;
+                    }
+                    state.activity = frame.activity;
                     let transition = transitions.for_window(frame.window, real);
                     let new_transition = transition.is_some() && transition != last_transition;
                     if new_transition {
@@ -648,11 +672,12 @@ fn run_overlay_inner(
                     if displayed_session != frame.session_id {
                         cancel_hover(window, &mut state);
                         // A replaced lane must never inherit another chat's click or dock state.
-                        if state.clicks.pressed.is_some() || state.tab_pressed {
+                        if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                             ReleaseCapture();
                         }
                         state.clicks = ClickTracker::default();
                         state.pending_target = None;
+                        state.close_pressed = false;
                         state.collapsed = false;
                         state.tab_pressed = false;
                         state.layout = None;
@@ -700,12 +725,13 @@ fn run_overlay_inner(
                     if auto_dock {
                         let already_tucked = state.collapsed && dock.sample(now).0 == 1.0 && arrival.is_none();
                         cancel_hover(window, &mut state);
-                        if state.clicks.pressed.is_some() || state.tab_pressed {
+                        if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                             ReleaseCapture();
                         }
                         state.clicks = ClickTracker::default();
                         KillTimer(window, 3);
                         state.tab_pressed = false;
+                        state.close_pressed = false;
                         state.collapsed = true;
                         dock.target(true, now, false);
                         dock_center = None;
@@ -1027,7 +1053,7 @@ fn run_overlay_inner(
                         return Ok(());
                     }
                     if opening.is_some() && matches!(message.message,
-                        WM_OVERLAY_SHORTCUT | WM_APP_OPEN_OVERLAY_CARD | WM_APP_EXPAND_OVERLAY) {
+                        WM_OVERLAY_SHORTCUT | WM_APP_OPEN_OVERLAY_CARD | WM_APP_EXPAND_OVERLAY | WM_APP_CLOSE_OVERLAY | WM_APP_COLLAPSE_OVERLAY) {
                         continue;
                     }
                     if message.message == WM_OPEN_STARTED {
@@ -1074,9 +1100,35 @@ fn run_overlay_inner(
                             state.pending_target =
                                 state.cards.first().and_then(|card| card.target.clone());
                             message.message = WM_APP_OPEN_OVERLAY_CARD;
+                        } else if message.lparam == 2 {
+                            message.message = WM_APP_CLOSE_OVERLAY;
+                            message.lparam = state.activity as isize;
+                        } else if message.lparam == 3 {
+                            message.message = WM_APP_COLLAPSE_OVERLAY;
                         } else {
                             continue;
                         }
+                    }
+                    if message.message == WM_APP_CLOSE_OVERLAY {
+                        if !visible || message.wparam != state.shortcut_token
+                            || message.lparam as u64 != state.activity || state.cards.is_empty() {
+                            continue;
+                        }
+                        if let Some(session) = &displayed_session {
+                            dismissed_overlay = Some((session.clone(), state.activity));
+                        }
+                        if let Some(updates) = &updates
+                            && let Some(target) = state.cards.first().and_then(|card| card.target.clone()) {
+                            updates.dismiss(target, state.activity);
+                        }
+                        cancel_hover(window, &mut state);
+                        state.clicks = ClickTracker::default();
+                        state.tab_pressed = false;
+                        state.close_pressed = false;
+                        KillTimer(window, 3);
+                        ReleaseCapture();
+                        refresh = true;
+                        break;
                     }
                     if message.message == WM_TIMER {
                         if message.wparam == 5 {
@@ -1169,6 +1221,27 @@ fn run_overlay_inner(
                         refresh = false;
                         break;
                     }
+                    if message.message == WM_APP_COLLAPSE_OVERLAY {
+                        if dock_center.is_none() {
+                            dock_center = state.layout.map(|layout| {
+                                let anchor = layout.tab.or(layout.panel).unwrap();
+                                layout.window.top + (anchor.top + anchor.bottom) / 2
+                            });
+                        }
+                        cancel_hover(window, &mut state);
+                        if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
+                            ReleaseCapture();
+                        }
+                        state.collapsed = true;
+                        state.tab_pressed = false;
+                        state.close_pressed = false;
+                        state.pending_target = None;
+                        state.clicks = ClickTracker::default();
+                        KillTimer(window, 3);
+                        arrival = None;
+                        refresh = false;
+                        break;
+                    }
                     if message.message == WM_APP_EXPAND_OVERLAY {
                         if message.wparam == 1 && !state.collapsed {
                             continue;
@@ -1255,6 +1328,19 @@ fn tab_at(state: &OverlayState, x: i32, y: i32) -> bool {
         .layout
         .and_then(|layout| layout.tab)
         .is_some_and(|tab| x >= tab.left && x < tab.right && y >= tab.top && y < tab.bottom)
+}
+
+fn close_button_rect(width: i32, dpi: u32) -> Rect {
+    Rect { left: width - scale_dip(36, dpi), right: width - scale_dip(8, dpi),
+        top: scale_dip(8, dpi), bottom: scale_dip(36, dpi) }
+}
+
+fn close_at(state: &OverlayState, x: i32, y: i32) -> bool {
+    if state.collapsed || state.cards.is_empty() { return false; }
+    let Some(panel) = state.layout.and_then(|layout| layout.panel) else { return false; };
+    let bounds = close_button_rect(panel.right - panel.left, state.dpi.max(96));
+    let (x, y) = (x - panel.left, y - panel.top);
+    x >= bounds.left && x < bounds.right && y >= bounds.top && y < bounds.bottom
 }
 
 unsafe fn create_overlay_region(layout: DockLayout, dpi: u32) -> io::Result<Handle> {
@@ -1434,7 +1520,7 @@ unsafe extern "system" fn window_procedure(
                     && GetCursorPos(&mut point) != 0
                     && ScreenToClient(window, &mut point) != 0
                 {
-                    let cursor = if tab_at(state, point.x, point.y)
+                    let cursor = if close_at(state, point.x, point.y) || tab_at(state, point.x, point.y)
                         || card_target_at(window, state, point.x, point.y).is_some()
                     {
                         32_649usize
@@ -1450,6 +1536,7 @@ unsafe extern "system" fn window_procedure(
                 let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 if let Some(state) = state.as_mut() {
                     state.panel_dirty = true;
+                    state.close_pressed = close_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32);
                     state.tab_pressed =
                         tab_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32);
                     let card = card_target_at(
@@ -1459,11 +1546,11 @@ unsafe extern "system" fn window_procedure(
                         (lparam >> 16) as i16 as i32,
                     );
                     state.clicks.press(
-                        if state.tab_pressed { None } else { card },
+                        if state.tab_pressed || state.close_pressed { None } else { card },
                         message == WM_LBUTTONDBLCLK,
                     );
                     arm_click_timer(window, &state.clicks);
-                    if state.clicks.pressed.is_some() || state.tab_pressed {
+                    if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                         cancel_hover(window, state);
                         SetCapture(window);
                     }
@@ -1476,8 +1563,13 @@ unsafe extern "system" fn window_procedure(
                 let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 let mut activate = false;
                 let mut expand = false;
+                let mut close = None;
                 if let Some(state) = state.as_mut() {
                     state.panel_dirty = true;
+                    if state.close_pressed && close_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32) {
+                        close = Some((state.shortcut_token, state.activity));
+                    }
+                    state.close_pressed = false;
                     expand = state.tab_pressed
                         && tab_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32);
                     state.tab_pressed = false;
@@ -1498,6 +1590,9 @@ unsafe extern "system" fn window_procedure(
                     arm_click_timer(window, &state.clicks);
                 }
                 ReleaseCapture();
+                if let Some((token, activity)) = close {
+                    PostMessageW(window, WM_APP_CLOSE_OVERLAY, token, activity as isize);
+                }
                 if activate {
                     PostMessageW(window, WM_APP_OPEN_OVERLAY_CARD, 0, 0);
                 }
@@ -1515,6 +1610,7 @@ unsafe extern "system" fn window_procedure(
                     state.clicks.pressed = None;
                     state.clicks.opening = None;
                     state.tab_pressed = false;
+                    state.close_pressed = false;
                 }
                 InvalidateRect(window, null(), 0);
                 0
@@ -1751,14 +1847,14 @@ unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
         let mut header = Rect {
             left: inset,
             top: scale_dip(12, dpi),
-            right: rect.right - inset - scale_dip(14, dpi),
+            right: rect.right - scale_dip(68, dpi),
             bottom: scale_dip(34, dpi),
         };
         if state.attention {
             paint_completion_dot(
                 dc,
                 Point {
-                    x: rect.right - inset - scale_dip(3, dpi),
+                    x: rect.right - scale_dip(52, dpi),
                     y: scale_dip(22, dpi),
                 },
                 completion_strength(state.activity_started.elapsed(), state.animate),
@@ -1772,6 +1868,9 @@ unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             0x00cab98b,
             DT_SINGLELINE | DT_END_ELLIPSIS,
         );
+        let mut close = close_button_rect(rect.right, dpi);
+        if state.close_pressed { fill_rectangle(dc, &close, 0x0044352c); }
+        draw_text(dc, "\u{00d7}", &mut close, 0x00f6f2ef, DT_SINGLELINE | DT_VCENTER | 1);
         let mut y = scale_dip(40, dpi);
         for row in &state.rows {
             let card = &row.card;
@@ -1972,7 +2071,7 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
             let inset = scale_dip(18, dpi);
             if state.attention {
                 let center = Point {
-                    x: panel.right - inset - scale_dip(3, dpi),
+                    x: panel.right - scale_dip(52, dpi),
                     y: panel.top + scale_dip(22, dpi),
                 };
                 update(dot_rect(&center), panel, 0x00241e1a, &|dc| {
@@ -2873,6 +2972,7 @@ mod tests {
                 };
                 Frame {
                     session_id: None,
+                    activity: 0,
                     cards: ids
                         .into_iter()
                         .map(|id| Card {
@@ -3160,6 +3260,7 @@ mod tests {
                 tick += 1;
                 Frame {
                     session_id: None,
+                    activity: 0,
                     cards: {
                         let mut cards = vec![Card {
                             id: 1,
@@ -3299,6 +3400,8 @@ mod tests {
                 collapsed: false,
                 hover_open: None,
                 tab_pressed: false,
+                close_pressed: false,
+                activity: 0,
                 layout: None,
                 busy: false,
                 attention: false,
@@ -3396,6 +3499,8 @@ mod tests {
             collapsed: false,
             hover_open: None,
             tab_pressed: false,
+            close_pressed: false,
+            activity: 0,
             layout: None,
             busy: false,
             attention: false,
