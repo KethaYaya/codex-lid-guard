@@ -1,78 +1,227 @@
 # Codex Lid Guard
 
-if you use  codex on VSCode, you can make codex work for you while the laptop lid is still closed with this little extension.
+Keep local Codex tasks running with your Windows laptop lid closed, and follow your chats from small desktop overlays while you work in other apps. When the last task finishes, Lid Guard restores your power settings and can put the laptop to sleep.
 
-## What it does
+**Windows 10/11 x64 · VS Code · Official OpenAI Codex extension**
 
-1. Codex's indexed core lifecycle metadata tells the native guardian that a turn started, including automatic continuations. No lifecycle-hook setup is required.
-2. The guardian saves the active Windows power scheme's AC and battery lid actions, temporarily changes both to **Do nothing**, and requests continuous system availability.
-3. The guardian follows the turn's lifecycle records and releases it only after completion or cancellation. Multiple simultaneous Codex turns are reference-counted, so protection stays active until the final one stops.
-4. The prior AC and battery values are restored exactly. If Windows reports that the lid is still closed, the guardian waits for the configured grace period (10 seconds by default) and requests sleep. A new Codex turn or an opened lid cancels that pending sleep.
-5. Herdr's original `done` alert plays when a task stops. Optional Codex hooks can add immediate `request` alerts for permission approvals and structured `request_user_input` prompts. By default, automatic alerts play when the originating VS Code window is minimized or covered, another VS Code window is focused, or another chat is selected in that window. The current chat stays quiet.
+[Quick start](#quick-start) · [Overlays](#message-overlays) · [Shortcuts](#keyboard-shortcuts) · [Session menu](#status-bar-and-session-menu) · [Commands](#command-palette) · [Settings](#settings) · [Troubleshooting](#troubleshooting)
 
-With message previews disabled (the default), Lid Guard watches only indexed lifecycle row IDs and thread IDs from Codex's local metadata database, plus newly appended turn-start and session-visibility metadata in the current window's extension log. It queries rollout paths and working directories for cleanup and display, but never queries prompt or response fields. Both native metadata starts and the extension-log fallback are transcript-tracked until a terminal lifecycle record arrives; long and automatic turns do not expire early.
+## Features
 
-Optional approval/request alerts use [documented Codex lifecycle hooks](https://learn.chatgpt.com/docs/hooks). Core lid protection does not scrape the Codex UI, guess from background processes, or require hooks.
+| Feature | What you get |
+| --- | --- |
+| Work with the lid closed | Automatic protection for local turns, including long tasks and automatic continuations. |
+| Multiple sessions | Protection stays active until the final running turn stops, across chats and VS Code windows. |
+| Restore normal sleep | Your previous battery and plugged-in lid actions are saved and restored exactly. |
+| Desktop message previews | Up to three independent, translucent overlays on the originating editor's display. |
+| Quick chat switching | Hover to peek, cycle with Copilot shortcuts, or double-click to open the exact chat in a maximized VS Code window. |
+| Per-chat progress | Moving amber dots for busy tabs; a repeating yellow background fade for completed tabs. |
+| Session menu | A status-bar shield opens running and recent chats, with unread completions highlighted. |
+| Sound alerts | Completion sounds and optional alerts for approvals or questions, quiet while you view the relevant chat. |
 
+## Quick start
 
-## Message overlay
+1. Install and enable the official OpenAI Codex extension in VS Code.
+2. Install the shared `codex-lid-guard.vsix` using **Extensions: Install from VSIX...**, or run this from the repository root:
 
-Run **Codex Lid Guard: Toggle Message Overlay** to enable translucent message previews when another app or chat is in focus, including when VS Code is minimized or covered. A chat's overlay hides only while that exact chat is visible in its focused VS Code window; other chats keep their tabs. The panel stays on top without taking focus when messages arrive. When VS Code is minimized or loses focus, the active message briefly shrinks toward its edge tab and finishes minimized. Native Windows events start that motion from the system event timestamp, using the cached chat without waiting for the background reader. Delayed events join the motion in progress instead of replaying it afterward. Already tucked tabs stay in place. Right-side panels stay flush with the display edge throughout expansion and restoration, with no gap beside the tab. Hover or click a tab to read its message. It slides out in one continuous motion at its normal text size, with the right edge attached throughout; another focus-loss transition tucks expanded previews again. Messages fade and ease into place when cards arrive or expire. Transitions take about 180 ms, pause during a pending click, and follow the Windows animation setting. The three most recently active eligible chats each get a separate panel showing their latest assistant update. Single-click a message to slide only that chat's panel into the right edge of its display, leaving a small tab. The close button in the expanded panel hides that chat's panel and tab until its next turn. Closing the overlay does not open, stop, or mark the chat as viewed. Each chat keeps its own expanded or tucked state, and fixed display lanes prevent the panels from overlapping or shifting each other. Hover over the minimized tab or click it to slide that chat back in; the tab retracts and fades smoothly as the panel settles. New updates stay tucked away until you reopen it; each tab shows a short abbreviation of its chat title. The latest updates for the three most recent chats stay cached so their tabs can return when you switch away. Older cached previews pause expiry while tucked away. Double-click a message to restore and maximize its originating VS Code window and select that exact chat editor, including when several chats share the same project. Existing chat tabs reopen in their original editor group. Reload existing VS Code windows once after installing version 0.1.68 to load this navigation handler. Opening a chat briefly grows and fades the exact visible tab or message as VS Code begins restoring. The 180 ms transition preserves its appearance and proportions and updates its position, size, shape, and transparency together, avoiding a jump into a stretched message card. The animation lets clicks pass through to the editor, then hides only that chat's overlay after confirming the requested session is active. Failed opens restore the notification and its controls. Switching away restores its minimized tab. Message clicks give immediate pressed feedback and wait only for the Windows double-click interval before tucking the panel away. A panel opened by hovering slides back into its tab about 200 ms after the pointer leaves. Moving from the tab onto the message, or returning during that short delay, keeps it open. Panels opened by a click retain their manual controls. Hovering never opens VS Code or clears a completion dot. Hover does not trigger while a mouse button is held or the panel is still docking. The tab reopens from a cached painted message without text layout on the hover path. File reads run in the background, and an input-aware high-resolution timer paces motion at about 60 frames per second without polling while idle. Sliding to and from the tab takes about 240 ms and follows the Windows animation setting. Restoring VS Code hides only the chat you are actually viewing; switching to another editor tab or hiding the Codex panel leaves the chat overlays available. Up to three chats appear, labeled as `project folder - chat title` using Codex's session index. Labels refresh when a title is created or renamed; chats without a title show `Untitled chat`. Long messages are shortened; restore VS Code to read the full reply. Older cached previews expire after 90 seconds by default; the latest updates for the three most recent chats and unread completions remain available. Closed or unidentified editor windows have no overlay.
+   ```powershell
+   code --install-extension .\extension\codex-lid-guard.vsix
+   ```
 
-Each tucked-away tab shows moving amber dots while its own chat is busy. When a session completes, a small green dot pulses in the expanded panel header and beside the completed message title until you double-click to open that chat or view it manually in its focused VS Code window. Completed tabs use a simple, uniform background fade between charcoal and yellow (`#FFD000`) every 1.8 seconds. The usual open chevron and off-white initials stay steady and readable throughout the fade; the background color is the tab's completion cue. The repeating yellow color makes finished tasks easy to spot while using another app. Opening a different chat or unfolding the tab leaves its completion indicators on. The indicators belong to their own chat, so a completed chat can pulse while another tab shows busy dots. A fourth eligible chat replaces the least recently active chat; this does not mark its completion as viewed. Unread completions stay available until viewed; starting a new turn clears that session's previous completion. These indicators follow the Windows animation setting, using steady colors when animations are disabled. Their paint-only timer updates the small indicators and completed tab surface, reuses a native drawing buffer, and stops when hidden or idle.
+3. Start a local Codex task. Lid Guard enables itself automatically; the status bar shows **Codex awake · 1** while protecting one turn.
+4. To see desktop previews, open the Command Palette with **Ctrl + Shift + P** and run **Codex Lid Guard: Toggle Message Overlay**. Overlays are off by default.
+5. Switch to another app or chat, or minimize VS Code. The background chat appears as an edge tab when an update is available.
 
-While overlay tabs are visible, the Copilot key acts as a shortcut prefix. Hold **Copilot** and press **Tab** to cycle through the visible tabs, expanding the selected preview and tucking the previous one. Cycling wraps after the last tab; repeated Copilot + Tab presses also continue from the previous selection. Press **Enter** during the shortcut to open the selected chat and maximize its VS Code window. Enter also works after selecting a tab by its shortcut letter. For a tab labeled `DR`, hold **Copilot** and press **D** to expand it, then **R** to open that chat in VS Code. Opening uses the same behavior as double-click: the relevant overlay hides after a successful open and returns as a tab when you switch away. Keyboard expansion stays open like a tab click. For keyboards that emit and release the Copilot key immediately, press the letters within 1.5 seconds of each step. **Escape** closes the selected tab immediately after keyboard expansion; before selecting a tab, it cancels the shortcut. After the 1.5-second shortcut window expires (or focus changes), Escape keeps its normal behavior in the foreground app. Ordinary `D` and `R` typing does not trigger these actions without the prefix. Tabs receive distinct first letters when titles overlap, and the expanded footer shows their shortcut. Codes stay stable while the tab is visible. With no visible tabs, Copilot keeps its normal behavior. This uses the standard Copilot key sequence (Win+Shift+F23); a key remapped by Windows or another utility must still send that sequence.
+Try **Codex Lid Guard: Preview Message Overlay** for a 35-second demonstration with three sample chats. They finish independently after 15, 18, and 21 seconds. The demo closes automatically and does not open real chats.
 
-Use **Codex Lid Guard: Preview Message Overlay** for a 35-second sample with three independent chats: watch the messages shrink into busy tabs, then hover to expand them and move away to tuck them again. Completion dots appear after 15, 18, and 21 seconds. The sample closes automatically and does not open a real chat. Settings include `codexLidGuard.messageOverlay`, `codexLidGuard.overlayOpacity` (30?100%), `codexLidGuard.overlayPosition` (any display corner), and `codexLidGuard.overlayDurationSeconds` (10?600). The panel uses the originating editor's display. Sessions without an identified editor window are omitted.
+The VSIX includes a self-contained native helper. Recipients do not need Node.js, Rust, .NET, administrator access, or lifecycle-hook setup for core lid protection.
 
-This optional feature reads newly appended assistant display messages from the active local session files. It ignores user prompts, reasoning, and tool output; duplicate transcript records are suppressed. Message text remains in memory and is never added to guardian logs or status snapshots. Enabling it starts with new messages, without replaying old history. Disabling it clears the previews. These local file formats may change with Codex updates; messages appear after Codex saves them, rather than token by token.
+## Message overlays
 
-## Install the shared VSIX
+### Follow up to three chats
 
-Recipients need Windows 10/11 x64, VS Code, and the official OpenAI Codex extension. The VSIX contains a self-contained Rust helper; Node.js, Rust, and the .NET runtime are not required on recipient machines.
+Each of the three most recently active eligible chats gets its own tab and latest assistant update. Titles use **project folder — chat title**, refresh after renaming, and show **Untitled chat** until a title is available. Tabs use short, distinct letter codes for keyboard access.
 
-```powershell
-code --install-extension .\extension\codex-lid-guard.vsix
+A tab appears when its chat is in the background: another app covers VS Code, the editor is minimized, another VS Code window is focused, or a different chat is selected. It hides when that exact chat is visible in its focused VS Code window. Returning to one chat leaves the other chats' tabs available.
+
+When VS Code loses focus or minimizes, the message shrinks into its edge tab. New messages update the tucked preview without expanding it. Each chat keeps its own state, with separate lanes so panels do not overlap or shift one another. A fourth eligible chat replaces the least recently active visible chat.
+
+![Expanded demo overlay showing the latest assistant update, close button, and keyboard shortcut footer.](extension/images/screenshots/overlay-expanded.png)
+
+*Expanded sample chat. The translucent panel stays above other windows without taking keyboard focus when updates arrive.*
+
+### Mouse controls
+
+| Action | Result |
+| --- | --- |
+| Hover over a tab | Slide out that chat's preview. |
+| Move away from a hover-opened preview | Fold it back after a short delay. Moving between the tab and panel keeps it open. |
+| Click a tab | Expand the preview and leave it open after the pointer leaves. |
+| Single-click the message | Fold the panel into its edge tab. |
+| Double-click the message | Maximize the originating VS Code window and open that exact chat, including chats sharing the same project window. |
+| Click **×** in the expanded header | Close that chat's panel and tab until its next turn. This does not stop the task or mark the chat as viewed. |
+
+Opening a chat reuses its existing editor tab and group. The overlay hides after confirming the selected chat is active; if opening fails, the notification stays available. Switching away from a viewed chat brings back its minimized tab.
+
+Right-side panels slide flush with the display edge. Minimize and restore transitions follow the editor's window events, and animations respect the Windows animation setting. Hover uses cached previews so reading messages does not wait for session-file access.
+
+### Busy and completed tasks
+
+| State | What you see |
+| --- | --- |
+| Working | Moving amber dots on that chat's minimized tab. |
+| Completed, tab folded | The whole tab background fades between charcoal and yellow (`#FFD000`). Initials stay steady; there is no completion tick. |
+| Completed, preview expanded | Small pulsing green dots in the header and beside the completed message title. |
+| Animations disabled in Windows | Steady status colors instead of pulsing or moving indicators. |
+
+| Completion fade: dim phase | Completion fade: bright phase |
+| :---: | :---: |
+| ![Completed RE tab during the charcoal phase of its background fade.](extension/images/screenshots/tab-complete-dim.png) | ![The same completed RE tab during the yellow phase of its background fade.](extension/images/screenshots/tab-complete-bright.png) |
+
+*Two screenshots from the same repeating 1.8-second completion animation.*
+
+![Completed demo overlay with green completion dots and the close button.](extension/images/screenshots/overlay-complete.png)
+
+Completion indicators stay on until you open that chat or view it manually in its focused VS Code window. Hovering, expanding a preview, or opening a different chat does not clear them. A new turn clears the previous completion. Cancellation is not shown as successful completion.
+
+Unread completions remain available until viewed, subject to the three-tab limit. Closing a notification hides it until the next turn without acknowledging its completion. The latest previews for the three most recent chats stay cached; older previews use the configured retention time, paused while tucked away.
+
+Long messages are shortened in the overlay. Open the chat for the full reply. Updates appear after Codex writes them locally, rather than token by token. Chats without an identified editor window do not get overlays.
+
+## Keyboard shortcuts
+
+These overlay shortcuts work while tabs are visible, even when you are using another app. **Copilot** means the physical Copilot key sending its standard **Win + Shift + F23** sequence.
+
+| Shortcut | Action |
+| --- | --- |
+| Hold **Copilot**, tap **Tab** | Expand the next visible chat and fold the previous preview. Tap again to continue; cycling wraps after the last tab. |
+| Repeat **Copilot + Tab** | Continue cycling from the previously selected chat. |
+| **Enter**, after selecting a tab with the shortcut | Open that chat and maximize its VS Code window. |
+| **Copilot + first tab letter** | Expand that specific chat. For `DR`, press **Copilot + D**. |
+| Add the **second tab letter** | Open the selected chat. For `DR`, press **R** after **Copilot + D**. **Enter** also works. |
+| **Esc**, immediately after keyboard selection | Close the selected overlay and its tab until the next turn. |
+| **Esc**, before selecting a tab | Cancel the shortcut. |
+
+For example, hold **Copilot**, tap **Tab** until the desired message appears, then press **Enter**. Or use **Copilot + D**, then **R**, for a tab labeled `DR`. Typing **D + R** by themselves does not open a chat.
+
+Some keyboards emit the Copilot sequence as a quick tap even while the physical key is held. On those keyboards, enter each next step within **1.5 seconds**. The shortcut expires when that interval passes or focus changes; Enter, Esc, and Tab then keep their normal behavior in the current app. With no visible tabs, Copilot keeps its normal behavior.
+
+Keyboard-opened previews stay expanded like click-opened previews. Codes remain stable while a tab is visible, and the expanded footer shows that tab's letter shortcut. These global overlay shortcuts are handled by the native helper, not VS Code's Keyboard Shortcuts editor.
+
+## Status bar and session menu
+
+| Status-bar label | Meaning |
+| --- | --- |
+| **Codex Lid Guard** with a shield | Enabled and ready; no active protection needed. |
+| **Codex awake · N** | Keeping Windows awake for `N` active turns. |
+| **Codex sleep pending** | The last turn stopped with the lid closed; the sleep grace period is running. |
+| **Codex Lid Guard** with a disabled icon | Disabled. Click to enable. |
+| Warning or error icon | Hover for the diagnostic message. |
+
+Click the shield, or run **Codex Lid Guard: Show Status**, to open the session menu. It lists all awake sessions and fills the list to five entries with recently active chats. The awake count includes only running turns.
+
+The menu labels chats by folder and title, highlights the currently viewed chat, distinguishes running sessions, and keeps completed sessions blue until viewed. Select an entry to open its chat. The popup follows VS Code's theme and display scaling; high-contrast themes use an opaque background.
+
+| Key while the session menu is open | Action |
+| --- | --- |
+| **Up / Down** | Select the previous / next session. |
+| **Tab / Shift + Tab** | Select the next / previous session. |
+| **Enter / Space** | Open the selected session. |
+| **Esc** | Close the menu. |
+
+## Lid protection and alerts
+
+When a local turn starts, the guardian saves the active Windows power scheme's plugged-in and battery lid actions, temporarily sets both to **Do nothing**, and keeps the system awake. It follows lifecycle records through completion or cancellation, including automatic continuations. Multiple turns are counted together, so one finishing does not interrupt the others.
+
+After the final turn stops, the saved lid actions are restored. If the lid is still closed and automatic sleep is enabled, Windows sleeps after the configured grace period: **10 seconds** by default. Opening the lid or starting another turn cancels pending sleep. With no local turn running, closing the lid follows normal Windows behavior. The display can turn off while the system continues working.
+
+The bundled Herdr **done** sound plays when a task stops. Optional hooks add immediate **request** sounds for permission approvals and structured questions. Automatic alerts are quiet by default while the relevant chat is visible in its focused VS Code window; other chats and background windows can still alert.
+
+To enable request alerts, run **Codex Lid Guard: Enable Optional Hook Alerts** and follow the one-time Codex hook review. Core protection already works without this review. **Test Alert Sounds** plays both samples regardless of focus, provided sounds are enabled.
+
+## Command Palette
+
+Open with **Ctrl + Shift + P**, then search for **Codex Lid Guard**.
+
+| Command | Purpose |
+| --- | --- |
+| **Codex Lid Guard: Enable** | Enable automatic protection for local turns. |
+| **Codex Lid Guard: Disable and Restore Power Settings** | Disable monitoring, restore saved power settings, and remove optional Lid Guard hooks. |
+| **Codex Lid Guard: Show Status** | Show guardian status or the running/recent session menu. |
+| **Codex Lid Guard: Restore Power Settings Now** | Restore saved Windows power settings immediately. |
+| **Codex Lid Guard: Toggle Message Overlay** | Turn desktop previews on or off. |
+| **Codex Lid Guard: Preview Message Overlay** | Run the independent 35-second demo. |
+| **Codex Lid Guard: Enable Optional Hook Alerts** | Set up immediate approval/question alerts and their one-time review. |
+| **Codex Lid Guard: Test Alert Sounds** | Play the completion and request samples. |
+
+## Settings
+
+Open VS Code Settings and search for **Codex Lid Guard**. These are all available extension settings.
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `codexLidGuard.enabled` | `true` | Automatically monitor and protect local Codex turns. |
+| `codexLidGuard.messageOverlay` | `false` | Show desktop message previews for background chats. |
+| `codexLidGuard.overlayOpacity` | `82` | Opacity percentage, from `30` to `100`. Lower is more transparent. |
+| `codexLidGuard.overlayPosition` | `bottom-right` | Preview corner: `bottom-right`, `bottom-left`, `top-right`, or `top-left`, on the originating editor's display. |
+| `codexLidGuard.overlayDurationSeconds` | `90` | Retention for older previews, from `10` to `600` seconds. The latest three chats and unread completions remain available. |
+| `codexLidGuard.alertSounds` | `true` | Enable completion and request sounds. |
+| `codexLidGuard.alertSoundsOnlyWhenUnfocused` | `true` | Keep automatic alerts quiet while viewing the relevant chat. |
+| `codexLidGuard.optionalHooks` | `false` | Install optional request-alert hooks; requires a one-time Codex review. |
+| `codexLidGuard.sleepWhenLidClosed` | `true` | Sleep after the final turn stops if the lid is still closed. |
+| `codexLidGuard.sleepDelaySeconds` | `10` | Grace period before sleep, from `0` to `300` seconds. |
+
+For example, enable overlays and give yourself 30 seconds before sleep in `settings.json`:
+
+```json
+{
+  "codexLidGuard.messageOverlay": true,
+  "codexLidGuard.overlayOpacity": 82,
+  "codexLidGuard.sleepDelaySeconds": 30
+}
 ```
 
-The extension enables itself on first activation. There is no Codex console, review popup, trust step, or additional setup. Previous Lid Guard hook entries are removed automatically during migration. Users who specifically want immediate permission/request alerts can enable `codexLidGuard.optionalHooks`; Codex then requires the standard one-time review for those optional hooks.
+## Privacy and recovery
 
-The status-bar shield shows whether the guardian is idle, protecting active turns, or waiting to sleep. Click it at any time to open a subtly translucent, theme-aware popup styled after Codex's recent-chats panel, without the search field. The menu keeps all awake sessions and fills the menu to five entries with the most recently active chats, so completed work remains switchable; its count always reflects awake sessions only. Every session is labeled as `folder — chat title`, with a compact header and rounded selection pill. The session displayed in the current VS Code window is highlighted when the menu opens, every running session retains a separate theme-aware active color, and completed sessions stay blue until their chat is viewed. The popup aligns to the bottom-right of the active VS Code window, follows display scaling, and exposes each session as an accessible one-click button. High-contrast themes remain fully opaque. Selecting an awake session switches to its originating editor window before opening the chat, while completed sessions open directly by their Codex route. Session IDs, folders, and titles are read from Codex's local metadata when the popup opens or an enabled overlay begins tracking a session; prompt and response fields are never queried. These commands are available from the Command Palette:
+Core monitoring uses Codex's local lifecycle metadata and appended lifecycle records. It queries thread IDs, rollout locations, and working directories for tracking, cleanup, and display; it does not query prompt or response fields from the metadata database.
 
-The shield listens for atomic guardian status snapshots and normally updates in well under a second without launching diagnostic processes. VS Code renews the shared daemon lease once every four minutes, while a 60-second refresh runs only if Windows file watching is unavailable. Alert sounds use native Windows multimedia playback rather than PowerShell or WPF.
+Enabling message overlays additionally reads newly appended assistant display messages from local session files. User prompts, reasoning, and tool output are ignored for previews. Message text stays in memory and is excluded from guardian logs and status snapshots. Enabling starts with new messages; disabling clears the previews.
 
-- `Codex Lid Guard: Enable`
-- `Codex Lid Guard: Disable and Restore Power Settings`
-- `Codex Lid Guard: Show Status`
-- `Codex Lid Guard: Restore Power Settings Now`
-- `Codex Lid Guard: Enable Optional Hook Alerts`
-- `Codex Lid Guard: Test Alert Sounds`
+Before changing power settings, the guardian writes a recovery record to `%LOCALAPPDATA%\CodexLidGuard\power-recovery.json`. If interrupted, its next launch restores the saved settings first. Optional hook edits are backed up to `~/.codex/hooks.json.before-codex-lid-guard`.
 
-Before uninstalling, run the disable command to restore any active Windows power-policy changes and remove optional hook entries if they were enabled.
+**Before uninstalling, run Codex Lid Guard: Disable and Restore Power Settings.** This restores active power-policy changes and removes optional hook entries.
 
-## Safety and recovery
+## Troubleshooting
 
-- No administrator elevation is requested.
-- A recovery record is written to `%LOCALAPPDATA%\CodexLidGuard\power-recovery.json` *before* the power scheme changes. If the guardian is interrupted, its next launch restores that record first.
-- If optional hooks are enabled, `~/.codex/hooks.json.before-codex-lid-guard` contains the most recent pre-edit hook configuration.
-- Closing the lid while no local Codex turn is active follows normal Windows behavior.
-- The display may turn off while a task runs. The app prevents system sleep; it does not force the screen to stay lit.
-- Only local Codex turns need this protection. Codex cloud tasks already run away from the laptop.
-- The extension is Windows-only because lid policy and sleep controls are OS-specific.
+| Symptom | Check |
+| --- | --- |
+| No overlay appears | Enable **Toggle Message Overlay**, then wait for a new assistant update and switch away from that chat. The focused chat intentionally hides its own tab. Use **Preview Message Overlay** to check rendering. |
+| A tab disappeared | You may have viewed its chat, closed the notification, or brought a newer chat into the three-tab limit. A closed notification returns on that chat's next turn. |
+| Copilot opens Windows Settings or another app | Overlay shortcuts require a visible tab and the standard **Win + Shift + F23** key sequence. A Windows or keyboard-utility remap that replaces that sequence will prevent detection. Without visible tabs, the key keeps its normal Windows action. |
+| Enter or Esc does nothing to the preview | Select a tab using Copilot first, then press Enter or Esc within the active shortcut. On keyboards that emit a quick Copilot tap, the interval is 1.5 seconds. |
+| Double-click opens the window but not the right chat | If upgrading from before `0.1.68`, reload existing VS Code windows once to load the exact-chat navigation handler. |
+| No alert sound | Check `alertSounds`. The current focused chat is quiet by default. Approval/question alerts also need optional hooks and their review. |
+| Windows stays awake after a task stops | Check the shield's active-turn count for another running chat. Use **Show Status** to inspect sessions or **Restore Power Settings Now** to restore the saved policy. |
+
+This extension protects **local** tasks on Windows; Codex cloud tasks run elsewhere. Overlay parsing depends on local Codex file formats, which can change between Codex releases.
 
 ## Development
 
-Building from source requires Node.js 20+, Rust through `rustup`, and the Visual Studio C++ build tools.
+Build on Windows with Node.js 20+, Rust through `rustup`, and the Visual Studio C++ build tools. From the repository root:
 
 ```powershell
 cd extension
-cmd /c npm install
-cmd /c npm test
+npm.cmd ci
+npm.cmd test
 cd ..
-cargo test --manifest-path .\native\CodexLidGuard\Cargo.toml
-cargo build --release --manifest-path .\native\CodexLidGuard\Cargo.toml
+cargo test --manifest-path .\native\CodexLidGuard\Cargo.toml --locked
+cargo clippy --manifest-path .\native\CodexLidGuard\Cargo.toml --all-targets --locked -- -D warnings
+cd extension
+npm.cmd run package
 ```
 
-The native executable supports `status`, `restore`, `sound done`, and `sound request` for diagnostics. Logs are written to `%LOCALAPPDATA%\CodexLidGuard\guard.log`, rotate at 1 MB, and the latest event-driven state is stored in `%LOCALAPPDATA%\CodexLidGuard\status.json`.
+Packaging compiles TypeScript, builds the native helper, and writes `extension/codex-lid-guard.vsix`. Native tests that display owned preview windows are ignored by default and run separately for interaction checks.
 
-The two bundled alert files come from Herdr 0.8.2 under Apache-2.0. See `extension/THIRD_PARTY_NOTICES.md` and the license distributed beside the packaged sounds.
+The helper supports `status`, `restore`, `overlay-preview`, `sound done`, and `sound request` for diagnostics. Logs are written to `%LOCALAPPDATA%\CodexLidGuard\guard.log` and rotate at 1 MB. The latest state is stored in `%LOCALAPPDATA%\CodexLidGuard\status.json`.
+
+The screenshots above are captures of the native demo UI, with sample chat text. The two bundled alert files come from Herdr 0.8.2 under Apache-2.0; see the third-party notices and the license shipped beside the sounds.
