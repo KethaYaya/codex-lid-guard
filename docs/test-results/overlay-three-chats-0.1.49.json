@@ -1,0 +1,63 @@
+{
+  "helper": "C:\\Projects\\CodexLidGuard\\native\\CodexLidGuard\\target\\release\\CodexLidGuard.exe",
+  "pid": 22356,
+  "panels": 3,
+  "phases": {
+    "expanded_busy": {
+      "seconds": 3.025,
+      "cpu_percent_one_core": 0.0,
+      "private_bytes_start": 2834432,
+      "private_bytes_end": 2834432,
+      "working_set_max": 14770176,
+      "gdi_min": 17,
+      "gdi_max": 17,
+      "user_min": 15,
+      "user_max": 15
+    },
+    "collapsed_busy": {
+      "seconds": 3.017,
+      "cpu_percent_one_core": 3.625,
+      "private_bytes_start": 2834432,
+      "private_bytes_end": 2834432,
+      "working_set_max": 14807040,
+      "gdi_min": 17,
+      "gdi_max": 22,
+      "user_min": 18,
+      "user_max": 18
+    },
+    "expanded_complete": {
+      "seconds": 3.037,
+      "cpu_percent_one_core": 3.601,
+      "private_bytes_start": 2834432,
+      "private_bytes_end": 2834432,
+      "working_set_max": 14811136,
+      "gdi_min": 18,
+      "gdi_max": 19,
+      "user_min": 18,
+      "user_max": 18
+    },
+    "collapsed_complete": {
+      "seconds": 2.027,
+      "cpu_percent_one_core": 3.854,
+      "private_bytes_start": 2834432,
+      "private_bytes_end": 2834432,
+      "working_set_max": 14827520,
+      "gdi_min": 17,
+      "gdi_max": 19,
+      "user_min": 18,
+      "user_max": 18
+    },
+    "reopened_complete": {
+      "seconds": 1.009,
+      "cpu_percent_one_core": 3.098,
+      "private_bytes_start": 2764800,
+      "private_bytes_end": 2764800,
+      "working_set_max": 14794752,
+      "gdi_min": 18,
+      "gdi_max": 20,
+      "user_min": 18,
+      "user_max": 18
+    }
+  },
+  "duration_seconds": 35.417
+}

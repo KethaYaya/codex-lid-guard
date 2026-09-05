@@ -1,0 +1,51 @@
+{
+  "version": "0.1.49",
+  "native_tests": {
+    "passed": 99,
+    "failed": 0,
+    "ignored": 0,
+    "profile": "debug",
+    "desktop_and_node_integration": true
+  },
+  "extension_tests": {
+    "passed": 36,
+    "failed": 0
+  },
+  "release_tests_before_metadata_promotion_regression": {
+    "passed": 98,
+    "failed": 0,
+    "ignored": 0
+  },
+  "clippy": "all targets, warnings denied, passed",
+  "display_scaling": [
+    100,
+    150,
+    200
+  ],
+  "release_input_ms": {
+    "tab": 39.4302,
+    "single_click": 541.6992,
+    "windows_double_click_interval": 500
+  },
+  "final_debug_input_ms": {
+    "tab": 30.05,
+    "single_click": 550.0648,
+    "windows_double_click_interval": 500
+  },
+  "coverage": [
+    "three latest distinct sessions",
+    "fourth session replaces oldest",
+    "stable lanes when recency changes",
+    "independent collapse and expiry",
+    "per-session completion and busy indicators",
+    "correct double-click chat target",
+    "no focus on arrival",
+    "native animation and gutter jitter",
+    "100/150/200 percent DPI and short displays",
+    "nonblocking cached input during slow transcript reads",
+    "late metadata promotion preserves completion"
+  ],
+  "installed_version": "0.1.49",
+  "package_and_installed_payload_verified": true,
+  "activation_at_delivery": "waiting-for-idle"
+}

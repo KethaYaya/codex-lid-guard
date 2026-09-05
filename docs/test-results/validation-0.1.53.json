@@ -1,0 +1,16 @@
+{
+  "version": "0.1.53",
+  "nativeTests": 106,
+  "extensionTests": 36,
+  "nativeExplicitGuiTests": 3,
+  "nativePipeRequests": 50,
+  "nativePipeFailures": 0,
+  "clippy": "all targets, warnings denied: passed",
+  "nativeHoverResponseMs": 18.592,
+  "nativeHoverOutIncludingGraceAndSlideMs": 552.608,
+  "packagePayloadVerified": true,
+  "installedPayloadVerified": true,
+  "helperSha256": "d42e5b3d58f6fbcf9c28eed547b4baa63c78d876e0667f3cc40ef49eacb80105",
+  "motionCpuReductionPercent": 31.15,
+  "activation": "queued until the current guardian is idle"
+}

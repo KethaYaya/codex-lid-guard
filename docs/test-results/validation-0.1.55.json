@@ -1,0 +1,29 @@
+{
+  "version": "0.1.55",
+  "nativeChecksPassed": 118,
+  "newKeyboardChecks": 10,
+  "nativeExpansionResponseMs": [
+    19.0865,
+    19.2875
+  ],
+  "clippy": "all targets passed with warnings denied",
+  "extensionValidation": "TypeScript compiled during packaging; extension logic unchanged",
+  "keyboardValidation": "Native Windows hook registration and cleanup passed. Synthetic events on the dedicated shortcut thread drove owned native overlays; no key input was injected into other applications. The physical OEM Copilot key was not pressed by this test.",
+  "testNote": "The full run passed 116 checks; the new keyboard GUI test initially encountered a test-label encoding problem. After escaping the em dash in the fixture, the GUI test and the added native hook-registration check passed, completing 118 unique native checks.",
+  "covered": [
+    "Copilot+D expands DR",
+    "adding R opens exactly DR and immediately hides its overlay",
+    "ordinary D/R typing passes through",
+    "first-letter collisions resolve to distinct visible codes",
+    "codes remain stable across visible title updates",
+    "key repeats and swallowed key releases do not duplicate actions",
+    "Escape, timeout, focus changes and replaced targets cancel pending chords",
+    "stale queued tokens cannot activate a replacement or another lane",
+    "existing mouse, hover, focus, animation, completion and pipe checks"
+  ],
+  "packagePayloadVerified": true,
+  "helperSha256": "feee21479cbcc34d05c54ee253d384a99685566a8048ecf03f97220c5a74e268",
+  "installedPayloadVerified": true,
+  "activation": "confirmed active in the live guardian status",
+  "manualValidation": "The user confirmed the Copilot shortcut works with an overlay tab visible."
+}

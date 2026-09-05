@@ -3,7 +3,7 @@
   "displayName": "Codex Lid Guard",
   "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
   "icon": "images/codex-lid-guard-logo.png",
-  "version": "0.1.35",
+  "version": "0.1.55",
   "publisher": "KethaYaya",
   "license": "MIT",
   "pricing": "Free",
@@ -63,6 +63,14 @@
   "contributes": {
     "commands": [
       {
+        "command": "codexLidGuard.toggleMessageOverlay",
+        "title": "Codex Lid Guard: Toggle Message Overlay"
+      },
+      {
+        "command": "codexLidGuard.previewMessageOverlay",
+        "title": "Codex Lid Guard: Preview Message Overlay"
+      },
+      {
         "command": "codexLidGuard.enable",
         "title": "Codex Lid Guard: Enable"
       },
@@ -90,6 +98,35 @@
     "configuration": {
       "title": "Codex Lid Guard",
       "properties": {
+        "codexLidGuard.messageOverlay": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Show the latest assistant updates whenever another app or chat is in focus. Hide only the chat currently visible in its focused VS Code window. Hover over a tab to expand it; move away to tuck it back. Double-click a message to maximize VS Code and open its chat. Reads newly appended assistant display messages from local Codex session files; previews stay in memory."
+        },
+        "codexLidGuard.overlayOpacity": {
+          "type": "number",
+          "default": 82,
+          "minimum": 30,
+          "maximum": 100,
+          "scope": "application",
+          "description": "Message overlay opacity, as a percentage. Lower values are more transparent."
+        },
+        "codexLidGuard.overlayDurationSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 10,
+          "maximum": 600,
+          "scope": "application",
+          "description": "How long older message previews are retained. The latest update from each of the three most recent chats stays available when you switch away from that chat. Long messages are shortened."
+        },
+        "codexLidGuard.overlayPosition": {
+          "type": "string",
+          "default": "bottom-right",
+          "enum": ["bottom-right", "bottom-left", "top-right", "top-left"],
+          "scope": "application",
+          "description": "Corner of the originating VS Code window's display used for message previews."
+        },
         "codexLidGuard.alertSounds": {
           "type": "boolean",
           "default": true,

@@ -15,6 +15,23 @@ use crate::logging;
 use crate::model::LidState;
 use crate::paths;
 
+#[path = "overlay_window.rs"]
+mod overlay_window;
+pub use overlay_window::run_session_overlay;
+#[path = "overlay_shortcuts.rs"]
+mod overlay_shortcuts;
+pub use overlay_shortcuts::OverlayShortcuts;
+
+pub fn is_editor_window(window: u64) -> bool {
+    unsafe {
+        let hwnd = window as usize as Hwnd;
+        let mut process_id = 0;
+        IsWindow(hwnd) != 0
+            && GetWindowThreadProcessId(hwnd, &mut process_id) != 0
+            && process_executable_name(process_id).as_deref().is_some_and(is_supported_editor_process)
+    }
+}
+
 type Bool = i32;
 type ByteBool = u8;
 type Handle = *mut c_void;
@@ -378,7 +395,6 @@ unsafe extern "system" {
     ) -> Handle;
     fn ConnectNamedPipe(pipe: Handle, overlapped: *mut Overlapped) -> Bool;
     fn CancelIoEx(handle: Handle, overlapped: *const Overlapped) -> Bool;
-    fn DisconnectNamedPipe(pipe: Handle) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn GetCurrentProcessId() -> u32;
     fn GetCurrentThreadId() -> u32;
@@ -799,7 +815,6 @@ impl PipeServer {
             Ok(AcceptResult::Connected(PipeConnection {
                 handle: pipe,
                 overlapped: true,
-                disconnect_on_drop: true,
                 io_timeout: Some(Duration::from_secs(5)),
             }))
         }
@@ -809,7 +824,6 @@ impl PipeServer {
 pub struct PipeConnection {
     handle: OwnedHandle,
     overlapped: bool,
-    disconnect_on_drop: bool,
     io_timeout: Option<Duration>,
 }
 
@@ -904,15 +918,9 @@ impl PipeConnection {
     }
 }
 
-impl Drop for PipeConnection {
-    fn drop(&mut self) {
-        if self.disconnect_on_drop {
-            unsafe {
-                DisconnectNamedPipe(self.handle.0);
-            }
-        }
-    }
-}
+// Each server connection owns a fresh pipe instance. Closing its handle lets
+// Windows deliver queued bytes before EOF; DisconnectNamedPipe would discard
+// unread replies and is only needed when reusing the same server instance.
 
 unsafe fn run_overlapped(
     operation_handle: Handle,
@@ -991,7 +999,6 @@ pub fn connect_pipe(
         Ok(PipeConnection {
             handle: OwnedHandle(handle),
             overlapped: true,
-            disconnect_on_drop: false,
             io_timeout: Some(io_timeout),
         })
     }
@@ -1338,6 +1345,10 @@ pub fn is_window_focused(window: u64) -> bool {
 }
 
 pub fn focus_editor_window(window: u64) -> bool {
+    focus_editor_window_with_state(window, false)
+}
+
+fn focus_editor_window_with_state(window: u64, maximize: bool) -> bool {
     let window = window as usize as Hwnd;
     unsafe {
         if window.is_null() || IsWindow(window) == 0 {
@@ -1368,7 +1379,9 @@ pub fn focus_editor_window(window: u64) -> bool {
             && target_thread != foreground_thread
             && AttachThreadInput(current_thread, target_thread, 1) != 0;
 
-        if IsIconic(window) != 0 {
+        if maximize {
+            ShowWindow(window, 3); // SW_MAXIMIZE
+        } else if IsIconic(window) != 0 {
             ShowWindow(window, SW_RESTORE);
         }
         BringWindowToTop(window);
@@ -1382,6 +1395,49 @@ pub fn focus_editor_window(window: u64) -> bool {
         }
         GetForegroundWindow() == window
     }
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn ShellExecuteW(window: Hwnd, operation: *const u16, file: *const u16,
+        parameters: *const u16, directory: *const u16, show: i32) -> Handle;
+}
+
+pub fn activate_overlay_target(target: &crate::overlay::CardTarget) -> bool {
+    // Validate the saved HWND before focusing; completed messages can outlive
+    // the active-turn entry, so this does not depend on daemon turn lookup.
+    if !focus_editor_window_with_state(target.window, true) {
+        return false;
+    }
+    unsafe {
+        let window = target.window as usize as Hwnd;
+        let mut process_id = 0;
+        GetWindowThreadProcessId(window, &mut process_id);
+        if let Some(uri) = process_executable_name(process_id)
+            .and_then(|executable| overlay_session_uri(&executable, &target.session_id)) {
+            let result = ShellExecuteW(window, wide("open").as_ptr(), wide(uri).as_ptr(), null(), null(), SW_SHOW);
+            if result as isize <= 32 {
+                logging::write("Restored the overlay's editor window, but the chat URI could not be opened.");
+                return false;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn overlay_session_uri(executable: &str, session_id: &str) -> Option<String> {
+    // Only local Codex UUID routes are accepted. Never interpret transcript
+    // text or arbitrary IDs as a URL or command.
+    if session_id.len() != 36 || !session_id.bytes().enumerate().all(|(index, byte)| {
+        if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+    }) { return None; }
+    let scheme = match executable.to_ascii_lowercase().as_str() {
+        "code.exe" => "vscode",
+        "code - insiders.exe" => "vscode-insiders",
+        _ => return None,
+    };
+    Some(format!("{scheme}://openai.chatgpt/local/{}", session_id.to_ascii_lowercase()))
 }
 
 pub fn show_notification_popup(
@@ -2424,6 +2480,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn overlay_chat_routes_are_local_and_validate_the_session_id() {
+        let id = "01A07039-FCA0-7CC0-BC95-6A98923C844E";
+        assert_eq!(overlay_session_uri("Code.exe", id).as_deref(), Some("vscode://openai.chatgpt/local/01a07039-fca0-7cc0-bc95-6a98923c844e"));
+        assert!(overlay_session_uri("Code - Insiders.exe", id).unwrap().starts_with("vscode-insiders://"));
+        assert!(overlay_session_uri("unrelated.exe", id).is_none());
+        for invalid in ["", "https://example.com", "../other", "01a07039-fca0-7cc0-bc95-6a98923c844g"] {
+            assert!(overlay_session_uri("Code.exe", invalid).is_none());
+        }
+    }
+
+    #[test]
     fn guid_round_trip() {
         let input = "381b4222-f694-41f0-9685-ff5bb260df2e";
         assert_eq!(Guid::parse(input).unwrap().to_string(), input);
@@ -2574,6 +2641,62 @@ mod tests {
         let round_trip: SavedPowerState =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert!(!round_trip.changed_lid_policy());
+    }
+
+    #[test]
+    #[ignore = "requires Node and compiled extension JavaScript; uses an isolated test pipe"]
+    fn native_pipe_exchanges_repeatedly_with_the_extension_socket_client() {
+        use std::os::windows::process::CommandExt;
+        let name = format!(r"\\.\pipe\CodexLidGuard.{:016X}", std::process::id());
+        let server_name = name.clone();
+        let server = std::thread::spawn(move || {
+            let server = PipeServer::new(&server_name);
+            for _ in 0..50 {
+                let AcceptResult::Connected(connection) = server.accept(Some(Duration::from_secs(3))).unwrap()
+                    else { panic!("extension test client did not connect"); };
+                let request: serde_json::Value = serde_json::from_str(&connection.read_line().unwrap()).unwrap();
+                assert_eq!(request["action"], "status");
+                connection.write_line(r#"{"ok":true,"message":"ready","activeTurns":0,"isGuarding":false,"lidState":"open","sleepPending":false}"#).unwrap();
+                // No flush, acknowledgement, or waiting for the peer: close preserves the queued reply.
+            }
+        });
+        let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extension/dist/src/helper.js");
+        let result = std::process::Command::new("node").args([
+            "-e",
+            "const {warmGuardianPipe}=require(process.argv[1]);(async()=>{const times=[];for(let i=0;i<50;i++){const start=performance.now();await warmGuardianPipe(process.argv[2],'0.1.48');times.push(performance.now()-start);}times.sort((a,b)=>a-b);console.log(JSON.stringify({nativePipeRequests:50,failures:0,medianMs:times[25],maxMs:times[49]}));})().catch(error=>{console.error(error);process.exitCode=1});",
+        ]).arg(helper).arg(name).creation_flags(0x0800_0000).status().unwrap();
+        server.join().unwrap();
+        assert!(result.success());
+    }
+
+    #[test]
+    fn pipe_reply_survives_a_client_that_starts_reading_after_the_server_writes() {
+        let pipe_name = format!(r"\\.\pipe\CodexLidGuard.DelayedRead.{}", std::process::id());
+        let server_name = pipe_name.clone();
+        let (sent, written) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let server = PipeServer::new(&server_name);
+            let AcceptResult::Connected(connection) = server.accept(Some(Duration::from_secs(2))).unwrap()
+                else { panic!("test client did not connect"); };
+            assert_eq!(connection.read_line().unwrap(), "request");
+            connection.write_line("response").unwrap();
+            drop(connection);
+            sent.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let connection = loop {
+            match connect_pipe(&pipe_name, Duration::from_millis(10), Duration::from_secs(1)) {
+                Ok(connection) => break connection,
+                Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+                Err(cause) => panic!("test client could not connect: {cause}"),
+            }
+        };
+        connection.write_line("request").unwrap();
+        written.recv_timeout(Duration::from_secs(1)).unwrap();
+        let response = connection.read_line().unwrap();
+        drop(connection);
+        server.join().unwrap();
+        assert_eq!(response, "response", "disconnect must not discard the queued reply");
     }
 
     #[test]

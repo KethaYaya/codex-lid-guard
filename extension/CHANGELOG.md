@@ -1,5 +1,130 @@
 # Changelog
 
+## 0.1.55
+
+- Add keyboard control for visible chat tabs: hold Copilot and press the first displayed letter to expand, then the second letter to open the matching chat in VS Code.
+- Support the standard Win+Shift+F23 Copilot key and keyboards that release its macro immediately, with a short prefix timeout and Escape cancellation. Ordinary typing is unaffected without the Copilot prefix.
+- Give visible tabs distinct first letters, keep codes stable while a tab is visible, and show the shortcut in the expanded message footer.
+- Process shortcuts on a dedicated input thread without message reads, text logging, or window activation in the hook. Bind queued actions to the exact current chat and ignore stale targets and key repeats.
+- Test native shortcut expansion/opening/hiding, failed/stale routes, duplicate title prefixes, key releases, timeout, cancellation, focus changes, and native hook registration.
+
+## 0.1.54
+
+- Hide only the relevant overlay immediately after successfully opening its chat by double-click, without waiting for VS Code view-log updates.
+- Prevent stale cached frames from redisplaying the opened chat. Keep other chat tabs available, restore the selected tab on a later focus loss, and leave the overlay visible if opening fails.
+- Track actual view-event revisions so stale or unrelated log updates cannot undo an explicit open; resume normal visibility when a new chat view is observed.
+- Cover successful and failed native opens, delayed view data, independent tabs, and returning to a minimized tab with regression tests.
+
+## 0.1.53
+
+- Start newly backgrounded chat overlays as small edge tabs, with a brief cached-message shrink animation when Windows animations are enabled.
+- Dock expanded previews again when their originating editor loses focus; keep steady background tabs and hover previews independent until the next focus change.
+- Replace coarse animation ticks with an input-aware, high-resolution frame timer that stops when motion finishes. Reuse painted message surfaces while sliding and shrinking, and keep hover input off the text-layout path.
+- Preserve hover-out, click/double-click, exact-chat focus hiding, independent three-chat lanes, busy indicators, completion dots, and reduced-motion behavior.
+
+## 0.1.52
+
+- Show chat overlays when another app or chat is in focus, including when VS Code is covered or minimized. Hide only the exact chat visible in its focused originating editor window.
+- Preserve other chat tabs when restoring VS Code or selecting a different chat. Hidden or unknown chat views do not dismiss notifications.
+- Keep the latest updates for the three most recent chats available after viewing, so switching away restores their tabs without restarting acknowledged completion pulses.
+- Cache chat-view metadata, share each log read across sessions, and skip view-log discovery while another app has focus. Preserve the latest view event during long-running log appends.
+- Show a stopped message after cancellation and cover focus, chat switching, cache retention, log truncation and stale-log handling with regression tests.
+
+## 0.1.51
+
+- Tuck hover-opened chat panels back into their tabs when the pointer leaves, with a 200 ms grace period and the existing smooth slide.
+- Keep the original tab and the gap to the panel inside the hover area to prevent flicker while opening or moving onto a message. Returning during the grace period cancels dismissal.
+- Preserve explicit click behavior, per-chat completion indicators and original tab positions. Stop cursor checks when the hover preview closes.
+- Verify native hover-out, re-entry, independent panels, and timer cleanup alongside existing overlay controls and animations.
+
+## 0.1.50
+
+- Expand an individual minimized chat tab when the pointer moves over it, using the existing smooth slide and cached messages.
+- Keep the panel open after hover, preserve click controls and completion indicators, and avoid opening tabs during dragging or while they are still docking.
+- Verify native hover response, independent panels, focus preservation, and click behavior.
+
+## 0.1.49
+
+- Give the three most recently active chats independent overlay panels and edge tabs, each showing its latest update.
+- Keep each chat's busy animation, completion pulse, click target, and collapsed state independent. A fourth chat replaces the oldest eligible chat without moving the others.
+- Reserve separate display lanes, shorten text to fit smaller displays, and label tucked tabs with a short chat-title abbreviation.
+- Share one background reader between the three windows, retain cached input handling and small-indicator repainting, and pause expiry only for the tucked chat.
+- Update the 35-second preview to demonstrate three chats completing independently; add multi-window interaction, recency, isolation, and display-scaling checks.
+
+## 0.1.48
+
+- Repaint only the small activity indicators during pulses instead of redrawing all notification text and backgrounds.
+- Preserve queued native replies when closing a pipe instance, fixing a race that discarded responses before clients could read them.
+- Close timed-out guardian pipe connections, bound reply sizes, and assemble fragmented replies once while preserving Unicode.
+- Let the 35-second overlay preview finish when launched from VS Code by allowing 45 seconds for its helper process.
+- Clear previous-turn previews when new work starts so an old completed result cannot be shown as the new task's result.
+- Add timeout, fragmented-response, invalid-response, stale-result, and expanded-pulse regression coverage, plus a repeatable Windows CPU/memory/resource benchmark.
+
+## 0.1.47
+
+- Show the pulsing completion dot in the expanded notification header as well as the notch and completed message titles. Keep it visible when reopening the notch until the chat is viewed.
+
+## 0.1.46
+
+- Replace the completion border glow with a small green dot above the notch arrow and beside completed message titles.
+- Pulse only the dot brightness over 2.8 seconds, preserve its size and position, and keep busy dots and the card count visible.
+
+## 0.1.45
+
+- Update the overlay preview to demonstrate busy dots for 15 seconds followed by a completion glow, with 35 seconds to try tucking and reopening the panel. The preview runs independently of the live guardian.
+
+## 0.1.44
+
+- Pulse a soft green glow on completed message cards and the tucked-away tab until that chat is opened from the overlay or viewed in its focused VS Code window.
+- Animate amber dots on the tab while a minimized session is busy, including quiet periods before its first update. Show busy and unread completion indicators together when different sessions need them.
+- Keep unread completion cards beyond normal preview expiry, prioritize them among visible cards, and clear their glow independently by session. Cancellation does not count as completion.
+- Reuse the native paint buffer and run a separate 30 fps paint-only timer for activity indicators; stop it while hidden or idle and use steady indicators when Windows animations are disabled.
+
+## 0.1.43
+
+- Move overlay transcript, metadata, and settings reads to a background worker so file access cannot delay mouse input or animation.
+- Use a dedicated click deadline timer to remove the extra wait for the next 250 ms message refresh while preserving Windows double-click timing.
+- Show immediate pressed feedback on message cards and the reopen tab; keep only the latest pending frame and stop the reader when the overlay closes.
+
+## 0.1.42
+
+- Fixed the end-of-slide jitter when reopening the message overlay by keeping the native window bounds and paint origin stable as the tab disappears.
+- Retract and fade the tab smoothly, keep its glyphs stationary while clipping, and repaint resized frames without reusing stale pixels.
+- Keep the invisible tab gutter outside the clickable window region.
+
+## 0.1.41
+
+- Single-click an overlay message to slide the panel into the right screen edge, leaving a small clickable tab; click the tab to slide the messages back in.
+- Keep previews available while tucked away, accept new updates without expanding the panel, and resume message expiry after reopening.
+- Keep the tab stationary as messages arrive, clip sliding content to its display, and preserve double-click navigation and Windows reduced-motion preferences.
+
+## 0.1.40
+
+- Added gentle fade-and-slide transitions for the message overlay and animated card arrival, dismissal, and reflow.
+- Buffer animation frames to prevent flicker, pause motion during pending clicks, and follow the Windows animation preference.
+- Run animation ticks only while a transition is active; message polling retains its existing cadence.
+
+## 0.1.39
+
+- Fixed overlay labels to use project folder and chat title from the Codex session index when the database name is empty.
+- Refresh existing message labels when titles are created or renamed, and use Untitled chat instead of session IDs while a title is unavailable.
+
+## 0.1.38
+
+- Single-click an overlay message to dismiss only that notification; double-click it to maximize the originating VS Code window and open its chat.
+- Respect Windows double-click timing and keep message cards stationary while a click is pending.
+
+## 0.1.37
+
+- Made overlay messages clickable: select a message to restore and maximize its originating editor window and open the corresponding Codex chat.
+- Kept incoming messages from taking keyboard focus; each card retains its own window and session target, including completed messages.
+
+## 0.1.36
+
+- Added an optional translucent, always-on-top message overlay for minimized VS Code sessions, with click-through behavior and no focus stealing.
+- Show up to three recent assistant messages with session labels; hide them when the editor is restored and expire them automatically.
+- Added toggle and preview commands plus opacity, corner, and display-duration settings. Assistant previews stay in memory and are excluded from status snapshots and logs.
+
 ## 0.1.35
 
 - Highlighted completed sessions that have not been viewed since finishing with a distinct theme-aware blue accent in the session menu.

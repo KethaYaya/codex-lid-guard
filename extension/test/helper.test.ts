@@ -88,6 +88,76 @@ test("warms and pre-acquires directly through the running guardian pipe", {
   }
 });
 
+test("a timed-out guardian request closes its pipe connection", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const pipeName = `\\\\.\\pipe\\CodexLidGuard.${randomBytes(8).toString("hex").toUpperCase()}`;
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("data", () => undefined);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(pipeName, resolve));
+  try {
+    await assert.rejects(warmGuardianPipe(pipeName, "0.1.47"), /did not respond in time/u);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(sockets.size, 0, "timeout must release the pipe, not leave a pending read");
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("fragmented guardian replies preserve Unicode and close cleanly", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const pipeName = `\\\\.\\pipe\\CodexLidGuard.${randomBytes(8).toString("hex").toUpperCase()}`;
+  const expected = { ok: true, message: "Ready \u2014 caf\u00e9", activeTurns: 1, isGuarding: true, lidState: "open", sleepPending: false };
+  const reply = Buffer.from(`${JSON.stringify(expected)}\n`);
+  const split = reply.indexOf(Buffer.from("\u2014")) + 1;
+  const server = net.createServer((socket) => {
+    socket.once("data", () => {
+      socket.write(reply.subarray(0, split));
+      setTimeout(() => socket.end(reply.subarray(split)), 10);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(pipeName, resolve));
+  try {
+    assert.deepEqual(await preAcquireGuardian(pipeName, "0.1.48", "test", "pending"), expected);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("invalid and oversized guardian replies reject and release the connection", {
+  skip: process.platform !== "win32"
+}, async () => {
+  for (const [reply, error] of [
+    ["invalid json\n", /JSON|Unexpected token/iu],
+    ["unfinished", /without a complete response/u],
+    [`${"x".repeat(1_048_577)}\n`, /size limit/u]
+  ] as const) {
+    const pipeName = `\\\\.\\pipe\\CodexLidGuard.${randomBytes(8).toString("hex").toUpperCase()}`;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on("error", () => undefined);
+      socket.on("close", () => sockets.delete(socket));
+      socket.once("data", () => socket.end(reply));
+    });
+    await new Promise<void>((resolve) => server.listen(pipeName, resolve));
+    try {
+      await assert.rejects(warmGuardianPipe(pipeName, "0.1.48"), error);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(sockets.size, 0);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+});
+
 test("reads an atomic guardian status snapshot", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "codex-lid-guard-test-"));
   const statusPath = path.join(directory, "status.json");
@@ -123,6 +193,13 @@ test("writes the background-only alert setting for the native guardian", async (
     const settings = JSON.parse(await readFile(settingsPath, "utf8"));
     assert.equal(settings.alertSounds, true);
     assert.equal(settings.alertSoundsOnlyWhenUnfocused, true);
+    assert.equal(settings.messageOverlay, false);
+    await writeHelperSettings(settingsPath, true, true, true, 10, true, 20, 900, "top-left");
+    const updated = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(updated.messageOverlay, true);
+    assert.equal(updated.overlayOpacity, 30);
+    assert.equal(updated.overlayDurationSeconds, 600);
+    assert.equal(updated.overlayPosition, "top-left");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

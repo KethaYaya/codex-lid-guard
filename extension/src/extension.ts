@@ -19,6 +19,7 @@ import {
   isGuardianPipeName,
   preAcquireGuardian,
   preAcquireHelper,
+  previewHelperOverlay,
   readHelperStatus,
   runHelper,
   showHelperMenu,
@@ -92,6 +93,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Keep the old command ID working for users with an existing keybinding.
     vscode.commands.registerCommand("codexLidGuard.finishSetup", () => configureOptionalHooks(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.testAlertSounds", () => testAlertSounds(context)),
+    vscode.commands.registerCommand("codexLidGuard.toggleMessageOverlay", async () => {
+      await configuration().update("messageOverlay", !configuration().get<boolean>("messageOverlay", false), vscode.ConfigurationTarget.Global);
+    }),
+    vscode.commands.registerCommand("codexLidGuard.previewMessageOverlay", async () => {
+      try { await previewHelperOverlay(helperPath(context)); }
+      catch (error) { void vscode.window.showErrorMessage(`Could not preview the message overlay: ${messageOf(error)}`); }
+    }),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (!event.affectsConfiguration("codexLidGuard") || updatingEnabledSetting) {
         return;
@@ -156,6 +164,7 @@ async function enable(
     await syncSettings();
     const hooksChanged = await syncOptionalHooks(context, helper);
     await setEnabledSetting(true);
+    await syncSettings();
     const status = await refreshStatus(context, statusBar);
     if (isGuardianPipeName(status.pipeName)) {
       await warmGuardianPipe(
@@ -332,6 +341,7 @@ async function disable(
       await setEnabledSetting(false);
       void vscode.window.showInformationMessage("Codex Lid Guard disabled and the saved Windows power settings were restored.");
     }
+    await syncSettings();
     setDisabled(statusBar);
   } catch (error) {
     setError(statusBar, messageOf(error));
@@ -790,7 +800,11 @@ async function syncSettings(): Promise<void> {
     config.get<boolean>("alertSounds", true),
     config.get<boolean>("alertSoundsOnlyWhenUnfocused", true),
     config.get<boolean>("sleepWhenLidClosed", true),
-    config.get<number>("sleepDelaySeconds", 10)
+    config.get<number>("sleepDelaySeconds", 10),
+    config.get<boolean>("enabled", true) && config.get<boolean>("messageOverlay", false),
+    config.get<number>("overlayOpacity", 82),
+    config.get<number>("overlayDurationSeconds", 90),
+    config.get<string>("overlayPosition", "bottom-right")
   );
 }
 

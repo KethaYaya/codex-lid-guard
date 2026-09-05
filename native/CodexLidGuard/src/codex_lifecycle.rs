@@ -60,6 +60,12 @@ pub fn recent_sessions(limit: usize) -> Vec<RecentSessionInfo> {
         .unwrap_or_default()
 }
 
+pub fn session_name(session_id: &str) -> Option<String> {
+    open_read_only(&paths::codex_state_database()).ok().and_then(|connection| {
+        connection.query_row("SELECT NULLIF(name, '') FROM threads WHERE id = ?1", [session_id], |row| row.get(0)).ok().flatten()
+    })
+}
+
 fn start_at(
     logs_path: PathBuf,
     state_path: PathBuf,

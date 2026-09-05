@@ -1,0 +1,25 @@
+{
+  "version": "0.1.54",
+  "nativeChecksPassed": 108,
+  "nativeOverlayChecksRerun": 22,
+  "nativeGuiScenarios": 3,
+  "nativePipeRequests": 50,
+  "nativePipeFailures": 0,
+  "extensionValidation": "TypeScript compiled during packaging; extension logic unchanged",
+  "covered": [
+    "successful double-click immediately hides only its overlay",
+    "failed opening preserves the overlay",
+    "stale cached frames cannot resurrect an opened chat",
+    "other chat tabs remain visible and stationary",
+    "later focus loss restores the opened chat as a tab",
+    "missing/stale view metadata is reconciled with explicit opens",
+    "a new view event for the same previously logged chat releases suppression",
+    "unrelated log growth does not change the view revision"
+  ],
+  "testNote": "The initial full run passed 106 tests; two UI tests were affected by another live overlay covering a hit-test coordinate and the resulting class-cleanup cascade. Hit testing now queries the owned HWND native region directly. All 22 overlay tests then passed, completing coverage of the 108 native checks.",
+  "packagePayloadVerified": true,
+  "helperSha256": "72f6e427807691e0e833a57b42f5ed99d26298536227b9624f25fc00cf6aa325",
+  "installedPayloadVerified": true,
+  "clippy": "All targets passed with warnings denied",
+  "activation": "queued until guardian is idle"
+}

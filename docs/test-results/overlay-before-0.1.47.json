@@ -1,0 +1,62 @@
+{
+  "helper": "C:\\Users\\lenzi\\.vscode\\extensions\\kethayaya.codex-lid-guard-0.1.47\\bin\\win-x64\\CodexLidGuard.exe",
+  "pid": 40192,
+  "phases": {
+    "expanded_busy": {
+      "seconds": 4.022,
+      "cpu_percent_one_core": 0.0,
+      "private_bytes_start": 2252800,
+      "private_bytes_end": 2252800,
+      "working_set_max": 16474112,
+      "gdi_min": 6,
+      "gdi_max": 6,
+      "user_min": 5,
+      "user_max": 5
+    },
+    "collapsed_busy": {
+      "seconds": 5.024,
+      "cpu_percent_one_core": 0.311,
+      "private_bytes_start": 2252800,
+      "private_bytes_end": 2252800,
+      "working_set_max": 16506880,
+      "gdi_min": 7,
+      "gdi_max": 7,
+      "user_min": 6,
+      "user_max": 6
+    },
+    "expanded_complete": {
+      "seconds": 5.027,
+      "cpu_percent_one_core": 2.797,
+      "private_bytes_start": 2265088,
+      "private_bytes_end": 2265088,
+      "working_set_max": 16527360,
+      "gdi_min": 7,
+      "gdi_max": 8,
+      "user_min": 6,
+      "user_max": 6
+    },
+    "collapsed_complete": {
+      "seconds": 4.021,
+      "cpu_percent_one_core": 0.777,
+      "private_bytes_start": 2265088,
+      "private_bytes_end": 2265088,
+      "working_set_max": 16527360,
+      "gdi_min": 7,
+      "gdi_max": 8,
+      "user_min": 6,
+      "user_max": 6
+    },
+    "reopened_complete": {
+      "seconds": 3.017,
+      "cpu_percent_one_core": 2.59,
+      "private_bytes_start": 2265088,
+      "private_bytes_end": 2265088,
+      "working_set_max": 16527360,
+      "gdi_min": 7,
+      "gdi_max": 7,
+      "user_min": 6,
+      "user_max": 6
+    }
+  },
+  "duration_seconds": 35.413
+}

@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
+import { createConnection } from "node:net";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
@@ -208,16 +210,34 @@ export async function writeHelperSettings(
   alertSounds: boolean,
   alertSoundsOnlyWhenUnfocused: boolean,
   sleepWhenLidClosed: boolean,
-  sleepDelaySeconds: number
+  sleepDelaySeconds: number,
+  messageOverlay = false,
+  overlayOpacity = 82,
+  overlayDurationSeconds = 90,
+  overlayPosition = "bottom-right"
 ): Promise<void> {
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
   const settings = {
+    messageOverlay,
+    overlayOpacity: Math.round(Math.max(30, Math.min(100, overlayOpacity))),
+    overlayDurationSeconds: Math.round(Math.max(10, Math.min(600, overlayDurationSeconds))),
+    overlayPosition,
     alertSounds,
     alertSoundsOnlyWhenUnfocused,
     sleepWhenLidClosed,
     sleepDelaySeconds: Math.max(0, Math.min(300, sleepDelaySeconds))
   };
-  await fs.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  const temporaryPath = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    await fs.rename(temporaryPath, settingsPath);
+  } finally {
+    await fs.unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+export async function previewHelperOverlay(helperPath: string): Promise<void> {
+  await execFileAsync(helperPath, ["overlay-preview"], { windowsHide: true, timeout: 45000 });
 }
 
 export async function readHelperStatus(statusPath: string): Promise<GuardStatus> {
@@ -229,48 +249,50 @@ async function sendGuardianRequest(
   pipeName: string,
   request: Record<string, string | undefined>
 ): Promise<GuardStatus> {
-  const exchange = async (): Promise<GuardStatus> => {
-    const handle = await fs.open(pipeName, "r+");
-    try {
-      await handle.write(`${JSON.stringify(request)}\n`, null, "utf8");
-      const chunks: Buffer[] = [];
-      let totalBytes = 0;
-      while (totalBytes <= 1_048_576) {
-        const buffer = Buffer.allocUnsafe(4096);
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
-        if (bytesRead === 0) {
-          break;
-        }
-        const chunk = buffer.subarray(0, bytesRead);
-        chunks.push(chunk);
-        totalBytes += bytesRead;
-        const response = Buffer.concat(chunks, totalBytes);
-        const newline = response.indexOf(0x0a);
-        if (newline >= 0) {
-          return JSON.parse(response.subarray(0, newline).toString("utf8")) as GuardStatus;
+  return new Promise<GuardStatus>((resolve, reject) => {
+    // Destroying a socket cancels a pending Windows pipe read on timeout.
+    const socket = createConnection(pipeName);
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+    const finish = (error?: Error, status?: GuardStatus): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(status!);
+    };
+    const timeout = setTimeout(
+      () => finish(new Error("The guardian pipe did not respond in time.")),
+      DIRECT_ACQUIRE_TIMEOUT_MS
+    );
+    timeout.unref();
+    socket.once("connect", () => {
+      // Arm libuv's pipe reader before the native server can reply and disconnect.
+      setImmediate(() => {
+        if (!settled) socket.write(`${JSON.stringify(request)}\n`);
+      });
+    });
+    socket.once("error", finish);
+    socket.once("close", () => finish(new Error("The guardian pipe closed without a complete response.")));
+    socket.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      const newline = chunk.indexOf(0x0a);
+      const part = newline >= 0 ? chunk.subarray(0, newline) : chunk;
+      totalBytes += part.length;
+      if (totalBytes > 1_048_576) {
+        finish(new Error("The guardian pipe response exceeded the size limit."));
+        return;
+      }
+      chunks.push(part);
+      if (newline >= 0) {
+        try {
+          finish(undefined, JSON.parse(Buffer.concat(chunks, totalBytes).toString("utf8")) as GuardStatus);
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
         }
       }
-      throw new Error("The guardian pipe closed without a complete response.");
-    } finally {
-      await handle.close().catch(() => undefined);
-    }
-  };
-
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      exchange(),
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error("The guardian pipe did not respond in time.")),
-          DIRECT_ACQUIRE_TIMEOUT_MS
-        );
-        timeout.unref();
-      })
-    ]);
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-  }
+    });
+  });
 }

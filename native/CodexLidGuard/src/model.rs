@@ -82,6 +82,10 @@ impl Default for GuardResponse {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GuardSettings {
+    pub message_overlay: bool,
+    pub overlay_opacity: u8,
+    pub overlay_duration_seconds: u64,
+    pub overlay_position: String,
     pub alert_sounds: bool,
     pub alert_sounds_only_when_unfocused: bool,
     pub sleep_when_lid_closed: bool,
@@ -91,6 +95,10 @@ pub struct GuardSettings {
 impl Default for GuardSettings {
     fn default() -> Self {
         Self {
+            message_overlay: false,
+            overlay_opacity: 82,
+            overlay_duration_seconds: 90,
+            overlay_position: "bottom-right".into(),
             alert_sounds: true,
             alert_sounds_only_when_unfocused: true,
             sleep_when_lid_closed: true,
@@ -120,6 +128,8 @@ impl GuardSettings {
     }
 
     pub fn clamp(mut self) -> Self {
+        self.overlay_opacity = self.overlay_opacity.clamp(30, 100);
+        self.overlay_duration_seconds = self.overlay_duration_seconds.clamp(10, 600);
         self.sleep_delay_seconds = self.sleep_delay_seconds.min(300);
         self
     }

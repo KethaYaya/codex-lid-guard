@@ -1,0 +1,18 @@
+{
+  "version": "0.1.48",
+  "rustReleaseTests": 92,
+  "extensionTests": 36,
+  "clippyWarnings": 0,
+  "nativeTabLatencyMs": 16.2564,
+  "nativeMessageLatencyMs": 538.851,
+  "windowsDoubleClickIntervalMs": 500,
+  "nativePipeRequests": 50,
+  "nativePipeFailures": 0,
+  "nativePipeMedianMs": 0.095,
+  "nativePipeMaxMs": 2.5335,
+  "lifecycleSamples": 128,
+  "lifecycleMedianMs": 1.7547,
+  "lifecycleP95Ms": 1.9409,
+  "extensionPreviewSeconds": 35.325,
+  "helperSha256": "a525ed5cd416f50a0d3461ff6f787cb687ba4e077b3407fa56c32e4db6090f85"
+}

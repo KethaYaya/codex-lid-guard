@@ -6,10 +6,12 @@ compile_error!("Codex Lid Guard supports Windows only.");
 mod client;
 mod codex_lifecycle;
 mod codex_log;
+mod codex_session_index;
 mod codex_transcript;
 mod daemon;
 mod logging;
 mod model;
+mod overlay;
 mod paths;
 mod sound;
 mod win;
@@ -37,6 +39,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_ascii_lowercase();
     match command.as_str() {
         "daemon" => daemon::run()?,
+        "overlay-preview" => overlay::preview()?,
         "hook" => run_hook(arguments.get(1).map(String::as_str).unwrap_or_default()),
         "sound" => run_sound(
             arguments.get(1).map(String::as_str).unwrap_or_default(),

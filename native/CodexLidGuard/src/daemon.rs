@@ -125,6 +125,17 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     };
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let overlay_state = Arc::clone(&state);
+    crate::overlay::start(move || {
+        overlay_state.lock().map(|state| {
+            state.active_turns.values().map(|turn| crate::overlay::Session {
+                id: turn.info.session_id.clone(),
+                activity: turn.sequence,
+                cwd: turn.info.cwd.clone(),
+                window: turn.origin_window,
+            }).collect()
+        }).unwrap_or_default()
+    });
     let watcher_state = Arc::clone(&state);
     let _watcher = win::LidWatcher::start(move |next| {
         if let Ok(mut state) = watcher_state.lock()

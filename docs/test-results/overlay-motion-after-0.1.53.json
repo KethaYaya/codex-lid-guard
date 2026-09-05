@@ -1,0 +1,65 @@
+{
+  "helper": "C:\\Projects\\CodexLidGuard\\native\\CodexLidGuard\\target\\release\\CodexLidGuard.exe",
+  "scope": "native geometry delivery; six expansions of one of three tabs",
+  "expanded": [
+    {
+      "first_change_ms": 32.98,
+      "changes": 13,
+      "interval_median_ms": 16.033,
+      "interval_p95_ms": 25.695,
+      "final_change_ms": 242.974
+    },
+    {
+      "first_change_ms": 20.764,
+      "changes": 14,
+      "interval_median_ms": 17.038,
+      "interval_p95_ms": 20.732,
+      "final_change_ms": 236.919
+    },
+    {
+      "first_change_ms": 19.142,
+      "changes": 15,
+      "interval_median_ms": 16.417,
+      "interval_p95_ms": 17.646,
+      "final_change_ms": 235.588
+    },
+    {
+      "first_change_ms": 21.016,
+      "changes": 14,
+      "interval_median_ms": 16.524,
+      "interval_p95_ms": 19.743,
+      "final_change_ms": 235.798
+    },
+    {
+      "first_change_ms": 27.112,
+      "changes": 13,
+      "interval_median_ms": 16.327,
+      "interval_p95_ms": 24.55,
+      "final_change_ms": 238.544
+    },
+    {
+      "first_change_ms": 21.408,
+      "changes": 14,
+      "interval_median_ms": 16.718,
+      "interval_p95_ms": 17.268,
+      "final_change_ms": 235.907
+    }
+  ],
+  "cpu_percent_one_core": 10.945,
+  "before": {
+    "at": 614411.9605212,
+    "cpu": 0.28125,
+    "private_bytes": 2961408,
+    "working_set": 14888960,
+    "gdi": 23,
+    "user": 18
+  },
+  "after": {
+    "at": 614419.8119901,
+    "cpu": 1.140625,
+    "private_bytes": 2973696,
+    "working_set": 14917632,
+    "gdi": 23,
+    "user": 18
+  }
+}

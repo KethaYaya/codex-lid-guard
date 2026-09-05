@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -9,10 +10,125 @@ const RECENT_RUNS_PER_PRODUCT: usize = 6;
 const PRODUCT_DATA_DIRECTORIES: &[&str] =
     &["Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"];
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ViewState {
     Active(String),
     Inactive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ViewObservation {
+    pub state: ViewState,
+    pub revision: u64,
+}
+
+#[derive(Default)]
+pub struct ViewStateReader {
+    logs: HashMap<PathBuf, CachedView>,
+    next_revision: u64,
+}
+
+struct CachedView {
+    size: u64,
+    modified: Option<SystemTime>,
+    sessions: HashSet<String>,
+    state: Option<ViewState>,
+    event: Option<String>,
+    revision: u64,
+}
+
+impl ViewStateReader {
+    pub fn for_sessions(&mut self, sessions: &HashSet<String>) -> HashMap<String, ViewObservation> {
+        // No log discovery or reads while another application has focus.
+        if sessions.is_empty() {
+            return HashMap::new();
+        }
+        let Some(app_data) = std::env::var_os("APPDATA") else {
+            return HashMap::new();
+        };
+        self.read_candidates(candidate_logs(Path::new(&app_data)), sessions)
+    }
+
+    fn read_candidates(
+        &mut self,
+        paths: Vec<PathBuf>,
+        sessions: &HashSet<String>,
+    ) -> HashMap<String, ViewObservation> {
+        self.logs.retain(|path, _| paths.contains(path));
+        let mut resolved = HashSet::new();
+        let mut views = HashMap::new();
+        for path in paths {
+            let Ok(metadata) = path.metadata() else {
+                self.logs.remove(&path);
+                continue;
+            };
+            let size = metadata.len();
+            let modified = metadata.modified().ok();
+            let previous = self.logs.get(&path);
+            if previous.is_none_or(|cached| cached.size != size || cached.modified != modified) {
+                let Ok(tail) = read_tail(&path) else {
+                    self.logs.remove(&path);
+                    continue;
+                };
+                let mut observed: HashSet<String> = tail
+                    .lines()
+                    .filter_map(|line| field(line, "conversationId").map(str::to_owned))
+                    .collect();
+                let mut state = parse_latest_view_state(&tail);
+                let mut event = tail
+                    .lines()
+                    .rev()
+                    .find(|line| {
+                        line.contains("thread_stream_view_activity_changed")
+                            && parse_latest_view_state(line).is_some()
+                    })
+                    .map(str::to_owned);
+                if let Some(previous) = previous.filter(|cached| size > cached.size) {
+                    // A long-running chat can push its view event outside the tail.
+                    // Preserve that event while the same log is being appended.
+                    observed.extend(previous.sessions.intersection(sessions).cloned());
+                    state = state.or_else(|| previous.state.clone());
+                    event = event.or_else(|| previous.event.clone());
+                }
+                let revision =
+                    if let Some(previous) = previous.filter(|cached| cached.event == event) {
+                        previous.revision
+                    } else {
+                        self.next_revision += 1;
+                        self.next_revision
+                    };
+                self.logs.insert(
+                    path.clone(),
+                    CachedView {
+                        size,
+                        modified,
+                        sessions: observed,
+                        state,
+                        event,
+                        revision,
+                    },
+                );
+            }
+            let cached = &self.logs[&path];
+            for session in cached.sessions.intersection(sessions) {
+                if resolved.insert(session.clone())
+                    && let Some(state) = &cached.state
+                {
+                    views.insert(
+                        session.clone(),
+                        ViewObservation {
+                            state: state.clone(),
+                            revision: cached.revision,
+                        },
+                    );
+                }
+            }
+            if resolved.len() == sessions.len() {
+                break;
+            }
+        }
+        views
+    }
 }
 
 pub fn view_state_for_session(session_id: &str) -> Option<ViewState> {
@@ -98,6 +214,110 @@ fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn view_revisions_ignore_log_growth_but_detect_a_new_event_for_the_same_chat() {
+        let path =
+            std::env::temp_dir().join(format!("codex-view-revision-{}.log", std::process::id()));
+        fs::write(
+            &path,
+            "time=1 thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        let mut reader = ViewStateReader::default();
+        let sessions = HashSet::from(["one".into()]);
+        let first = reader.read_candidates(vec![path.clone()], &sessions)["one"].clone();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&vec![b'x'; LOG_TAIL_BYTES as usize + 10])
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        assert_eq!(
+            reader.read_candidates(vec![path.clone()], &sessions)["one"],
+            first
+        );
+        file.write_all(
+            b"time=2 thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        let next = reader.read_candidates(vec![path.clone()], &sessions)["one"].clone();
+        assert_eq!(next.state, first.state);
+        assert_ne!(next.revision, first.revision);
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cached_views_follow_chat_switches_long_appends_and_truncation() {
+        let path =
+            std::env::temp_dir().join(format!("codex-view-cache-{}.log", std::process::id()));
+        fs::write(
+            &path,
+            "thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        let sessions = HashSet::from(["one".into(), "two".into()]);
+        let mut reader = ViewStateReader::default();
+        let paths = || vec![path.clone()];
+        assert_eq!(
+            reader.read_candidates(paths(), &sessions)["one"].state,
+            ViewState::Active("one".into())
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&vec![b'x'; LOG_TAIL_BYTES as usize + 10])
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        assert_eq!(
+            reader.read_candidates(paths(), &sessions)["one"].state,
+            ViewState::Active("one".into()),
+            "background logging must not erase a still-current view event"
+        );
+        file.write_all(b"thread_stream_view_activity_changed active=true conversationId=two\n")
+            .unwrap();
+        let views = reader.read_candidates(paths(), &sessions);
+        assert_eq!(views["one"].state, ViewState::Active("two".into()));
+        assert_eq!(views["two"].state, ViewState::Active("two".into()));
+        assert_eq!(reader.read_candidates(paths(), &sessions), views);
+        file.write_all(b"thread_stream_view_activity_changed active=false conversationId=two\n")
+            .unwrap();
+        assert_eq!(
+            reader.read_candidates(paths(), &sessions)["two"].state,
+            ViewState::Inactive
+        );
+        drop(file);
+        fs::write(&path, "new log without any view events\n").unwrap();
+        assert!(reader.read_candidates(paths(), &sessions).is_empty());
+        fs::remove_file(&path).unwrap();
+        assert!(reader.read_candidates(paths(), &sessions).is_empty());
+        assert!(reader.logs.is_empty());
+    }
+
+    #[test]
+    fn newest_matching_log_does_not_fall_back_to_a_stale_active_view() {
+        let directory = std::env::temp_dir();
+        let older = directory.join(format!("codex-view-older-{}.log", std::process::id()));
+        let newer = directory.join(format!("codex-view-newer-{}.log", std::process::id()));
+        fs::write(
+            &older,
+            "thread_stream_view_activity_changed active=true conversationId=one\n",
+        )
+        .unwrap();
+        fs::write(&newer, "turn-start conversationId=one\n").unwrap();
+        let mut reader = ViewStateReader::default();
+        let sessions = HashSet::from(["one".into()]);
+        assert!(
+            reader
+                .read_candidates(vec![newer.clone(), older.clone()], &sessions)
+                .is_empty()
+        );
+        assert_eq!(
+            reader.read_candidates(vec![older.clone()], &sessions)["one"].state,
+            ViewState::Active("one".into())
+        );
+        assert!(!reader.logs.contains_key(&newer));
+        fs::remove_file(newer).unwrap();
+        fs::remove_file(older).unwrap();
+    }
 
     #[test]
     fn latest_active_chat_wins_after_a_view_switch() {
