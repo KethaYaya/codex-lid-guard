@@ -3,7 +3,7 @@ use super::{Frame, SESSION_LIMIT};
 use std::collections::HashSet;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicUsize, Ordering},
     mpsc::{self, SyncSender},
 };
 use std::time::{Duration, Instant};
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 struct Shared {
     collapsed: AtomicU8,
     latest: Mutex<[Frame; SESSION_LIMIT]>,
+    windows: [Arc<AtomicUsize>; SESSION_LIMIT],
 }
 
 pub(super) struct FeedWorker {
@@ -58,6 +59,7 @@ impl FeedWorker {
         let shared = Arc::new(Shared {
             collapsed: AtomicU8::new(0),
             latest: Mutex::new(std::array::from_fn(|_| Frame::empty())),
+            windows: std::array::from_fn(|_| Arc::new(AtomicUsize::new(0))),
         });
         let background = shared.clone();
         let (wake, incoming) = mpsc::sync_channel(1);
@@ -76,6 +78,9 @@ impl FeedWorker {
                 background.collapsed.fetch_and(!changed, Ordering::Relaxed);
                 // One reader and at most three cached frames serve all native windows.
                 *background.latest.lock().unwrap() = slots.clone();
+                for window in &background.windows {
+                    crate::win::OverlayUpdates::notify(window);
+                }
                 if let Err(mpsc::RecvTimeoutError::Disconnected) = incoming
                     .recv_timeout(Duration::from_millis(250).saturating_sub(started.elapsed()))
                 {
@@ -98,6 +103,10 @@ impl FeedWorker {
 }
 
 impl FeedView {
+    pub(super) fn updates(&self) -> crate::win::OverlayUpdates {
+        crate::win::OverlayUpdates::new(self.shared.windows[self.slot].clone(), self.wake.clone())
+    }
+
     pub(super) fn snapshot(&mut self, collapsed: bool) -> Frame {
         let bit = 1 << self.slot;
         let previous = if collapsed {

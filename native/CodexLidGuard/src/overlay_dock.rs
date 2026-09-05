@@ -6,6 +6,54 @@ pub(super) struct DockLayout {
     pub window: Rect,
     pub panel: Option<Rect>,
     pub tab: Option<Rect>,
+    pub flush_right: bool,
+}
+
+pub(super) fn opening_target(from: Rect, work: Rect, dpi: u32) -> Rect {
+    let width = (from.right - from.left).max(1);
+    let height = (from.bottom - from.top).max(1);
+    // Enlarge the exact visible object uniformly. Growing a 28-DIP tab into a
+    // 512-DIP message card stretched its pixels and created a second window zoom.
+    let scale = (1.0 + scale_dip(56, dpi) as f32 / width as f32)
+        .min(1.6)
+        .min((work.right - work.left) as f32 / width as f32)
+        .min((work.bottom - work.top) as f32 / height as f32)
+        .max(1.0);
+    let target_width = (width as f32 * scale).round() as i32;
+    let target_height = (height as f32 * scale).round() as i32;
+    let center_x = (from.left + from.right) / 2;
+    let center_y = (from.top + from.bottom) / 2;
+    let shift_x =
+        ((work.left + work.right) / 2 - center_x).clamp(-scale_dip(40, dpi), scale_dip(40, dpi));
+    let shift_y =
+        ((work.top + work.bottom) / 2 - center_y).clamp(-scale_dip(16, dpi), scale_dip(16, dpi));
+    let left = if from.right == work.right {
+        work.right - target_width // Keep the tab and its expanding image attached to the edge.
+    } else {
+        (center_x + shift_x - target_width / 2).clamp(work.left, work.right - target_width)
+    };
+    let top = (center_y + shift_y - target_height / 2).clamp(work.top, work.bottom - target_height);
+    Rect {
+        left,
+        top,
+        right: left + target_width,
+        bottom: top + target_height,
+    }
+}
+
+pub(super) fn opening_bounds(from: Rect, to: Rect, progress: f32) -> Rect {
+    let p = progress.clamp(0.0, 1.0);
+    let lerp = |a: i32, b: i32| a + ((b - a) as f32 * p).round() as i32;
+    let left = lerp(from.left, to.left);
+    let top = lerp(from.top, to.top);
+    // Round size once, independently from position. Rounding both moving edges
+    // made a growing tab occasionally shrink one pixel for an intervening frame.
+    Rect {
+        left,
+        top,
+        right: left + lerp(from.right - from.left, to.right - to.left),
+        bottom: top + lerp(from.bottom - from.top, to.bottom - to.top),
+    }
 }
 
 // A newly backgrounded message folds into its tab without reflowing its text.
@@ -24,6 +72,7 @@ pub(super) fn arrival_layout(expanded: Rect, work: Rect, progress: f32, dpi: u32
     };
     DockLayout {
         window,
+        flush_right: expanded.right == work.right,
         panel: Some(Rect {
             left: 0,
             top: 0,
@@ -58,6 +107,7 @@ pub(super) fn dock_layout(
     let tab_top = attached_top + ((docked_top - attached_top) as f32 * placement).round() as i32;
     if left >= work.right {
         return DockLayout {
+            flush_right: true,
             window: Rect {
                 left: work.right - tab_width,
                 top: tab_top,
@@ -81,6 +131,7 @@ pub(super) fn dock_layout(
     let window_top = expanded.top.min(tab_top);
     let window_bottom = expanded.bottom.max(tab_top + tab_height);
     DockLayout {
+        flush_right: expanded.right == work.right,
         window: Rect {
             left: window_left,
             top: window_top,
@@ -106,6 +157,41 @@ pub(super) fn dock_layout(
 mod tests {
     use super::super::overlay_bounds;
     use super::*;
+
+    #[test]
+    fn opening_grows_from_the_tab_inside_its_lane_without_a_final_snap() {
+        let work = Rect {
+            left: -1920,
+            top: -100,
+            right: 0,
+            bottom: 220,
+        };
+        for dpi in [96, 144, 192] {
+            let expanded = overlay_bounds(work, scale_dip(440, dpi), 240, 20, "bottom-right");
+            let from = dock_layout(expanded, work, 1.0, dpi, None).window;
+            let target = opening_target(from, work, dpi);
+            let mut previous = from;
+            for step in 0..=100 {
+                let rect = opening_bounds(from, target, step as f32 / 100.0);
+                assert_eq!(
+                    rect.right, work.right,
+                    "restoring must not open a gap beside the tab"
+                );
+                assert!(rect.right - rect.left >= previous.right - previous.left);
+                assert!(rect.bottom - rect.top >= previous.bottom - previous.top);
+                assert!(
+                    rect.left >= work.left
+                        && rect.right <= work.right
+                        && rect.top >= work.top
+                        && rect.bottom <= work.bottom
+                );
+                previous = rect;
+            }
+            assert_eq!(opening_bounds(from, target, 0.0), from);
+            assert_eq!(opening_bounds(from, target, 1.0), target);
+            assert_eq!(opening_bounds(from, target, 0.99999), target);
+        }
+    }
 
     #[test]
     fn arrival_shrinks_continuously_into_the_exact_tab_at_every_display_scale() {

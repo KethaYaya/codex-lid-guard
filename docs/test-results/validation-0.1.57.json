@@ -1,0 +1,41 @@
+{
+  "version": "0.1.57",
+  "nativeChecksPassed": 127,
+  "newChecks": 5,
+  "nativeRestoreFinishMs": [
+    275.3459,
+    273.307
+  ],
+  "pendingOpenSampleWindowMs": 150,
+  "distinctWidthsWhileOpenPending": 10,
+  "distinctOpacitiesWhileOpenPending": 9,
+  "preservedMinimizeResponseMs": 7.2189,
+  "clippy": "all targets passed with warnings denied",
+  "extensionValidation": "TypeScript compiled during packaging; no extension logic changes",
+  "nativePipeIntegration": {
+    "requests": 50,
+    "failures": 0,
+    "medianMs": 0.2836,
+    "maxMs": 8.1184
+  },
+  "coverage": [
+    "async restore keeps drawing while activation is pending",
+    "success hides only the selected overlay after fading",
+    "failed open restores notification and controls",
+    "invalid window fails without acknowledging a chat",
+    "disconnected activation result is failure",
+    "queued mouse and keyboard input cannot reopen during animation",
+    "click-through extended style",
+    "growth stays in the display lane across DPI scales",
+    "reduced motion skips decorative animation",
+    "stale frames do not replay opened overlays",
+    "focus loss restores the minimized tab",
+    "existing mouse, keyboard, minimize, hover, completion and pipe tests"
+  ],
+  "measurementLimit": "Measures owned native geometry and opacity, not physical display presentation. Real editor windows were not opened by tests. Windows renders its own maximize animation concurrently with the overlay transition.",
+  "packagePayloadVerified": true,
+  "installedPayloadVerified": true,
+  "helperSha256": "67053c5066d1efc04a27c70e07271abc58b033b742e4785d639ec8c83150abff",
+  "activation": "queued until the live guardian is idle",
+  "activationWorkerPid": 44716
+}

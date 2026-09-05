@@ -53,6 +53,8 @@ pub struct Frame {
     pub attention: bool,
     // A stable token: a new tab or a focus-loss edge requests docking once.
     pub dock_request: u64,
+    // Keep the focused chat cached so a native minimize event can reveal it immediately.
+    pub hidden_in_focus: bool,
 }
 
 impl Frame {
@@ -67,6 +69,7 @@ impl Frame {
             busy: false,
             attention: false,
             dock_request: 0,
+            hidden_in_focus: false,
         }
     }
 }
@@ -352,7 +355,11 @@ impl Feed {
             |id| views.get(id).map(|view| view.state.clone()),
         );
         self.trim_previews(settings, now);
-        self.visible_frames(settings, win::is_editor_window, &viewed)
+        let mut frames = self.visible_frames(settings, win::is_editor_window, &HashSet::new());
+        for frame in &mut frames {
+            frame.hidden_in_focus = frame.session_id.as_ref().is_some_and(|id| viewed.contains(id));
+        }
+        frames
     }
 
     fn acknowledge(&mut self, target: &CardTarget, viewed: Instant) {
@@ -503,6 +510,7 @@ impl Feed {
                     position: settings.overlay_position.clone(),
                     close: false,
                     dock_request: self.focus.request(window),
+                    hidden_in_focus: false,
                 }
             })
             .collect()
@@ -550,21 +558,16 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) {
         });
         for slot in 0..SESSION_LIMIT {
             let mut view = worker.view(slot);
+            let updates = view.updates();
             let viewed = viewed.clone();
             let shortcuts = shortcuts.as_ref().map(|service| service.publisher(slot));
             std::thread::spawn(move || {
                 let result = win::run_session_overlay(
                     slot,
                     |collapsed| view.snapshot(collapsed),
-                    move |target| {
-                        let at = Instant::now();
-                        let opened = win::activate_overlay_target(target);
-                        if opened {
-                            let _ = viewed.send((target.clone(), at));
-                        }
-                        opened
-                    },
+                    move |target: &CardTarget, window| win::OverlayOpen::activate(target.clone(), viewed.clone(), window),
                     shortcuts,
+                    Some(updates),
                 );
                 if let Err(cause) = result {
                     logging::write(format!("Message overlay stopped: {cause}"));
@@ -608,8 +611,9 @@ pub fn preview() -> io::Result<()> {
                     busy: !completed,
                     attention: completed,
                     dock_request: 1,
+                    hidden_in_focus: false,
                 }
-            }, |_| false, Some(shortcuts))
+            }, |_, _| false.into(), Some(shortcuts), None)
         }));
     }
     for thread in threads {

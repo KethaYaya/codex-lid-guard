@@ -1,18 +1,25 @@
 //! A layered, topmost tool window. Only explicit card clicks activate an editor.
 use super::overlay_shortcuts::{ShortcutPublisher, WM_OVERLAY_SHORTCUT};
+use super::overlay_window_events::{WindowEvents, Transitions, WM_FRAME_READY, WM_FOREGROUND, WM_MINIMIZE, WM_RESTORE, WM_OPEN_STARTED, event_instant};
 use super::*;
 use crate::overlay::{Card, CardTarget, Frame};
 use std::time::Instant;
 
 #[path = "overlay_motion.rs"]
 mod overlay_motion;
-use overlay_motion::{AnimatedRow, DockMotion, Motion, MotionClock};
+use overlay_motion::{AnimatedRow, DockMotion, Motion, MotionClock, OpenMotion};
 #[path = "overlay_dock.rs"]
 mod overlay_dock;
-use overlay_dock::{DockLayout, arrival_layout, dock_layout};
+use overlay_dock::{DockLayout, arrival_layout, dock_layout, opening_bounds, opening_target};
+#[path = "overlay_open_surface.rs"]
+mod overlay_open_surface;
+use overlay_open_surface::{FrameSurface, OpenSurface, reset_layered_mode};
 #[path = "overlay_frame_timer.rs"]
 mod overlay_frame_timer;
 use overlay_frame_timer::FrameTimer;
+#[cfg(test)]
+#[path = "overlay_open_tests.rs"]
+mod open_tests;
 
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -153,6 +160,21 @@ struct OverlayState {
     panel_size: (i32, i32),
     shortcut_code: Option<[u8; 2]>,
     shortcut_token: usize,
+    restoring: bool,
+    compositor: Option<FrameSurface>,
+    render_alpha: u8,
+}
+
+struct Opening {
+    target: CardTarget,
+    request: OverlayOpen,
+    result: Option<bool>,
+    started: Instant,
+    motion: OpenMotion,
+    from: Rect,
+    to: Rect,
+    alpha: u8,
+    surface: Option<OpenSurface>,
 }
 
 struct HoverOpen {
@@ -397,8 +419,9 @@ fn run_message_overlay(
 pub fn run_session_overlay(
     slot: usize,
     next_frame: impl FnMut(bool) -> Frame,
-    on_click: impl FnMut(&CardTarget) -> bool,
+    on_click: impl FnMut(&CardTarget, usize) -> OverlayOpen,
     shortcuts: Option<ShortcutPublisher>,
+    updates: Option<OverlayUpdates>,
 ) -> io::Result<()> {
     assert!(slot < crate::overlay::SESSION_LIMIT);
     run_overlay_inner(
@@ -407,6 +430,7 @@ pub fn run_session_overlay(
         on_click,
         pointer_position,
         shortcuts,
+        updates,
     )
 }
 
@@ -414,18 +438,19 @@ pub fn run_session_overlay(
 fn run_overlay(
     slot: Option<usize>,
     next_frame: impl FnMut(bool) -> Frame,
-    on_click: impl FnMut(&CardTarget) -> bool,
+    mut on_click: impl FnMut(&CardTarget) -> bool,
     pointer: impl FnMut() -> Option<(i32, i32)>,
 ) -> io::Result<()> {
-    run_overlay_inner(slot, next_frame, on_click, pointer, None)
+    run_overlay_inner(slot, next_frame, |target, _| on_click(target).into(), pointer, None, None)
 }
 
 fn run_overlay_inner(
     slot: Option<usize>,
     mut next_frame: impl FnMut(bool) -> Frame,
-    mut on_click: impl FnMut(&CardTarget) -> bool,
+    mut on_click: impl FnMut(&CardTarget, usize) -> OverlayOpen,
     mut pointer: impl FnMut() -> Option<(i32, i32)>,
     mut shortcuts: Option<ShortcutPublisher>,
+    updates: Option<OverlayUpdates>,
 ) -> io::Result<()> {
     unsafe {
         SetThreadDpiAwarenessContext(-4isize as Handle);
@@ -496,6 +521,9 @@ fn run_overlay_inner(
             panel_size: (1, 1),
             shortcut_code: None,
             shortcut_token: 0,
+            restoring: false,
+            compositor: None,
+            render_alpha: 255,
         });
         SetWindowLongPtrW(
             window,
@@ -503,7 +531,14 @@ fn run_overlay_inner(
             (&mut *state as *mut OverlayState) as isize,
         );
         let result = (|| {
-            if SetTimer(window, 1, 250, null()) == 0 {
+            let _events = if let Some(updates) = &updates {
+                updates.attach(window);
+                match WindowEvents::new(window) {
+                    Ok(events) => Some(events),
+                    Err(cause) => { logging::write(format!("Overlay window events unavailable: {cause}")); None }
+                }
+            } else { None };
+            if SetTimer(window, 1, if updates.is_some() { 1000 } else { 250 }, null()) == 0 {
                 return Err(error("Start overlay timer"));
             }
             let mut previous_bounds = None;
@@ -528,9 +563,43 @@ fn run_overlay_inner(
             let mut dock_request = 0;
             let mut arrival = None;
             let mut opened_overlay: Option<OpenedOverlay> = None;
+            let mut opening: Option<Opening> = None;
+            let mut transitions = Transitions::new(GetForegroundWindow() as usize as u64);
+            let mut last_transition = None;
+            let mut awaiting_dock_request = None;
+            let mut hidden_in_focus = false;
             loop {
                 let real = Instant::now();
-                let now = clock.advance(real, state.clicks.frozen() || state.tab_pressed);
+                let now = clock.advance(real, state.clicks.frozen() || state.tab_pressed || opening.is_some());
+                if let Some(open) = &mut opening {
+                    if open.result.is_none() { open.result = open.request.poll(); }
+                    // Fallback for already focused editors or missing native events.
+                    if open.result == Some(true) { open.motion.begin(real); }
+                    if open.result.is_none() && real.duration_since(open.started) >= Duration::from_secs(3) {
+                        open.result = Some(false);
+                    }
+                    if open.result == Some(false) || (open.result == Some(true) && open.motion.finished(real)) {
+                        if open.result == Some(true) {
+                            opened_overlay = Some(OpenedOverlay { target: open.target.clone(), dock_request });
+                            state.cards.clear();
+                            state.rows.clear();
+                            state.heights.clear();
+                            state.layout = None;
+                            motion = Motion::new(now);
+                            ShowWindow(window, 0);
+                            visible = false;
+                        }
+                        reset_layered_mode(window);
+                        opening = None;
+                        state.restoring = false;
+                        state.layout = None; // Recreate the ordinary rounded region on failure too.
+                        SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) & !0x20);
+                        previous_bounds = None;
+                        previous_opacity = None;
+                        state.panel_dirty = true;
+                        refresh = true;
+                    }
+                }
                 let mut activity_changed = false;
                 if !state.clicks.due(real).is_empty() {
                     cancel_hover(window, &mut state);
@@ -545,8 +614,21 @@ fn run_overlay_inner(
                     state.clicks = ClickTracker::default();
                     refresh = true;
                 }
-                if refresh && !closing {
+                if refresh && !closing && opening.is_none() {
                     let mut frame = next_frame(state.collapsed);
+                    let transition = transitions.for_window(frame.window, real);
+                    let new_transition = transition.is_some() && transition != last_transition;
+                    if new_transition {
+                        // Focus/minimize is newer evidence than a cached explicit-open latch.
+                        opened_overlay = None;
+                    }
+                    let hidden = frame.hidden_in_focus && transition.is_none()
+                        && frame.window.is_some_and(is_window_focused);
+                    let became_background = hidden_in_focus && !hidden;
+                    hidden_in_focus = hidden;
+                    if hidden {
+                        frame.cards.clear();
+                    }
                     if let Some(opened) = &opened_overlay {
                         if opened.suppresses(&frame) {
                             // Ignore cached frames until the worker processes the open,
@@ -578,6 +660,7 @@ fn run_overlay_inner(
                         displayed_session = frame.session_id.clone();
                         dock_request = 0;
                         arrival = None;
+                        awaiting_dock_request = None;
                     }
                     closing = frame.close;
                     let mut enabled: Bool = 1;
@@ -595,10 +678,20 @@ fn run_overlay_inner(
                     state.busy = frame.busy;
                     state.attention = frame.attention;
                     state.animate = animate;
-                    let auto_dock = frame.dock_request != 0 && dock_request != frame.dock_request;
+                    // The event already docked the cached frame. A later reader epoch is
+                    // its acknowledgement, not a second minimize that cancels a hover.
+                    let confirms_event = awaiting_dock_request.is_some_and(|(origin, request)|
+                        Some(origin) == frame.window && request != frame.dock_request);
+                    if confirms_event { awaiting_dock_request = None; }
+                    let auto_dock = new_transition || (became_background && frame.dock_request != 0) || (!confirms_event
+                        && frame.dock_request != 0 && dock_request != frame.dock_request);
+                    if new_transition {
+                        last_transition = transition;
+                        awaiting_dock_request = frame.window.map(|origin| (origin, frame.dock_request));
+                    }
                     dock_request = frame.dock_request;
                     if auto_dock {
-                        let already_tucked = state.collapsed && dock.sample(now).0 == 1.0;
+                        let already_tucked = state.collapsed && dock.sample(now).0 == 1.0 && arrival.is_none();
                         cancel_hover(window, &mut state);
                         if state.clicks.pressed.is_some() || state.tab_pressed {
                             ReleaseCapture();
@@ -609,7 +702,15 @@ fn run_overlay_inner(
                         state.collapsed = true;
                         dock.target(true, now, false);
                         dock_center = None;
-                        arrival = (animate && !already_tucked).then_some(now);
+                        // Start at the OS event time even if delivery or the reader was late.
+                        // A finished system transition must not replay a late full-size panel.
+                        let start = transition.map_or(now, |event|
+                            now.checked_sub(real.saturating_duration_since(event.started)).unwrap_or(now));
+                        // SPI_GETANIMATION is separate from client-area animations.
+                        let mut animation = [8u32, 1]; // ANIMATIONINFO { cbSize, iMinAnimate }
+                        let minimize_animated = SystemParametersInfoW(0x0048, animation[0],
+                            animation.as_mut_ptr().cast(), 0) == 0 || animation[1] != 0;
+                        arrival = (animate && minimize_animated && !already_tucked).then_some(start);
                     }
                     // Freeze content and its anchor between the first and second click.
                     if !frame.cards.is_empty() && state.clicks.frozen() {
@@ -743,7 +844,7 @@ fn run_overlay_inner(
                 state.panel_dirty |= repaint;
                 state.rows = rows;
                 if let Some(shortcuts) = &mut shortcuts {
-                    if !closing && !state.rows.is_empty() && !state.cards.is_empty() {
+                    if !closing && !state.restoring && !state.rows.is_empty() && !state.cards.is_empty() {
                         let card = &state.cards[0];
                         let (code, token) = shortcuts.publish(
                             window as usize,
@@ -773,8 +874,31 @@ fn run_overlay_inner(
                         ShowWindow(window, 0);
                         visible = false;
                     }
+                    if state.compositor.take().is_some() {
+                        // Hide before resetting alpha presentation to avoid flashing
+                        // the final transparent frame at full opacity.
+                        reset_layered_mode(window);
+                        previous_opacity = None;
+                        previous_bounds = None;
+                    }
                     if closing {
                         break;
+                    }
+                } else if let Some(open) = &mut opening {
+                    if let Some(surface) = &mut open.surface {
+                        let (growth, fade, _) = open.motion.sample(real);
+                        let bounds = opening_bounds(open.from, open.to, growth);
+                        let alpha = (open.alpha as f32 * fade).round() as u8;
+                        if let Err(cause) = surface.present(window, bounds, alpha) {
+                            // Animation failure must never interrupt editor activation.
+                            logging::write(format!("Could not animate editor restore: {cause}"));
+                            reset_layered_mode(window);
+                            ShowWindow(window, 0);
+                            visible = false;
+                            open.surface = None;
+                            open.motion = OpenMotion::new(real, false);
+                            PostMessageW(window, WM_FRAME_READY, 0, 0);
+                        }
                     }
                 } else {
                     let dpi = state.dpi.max(96);
@@ -803,47 +927,75 @@ fn run_overlay_inner(
                     let window_height = bounds.bottom - bounds.top;
                     let alpha =
                         (panel * (opacity.clamp(30, 100) as u16 * 255 / 100) as f32).round() as u8;
-                    if previous_opacity != Some(alpha) {
-                        if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) == 0 {
-                            return Err(error("Set overlay opacity"));
+                    let compositor_started = state.compositor.is_none() && docking && arrival.is_none();
+                    if compositor_started {
+                        state.compositor = Some(FrameSurface::new(
+                            window_width.max(width + scale_dip(28, dpi)),
+                            window_height.max(work.bottom - work.top))?);
+                        reset_layered_mode(window);
+                        SetWindowRgn(window, null_mut(), 0);
+                    }
+                    if state.compositor.is_some() {
+                        // Keep this presentation mode after the slide settles. Switching
+                        // back to a resized WM_PAINT surface added a second visible step.
+                        state.render_alpha = alpha;
+                        if compositor_started || repaint || shape_changed
+                            || previous_opacity != Some(alpha) || previous_bounds != Some(bounds) {
+                            let dc = GetDC(window);
+                            let result = paint_composited_frame(window, dc, &mut state);
+                            ReleaseDC(window, dc);
+                            result?;
                         }
                         previous_opacity = Some(alpha);
-                    }
-                    let bounds_changed = previous_bounds != Some(bounds);
-                    if shape_changed {
-                        apply_overlay_region(window, layout, dpi)?;
-                    }
-                    if bounds_changed || !visible {
-                        if SetWindowPos(
-                            window,
-                            -1isize as Hwnd,
-                            bounds.left,
-                            bounds.top,
-                            window_width,
-                            window_height,
-                            // Every frame is buffered and repainted; old client pixels
-                            // must not be copied to a different origin during resizing.
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS | 0x0008 | 0x0400,
-                        ) == 0
-                        {
-                            return Err(error("Position overlay window"));
-                        }
                         previous_bounds = Some(bounds);
-                        visible = true;
-                    }
-                    if repaint || bounds_changed || shape_changed {
-                        InvalidateRect(window, null(), 0);
-                        UpdateWindow(window);
+                        if !visible {
+                            ShowWindow(window, 4); // SW_SHOWNOACTIVATE; geometry is already presented.
+                            visible = true;
+                        }
+                    } else {
+                        if previous_opacity != Some(alpha) {
+                            if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) == 0 {
+                                return Err(error("Set overlay opacity"));
+                            }
+                            previous_opacity = Some(alpha);
+                        }
+                        let bounds_changed = previous_bounds != Some(bounds);
+                        if shape_changed {
+                            apply_overlay_region(window, layout, dpi)?;
+                        }
+                        if bounds_changed || !visible {
+                            if SetWindowPos(
+                                window,
+                                -1isize as Hwnd,
+                                bounds.left,
+                                bounds.top,
+                                window_width,
+                                window_height,
+                                // Every frame is buffered and repainted; old client pixels
+                                // must not be copied to a different origin during resizing.
+                                SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS | 0x0008 | 0x0400,
+                            ) == 0
+                            {
+                                return Err(error("Position overlay window"));
+                            }
+                            previous_bounds = Some(bounds);
+                            visible = true;
+                        }
+                        if repaint || bounds_changed || shape_changed {
+                            InvalidateRect(window, null(), 0);
+                            UpdateWindow(window);
+                        }
                     }
                 }
                 // Fast ticks only draw animation; transcript/settings polling stays at 250 ms.
-                let needs_timer = (moving || docking || arrival.is_some())
+                let needs_timer = opening.as_ref().map_or(moving || docking || arrival.is_some(),
+                    |open| open.motion.sample(real).2)
                     && !state.clicks.frozen()
                     && !state.tab_pressed;
                 frame_timer.update(needs_timer)?;
                 let needs_activity = needs_activity_timer(
                     visible,
-                    animate && !needs_timer,
+                    animate && !needs_timer && opening.is_none(),
                     state.attention,
                     state.busy,
                     state.layout.is_some_and(|layout| layout.tab.is_some()),
@@ -866,6 +1018,39 @@ fn run_overlay_inner(
                     if message.message == 0x0012 {
                         // WM_QUIT
                         return Ok(());
+                    }
+                    if opening.is_some() && matches!(message.message,
+                        WM_OVERLAY_SHORTCUT | WM_APP_OPEN_OVERLAY_CARD | WM_APP_EXPAND_OVERLAY) {
+                        continue;
+                    }
+                    if message.message == WM_OPEN_STARTED {
+                        if let Some(open) = &mut opening
+                            && open.target.window == message.wparam as u64 {
+                            let at = event_instant(message.lparam as u32);
+                            if at + Duration::from_millis(2) >= open.started { open.motion.begin(at); }
+                        }
+                        refresh = false;
+                        break;
+                    }
+                    if matches!(message.message, WM_FOREGROUND | WM_MINIMIZE | WM_RESTORE) {
+                        if message.message == WM_MINIMIZE && let Some(open) = &mut opening
+                            && open.target.window == message.wparam as u64 {
+                            open.motion = OpenMotion::new(Instant::now(), false);
+                        }
+                        if matches!(message.message, WM_FOREGROUND | WM_RESTORE)
+                            && awaiting_dock_request.is_some_and(|(origin, _)| origin == message.wparam as u64) {
+                            awaiting_dock_request = None;
+                        }
+                        transitions.observe(message.message, message.wparam as u64,
+                            event_instant(message.lparam as u32));
+                        if let Some(updates) = &updates { updates.refresh(); }
+                        // Render cached data immediately; no transcript or metadata I/O here.
+                        refresh = true;
+                        break;
+                    }
+                    if message.message == WM_FRAME_READY {
+                        refresh = true;
+                        break;
                     }
                     if message.message == WM_OVERLAY_SHORTCUT {
                         // Tokens bind queued input to this visible chat, never a replacement lane.
@@ -908,8 +1093,13 @@ fn run_overlay_inner(
                         if message.wparam == 4 {
                             // Paint only: no feed reads, text measurements, motion or window resizing.
                             if activity_timer {
-                                paint_activity(window, &state);
                                 state.panel_dirty = true;
+                                paint_activity(window, &state);
+                                if let Some(layout) = state.layout && let Some(frame) = &mut state.compositor {
+                                    // Reuse the frame with only its indicator pixels changed.
+                                    // Completion/busy ticks must never redraw or lay out text.
+                                    frame.present(window, state.buffer.dc, layout, state.dpi.max(96), state.render_alpha)?;
+                                }
                             }
                             continue;
                         }
@@ -921,32 +1111,55 @@ fn run_overlay_inner(
                         break;
                     }
                     if message.message == WM_APP_OPEN_OVERLAY_CARD {
-                        // Focus changes can re-enter painting, so activate outside the window procedure.
-                        if let Some(target) = state.pending_target.take()
-                            && on_click(&target)
-                        {
-                            opened_overlay = Some(OpenedOverlay {
-                                target,
-                                dock_request,
-                            });
+                        // Preserve the exact last painted pixels before launching activation.
+                        // The worker signals when it is about to restore the real window.
+                        if let Some(target) = state.pending_target.take() && let Some(layout) = state.layout {
+                            let started = Instant::now();
+                            let from = layout.window;
+                            let to = opening_target(from, work, state.dpi.max(96));
+                            let alpha = previous_opacity.unwrap_or(255);
+                            let mut animation = [8u32, 1];
+                            let system_animated = SystemParametersInfoW(0x0048, animation[0],
+                                animation.as_mut_ptr().cast(), 0) == 0 || animation[1] != 0;
+                            let mut surface = if animate && system_animated {
+                                match OpenSurface::capture(state.buffer.dc, layout, state.dpi.max(96), to) {
+                                    Ok(surface) => Some(surface),
+                                    Err(cause) => { logging::write(format!("Could not prepare editor restore animation: {cause}")); None }
+                                }
+                            } else { None };
                             cancel_hover(window, &mut state);
                             state.clicks = ClickTracker::default();
                             KillTimer(window, 3);
-                            state.cards.clear();
-                            state.rows.clear();
-                            state.heights.clear();
-                            state.layout = None;
-                            motion = Motion::new(clock.advance(Instant::now(), false));
+                            state.tab_pressed = false;
+                            ReleaseCapture();
                             arrival = None;
-                            ShowWindow(window, 0);
-                            if let Some(shortcuts) = &mut shortcuts {
-                                shortcuts.clear();
+                            state.compositor = None;
+                            state.restoring = true;
+                            SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
+                            let failed_surface = if let Some(surface) = &mut surface {
+                                reset_layered_mode(window);
+                                SetWindowRgn(window, null_mut(), 0);
+                                if let Err(cause) = surface.present(window, from, alpha) {
+                                    logging::write(format!("Could not start editor restore animation: {cause}"));
+                                    reset_layered_mode(window);
+                                    true
+                                } else { false }
+                            } else { false };
+                            if failed_surface {
+                                surface = None;
+                                ShowWindow(window, 0);
+                                visible = false;
                             }
+                            KillTimer(window, 4);
+                            activity_timer = false;
+                            if let Some(shortcuts) = &mut shortcuts { shortcuts.clear(); }
                             state.shortcut_token = 0;
-                            visible = false;
-                            previous_bounds = None;
+                            let request = on_click(&target, window as usize);
+                            let result = request.poll();
+                            opening = Some(Opening { target, request, result, started, from, to, alpha,
+                                motion: OpenMotion::new(started, surface.is_some()), surface });
                         }
-                        refresh = true;
+                        refresh = false;
                         break;
                     }
                     if message.message == WM_APP_EXPAND_OVERLAY {
@@ -975,6 +1188,7 @@ fn run_overlay_inner(
             }
             Ok(())
         })();
+        if let Some(updates) = &updates { updates.detach(); }
         KillTimer(window, 1);
         KillTimer(window, 2);
         KillTimer(window, 3);
@@ -1036,7 +1250,7 @@ fn tab_at(state: &OverlayState, x: i32, y: i32) -> bool {
         .is_some_and(|tab| x >= tab.left && x < tab.right && y >= tab.top && y < tab.bottom)
 }
 
-unsafe fn apply_overlay_region(window: Hwnd, layout: DockLayout, dpi: u32) -> io::Result<()> {
+unsafe fn create_overlay_region(layout: DockLayout, dpi: u32) -> io::Result<Handle> {
     unsafe {
         let region = CreateRectRgn(0, 0, 0, 0);
         if region.is_null() {
@@ -1053,7 +1267,9 @@ unsafe fn apply_overlay_region(window: Hwnd, layout: DockLayout, dpi: u32) -> io
                             rect.left
                         },
                         rect.top,
-                        rect.right + if tab { radius } else { 1 },
+                        // Extend rounded right corners beyond the clipped display
+                        // edge so a drawer stays attached even in its final pixels.
+                        rect.right + if tab || layout.flush_right { radius } else { 1 },
                         rect.bottom + 1,
                         radius,
                         radius,
@@ -1092,12 +1308,11 @@ unsafe fn apply_overlay_region(window: Hwnd, layout: DockLayout, dpi: u32) -> io
             }
             let combined = CombineRgn(region, region, clip, 1); // RGN_AND
             DeleteObject(clip);
-            if combined == 0 || SetWindowRgn(window, region, 0) == 0 {
-                return Err(error("Apply overlay shape"));
+            if combined == 0 {
+                return Err(error("Clip overlay shape"));
             }
-            Ok(())
+            Ok(region)
         })();
-        // A successful SetWindowRgn transfers ownership to Windows.
         if result.is_err() {
             DeleteObject(region);
         }
@@ -1105,11 +1320,22 @@ unsafe fn apply_overlay_region(window: Hwnd, layout: DockLayout, dpi: u32) -> io
     }
 }
 
+unsafe fn apply_overlay_region(window: Hwnd, layout: DockLayout, dpi: u32) -> io::Result<()> {
+    unsafe {
+        let region = create_overlay_region(layout, dpi)?;
+        if SetWindowRgn(window, region, 0) == 0 {
+            DeleteObject(region);
+            return Err(error("Apply overlay shape"));
+        }
+        Ok(()) // Windows owns the region after a successful SetWindowRgn.
+    }
+}
+
 fn overlay_bounds(work: Rect, width: i32, height: i32, margin: i32, position: &str) -> Rect {
     let left = if position.ends_with("left") {
         work.left + margin
     } else {
-        work.right - width - margin
+        work.right - width
     };
     let top = if position.starts_with("top") {
         work.top + margin
@@ -1170,6 +1396,11 @@ unsafe extern "system" fn window_procedure(
     lparam: Lparam,
 ) -> Lresult {
     unsafe {
+        let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *const OverlayState;
+        if state.as_ref().is_some_and(|state| state.restoring)
+            && matches!(message, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_SETCURSOR) {
+            return 0;
+        }
         match message {
             WM_ERASEBKGND => 1,
             WM_MOUSEACTIVATE => 3, // MA_NOACTIVATE
@@ -1291,108 +1522,22 @@ unsafe extern "system" fn window_procedure(
                 let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 let mut paint: PaintStruct = zeroed();
                 let paint_dc = BeginPaint(window, &mut paint);
+                if state.as_ref().is_some_and(|state| state.restoring) {
+                    // UpdateLayeredWindow owns presentation until the restore ends.
+                    EndPaint(window, &paint);
+                    return 0;
+                }
                 if let Some(state) = state.as_mut() {
-                    let dpi = state.dpi.max(96);
+                    if state.compositor.is_some() {
+                        if let Err(cause) = paint_composited_frame(window, paint_dc, state) {
+                            logging::write(format!("Could not repaint overlay frame: {cause}"));
+                        }
+                        EndPaint(window, &paint);
+                        return 0;
+                    }
                     let mut rect: Rect = zeroed();
                     GetClientRect(window, &mut rect);
-                    // Compose a complete frame offscreen so resizing and fading cannot flicker.
-                    let dc = state.buffer.get(paint_dc, rect.right, rect.bottom);
-                    fill_rectangle(dc, &rect, 0x00241e1a);
-                    SetBkMode(dc, TRANSPARENT);
-                    let old_font = SelectObject(dc, state.font);
-                    if let Some(layout) = state.layout {
-                        if let Some(panel) = layout.panel {
-                            let saved = SaveDC(dc);
-                            IntersectClipRect(dc, panel.left, panel.top, panel.right, panel.bottom);
-                            paint_cached_panel(dc, state, panel);
-                            RestoreDC(dc, saved);
-                        }
-                        if let Some(tab) = layout.tab {
-                            let saved = SaveDC(dc);
-                            IntersectClipRect(dc, tab.left, tab.top, tab.right, tab.bottom);
-                            let full_left = tab.right - scale_dip(28, dpi);
-                            let reveal = (tab.right - tab.left) as f32 / scale_dip(28, dpi) as f32;
-                            fill_rectangle(
-                                dc,
-                                &tab,
-                                fade_color(
-                                    if state.tab_pressed {
-                                        0x005b493b
-                                    } else {
-                                        0x0044352c
-                                    },
-                                    reveal,
-                                ),
-                            );
-                            if state.attention {
-                                paint_completion_dot(
-                                    dc,
-                                    Point {
-                                        x: full_left + scale_dip(14, dpi),
-                                        y: tab.top + scale_dip(8, dpi),
-                                    },
-                                    completion_strength(
-                                        state.activity_started.elapsed(),
-                                        state.animate,
-                                    ) * reveal,
-                                    dpi,
-                                );
-                            }
-                            let mut arrow = Rect {
-                                left: full_left,
-                                top: tab.top + scale_dip(11, dpi),
-                                right: tab.right,
-                                bottom: tab.top + scale_dip(35, dpi),
-                            };
-                            draw_text(
-                                dc,
-                                "\u{2039}",
-                                &mut arrow,
-                                fade_color(0x00f6f2ef, reveal),
-                                DT_SINGLELINE | DT_VCENTER | 1,
-                            );
-                            let mut count = Rect {
-                                left: full_left,
-                                top: tab.top + scale_dip(35, dpi),
-                                right: tab.right,
-                                bottom: tab.bottom - scale_dip(5, dpi),
-                            };
-                            draw_text(
-                                dc,
-                                &state
-                                    .shortcut_code
-                                    .map(|code| String::from_utf8_lossy(&code).into_owned())
-                                    .unwrap_or_else(|| tab_caption(&state.cards)),
-                                &mut count,
-                                fade_color(0x00cab98b, reveal),
-                                DT_SINGLELINE | DT_VCENTER | 1,
-                            );
-                            if state.busy {
-                                for dot in 0..3 {
-                                    let left = full_left + scale_dip(6 + dot as i32 * 6, dpi);
-                                    fill_rectangle(
-                                        dc,
-                                        &Rect {
-                                            left,
-                                            right: left + scale_dip(3, dpi),
-                                            top: tab.bottom - scale_dip(7, dpi),
-                                            bottom: tab.bottom - scale_dip(4, dpi),
-                                        },
-                                        fade_color(
-                                            0x008bdcf6,
-                                            busy_strength(
-                                                state.activity_started.elapsed(),
-                                                dot,
-                                                state.animate,
-                                            ) * reveal,
-                                        ),
-                                    );
-                                }
-                            }
-                            RestoreDC(dc, saved);
-                        }
-                    }
-                    SelectObject(dc, old_font);
+                    let dc = paint_overlay_buffer(paint_dc, state, rect);
                     if dc != paint_dc {
                         BitBlt(
                             paint_dc,
@@ -1412,6 +1557,123 @@ unsafe extern "system" fn window_procedure(
             }
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
+    }
+}
+
+unsafe fn paint_overlay_buffer(reference: Handle, state: &mut OverlayState, rect: Rect) -> Handle {
+    unsafe {
+        let dpi = state.dpi.max(96);
+        // Keep the full panel allocation while clipping its visible slice.
+        let dc = state.buffer.get(reference,
+            rect.right.max(state.panel_size.0 + scale_dip(28, dpi)),
+            rect.bottom.max(state.panel_size.1));
+        fill_rectangle(dc, &rect, 0x00241e1a);
+        SetBkMode(dc, TRANSPARENT);
+        let old_font = SelectObject(dc, state.font);
+        if let Some(layout) = state.layout {
+            if let Some(panel) = layout.panel {
+                let saved = SaveDC(dc);
+                IntersectClipRect(dc, panel.left, panel.top, panel.right, panel.bottom);
+                paint_cached_panel(dc, state, panel);
+                RestoreDC(dc, saved);
+            }
+            if let Some(tab) = layout.tab {
+                let saved = SaveDC(dc);
+                IntersectClipRect(dc, tab.left, tab.top, tab.right, tab.bottom);
+                let full_left = tab.right - scale_dip(28, dpi);
+                let reveal = (tab.right - tab.left) as f32 / scale_dip(28, dpi) as f32;
+                fill_rectangle(
+                    dc,
+                    &tab,
+                    fade_color(
+                        if state.tab_pressed {
+                            0x005b493b
+                        } else {
+                            0x0044352c
+                        },
+                        reveal,
+                    ),
+                );
+                if state.attention {
+                    paint_completion_dot(
+                        dc,
+                        Point {
+                            x: full_left + scale_dip(14, dpi),
+                            y: tab.top + scale_dip(8, dpi),
+                        },
+                        completion_strength(
+                            state.activity_started.elapsed(),
+                            state.animate,
+                        ) * reveal,
+                        dpi,
+                    );
+                }
+                let mut arrow = Rect {
+                    left: full_left,
+                    top: tab.top + scale_dip(11, dpi),
+                    right: tab.right,
+                    bottom: tab.top + scale_dip(35, dpi),
+                };
+                draw_text(
+                    dc,
+                    "\u{2039}",
+                    &mut arrow,
+                    fade_color(0x00f6f2ef, reveal),
+                    DT_SINGLELINE | DT_VCENTER | 1,
+                );
+                let mut count = Rect {
+                    left: full_left,
+                    top: tab.top + scale_dip(35, dpi),
+                    right: tab.right,
+                    bottom: tab.bottom - scale_dip(5, dpi),
+                };
+                draw_text(
+                    dc,
+                    &state
+                        .shortcut_code
+                        .map(|code| String::from_utf8_lossy(&code).into_owned())
+                        .unwrap_or_else(|| tab_caption(&state.cards)),
+                    &mut count,
+                    fade_color(0x00cab98b, reveal),
+                    DT_SINGLELINE | DT_VCENTER | 1,
+                );
+                if state.busy {
+                    for dot in 0..3 {
+                        let left = full_left + scale_dip(6 + dot as i32 * 6, dpi);
+                        fill_rectangle(
+                            dc,
+                            &Rect {
+                                left,
+                                right: left + scale_dip(3, dpi),
+                                top: tab.bottom - scale_dip(7, dpi),
+                                bottom: tab.bottom - scale_dip(4, dpi),
+                            },
+                            fade_color(
+                                0x008bdcf6,
+                                busy_strength(
+                                    state.activity_started.elapsed(),
+                                    dot,
+                                    state.animate,
+                                ) * reveal,
+                            ),
+                        );
+                    }
+                }
+                RestoreDC(dc, saved);
+            }
+        }
+        SelectObject(dc, old_font);
+        dc
+    }
+}
+
+unsafe fn paint_composited_frame(window: Hwnd, reference: Handle, state: &mut OverlayState) -> io::Result<()> {
+    unsafe {
+        let Some(layout) = state.layout else { return Ok(()); };
+        let rect = Rect { left: 0, top: 0, right: layout.window.right - layout.window.left,
+            bottom: layout.window.bottom - layout.window.top };
+        let cached = paint_overlay_buffer(reference, state, rect);
+        state.compositor.as_mut().unwrap().present(window, cached, layout, state.dpi.max(96), state.render_alpha)
     }
 }
 
@@ -1656,8 +1918,9 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
             UpdateWindow(window);
             return;
         }
-        let destination = GetDC(window);
-        if destination.is_null() {
+        let composited = state.compositor.is_some();
+        let destination = if composited { null_mut() } else { GetDC(window) };
+        if !composited && destination.is_null() {
             return;
         }
         let mut client: Rect = zeroed();
@@ -1684,7 +1947,7 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
             fill_rectangle(dc, &dirty, background);
             draw(dc);
             RestoreDC(dc, saved);
-            BitBlt(
+            if !composited { BitBlt(
                 destination,
                 dirty.left,
                 dirty.top,
@@ -1694,7 +1957,7 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
                 dirty.left,
                 dirty.top,
                 0x00cc0020,
-            );
+            ); }
         };
         if let Some(panel) = layout.panel {
             let inset = scale_dip(18, dpi);
@@ -1784,7 +2047,7 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
                 }
             }
         }
-        ReleaseDC(window, destination);
+        if !destination.is_null() { ReleaseDC(window, destination); }
     }
 }
 
@@ -2018,6 +2281,98 @@ mod tests {
 
     #[test]
     #[ignore = "displays an owned overlay; run explicitly on an interactive desktop"]
+    fn native_minimize_uses_cached_hidden_chat_and_preserves_hover_after_reader_catches_up() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        let origin = unsafe { GetForegroundWindow() } as usize;
+        assert_ne!(origin, 0);
+        let destination = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let request = Arc::new(AtomicU64::new(1));
+        let (wake, _reader) = mpsc::sync_channel(1);
+        let focused_chat = Arc::new(AtomicBool::new(true));
+        let updates = OverlayUpdates::new(destination.clone(), wake);
+        let ui = {
+            let stop = stop.clone();
+            let request = request.clone();
+            let focused_chat = focused_chat.clone();
+            thread::spawn(move || run_overlay_inner(None, |_| Frame {
+                session_id: Some("minimize-sync".into()), window: Some(origin as u64),
+                cards: vec![Card { id: 1, label: "Owned minimize timing test".into(),
+                    text: "Cached content follows the originating window without waiting for the reader.".into(),
+                    final_message: false, attention: false, target: None }],
+                hidden_in_focus: focused_chat.load(Ordering::Relaxed), dock_request: request.load(Ordering::Relaxed),
+                close: stop.load(Ordering::Relaxed), ..Frame::empty()
+            }, |_, _| panic!("minimizing does not open or acknowledge a chat"), || None, None, Some(updates)).unwrap())
+        };
+        let result = std::panic::catch_unwind(|| unsafe {
+            SetThreadDpiAwarenessContext(-4isize as Handle);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while destination.load(Ordering::Acquire) == 0 {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            }
+            let window = destination.load(Ordering::Acquire) as Hwnd;
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(IsWindowVisible(window), 0, "focused chat must stay hidden while cached");
+            let bounds = || { let mut rect: Rect = zeroed(); GetWindowRect(window, &mut rect); rect };
+            let tab = scale_dip(28, GetDpiForWindow(window).max(96));
+            // Deliver the hook message to this owned overlay only. The real editor
+            // is never minimized or activated by this test.
+            let tick = super::super::overlay_window_events::test_tick();
+            let started = Instant::now();
+            PostMessageW(window, WM_MINIMIZE, origin, tick as isize);
+            while IsWindowVisible(window) == 0 {
+                assert!(started.elapsed() < Duration::from_millis(150), "cached minimize waited for polling");
+                thread::sleep(Duration::from_millis(1));
+            }
+            println!("Cached minimize response: {:?}", started.elapsed());
+            let mut changes = 0;
+            let mut previous = bounds();
+            while started.elapsed() < Duration::from_millis(350) {
+                let next = bounds();
+                if next != previous { changes += 1; previous = next; }
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(bounds().right - bounds().left, tab);
+            println!("Minimize geometry changes: {changes}");
+            // Reopen before the slower reader reports its focus-loss epoch.
+            PostMessageW(window, WM_APP_EXPAND_OVERLAY, 1, 0);
+            thread::sleep(Duration::from_millis(280));
+            let expanded = bounds();
+            assert!(expanded.right - expanded.left > tab * 4);
+            request.store(2, Ordering::Relaxed);
+            OverlayUpdates::notify(&destination);
+            thread::sleep(Duration::from_millis(80));
+            assert_eq!(bounds(), expanded, "the late reader must not repeat the minimize");
+            PostMessageW(window, WM_RESTORE, origin, tick as isize);
+            thread::sleep(Duration::from_millis(240));
+            assert_eq!(IsWindowVisible(window), 0);
+            // Old deliveries finish at the tab instead of replaying a full-size card.
+            let late_tick = super::super::overlay_window_events::test_tick().wrapping_sub(500);
+            PostMessageW(window, WM_MINIMIZE, origin, late_tick as isize);
+            thread::sleep(Duration::from_millis(35));
+            assert_eq!(bounds().right - bounds().left, tab);
+            // Switching chats in the same editor has no foreground event. The
+            // previously viewed chat must still return tucked when metadata changes.
+            PostMessageW(window, WM_RESTORE, origin, late_tick as isize);
+            thread::sleep(Duration::from_millis(240));
+            assert_eq!(IsWindowVisible(window), 0);
+            focused_chat.store(false, Ordering::Relaxed);
+            OverlayUpdates::notify(&destination);
+            thread::sleep(Duration::from_millis(300));
+            assert_ne!(IsWindowVisible(window), 0);
+            assert_eq!(bounds().right - bounds().left, tab);
+            assert_eq!(GetForegroundWindow() as usize, origin);
+        });
+        stop.store(true, Ordering::Relaxed);
+        OverlayUpdates::notify(&destination);
+        ui.join().unwrap();
+        assert_eq!(destination.load(Ordering::Acquire), 0);
+        if let Err(cause) = result { std::panic::resume_unwind(cause); }
+    }
+
+    #[test]
+    #[ignore = "displays an owned overlay; run explicitly on an interactive desktop"]
     fn native_focus_requests_start_tucked_and_only_redock_on_a_new_focus_loss() {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         let stop = Arc::new(AtomicBool::new(false));
@@ -2162,6 +2517,10 @@ mod tests {
                 loop {
                     let window = FindWindowW(class.as_ptr(), null());
                     if !window.is_null() && IsWindowVisible(window) != 0 {
+                        // This test injects mouse messages and a synthetic pointer.
+                        // Let the user's real pointer pass through these owned test
+                        // windows so it cannot reopen a tab during the assertions.
+                        SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
                         windows.push(window);
                         break;
                     }
@@ -2305,11 +2664,11 @@ mod tests {
                     .session_id,
                 "chat-2"
             );
-            let deadline = Instant::now() + Duration::from_millis(100);
+            let deadline = Instant::now() + Duration::from_millis(400);
             while IsWindowVisible(windows[2]) != 0 {
                 assert!(
                     Instant::now() < deadline,
-                    "successful open waited for a feed refresh before hiding"
+                    "successful open must hide when the expand/fade finishes"
                 );
                 thread::sleep(Duration::from_millis(2));
             }
@@ -2365,7 +2724,7 @@ mod tests {
                     final_message: true, attention: true,
                     target: Some(CardTarget { window: 100+slot as u64, session_id: format!("keys-{slot}") }) }],
                 dock_request: 1, attention: true, close: stop.load(Ordering::Relaxed), ..Frame::empty()
-            }, |target| { opened.send(target.clone()).unwrap(); true }, || None, Some(publisher)).unwrap()));
+            }, |target, _| { opened.send(target.clone()).unwrap(); true.into() }, || None, Some(publisher), None).unwrap()));
             let deadline = Instant::now() + Duration::from_secs(3);
             while service.test_binding(slot).is_none() {
                 assert!(Instant::now() < deadline, "shortcut binding did not arrive");
@@ -2444,7 +2803,7 @@ mod tests {
                         session_id: format!("keys-{slot}")
                     }
                 );
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(320));
                 assert_eq!(IsWindowVisible(windows[slot]), 0);
                 assert_ne!(IsWindowVisible(windows[2]), 0);
                 assert!(service.test_binding(slot).is_none());
@@ -2531,6 +2890,7 @@ mod tests {
                     busy: false,
                     attention: false,
                     dock_request: 0,
+                    hidden_in_focus: false,
                 }
             },
             |_| false,
@@ -2570,13 +2930,19 @@ mod tests {
 
     unsafe fn hit_region_window(window: Hwnd, point: Point) -> Hwnd {
         unsafe {
-            // Query this owned HWND's actual OS hit region. Another live overlay
-            // may cover these screen coordinates while the tests are running.
+            // Query this owned HWND's presented hit mask. Another live overlay
+            // may cover these coordinates; composited windows use per-pixel alpha.
+            let mut bounds: Rect = zeroed();
+            assert_ne!(GetWindowRect(window, &mut bounds), 0);
+            let state = &*(GetWindowLongPtrW(window, GWLP_USERDATA) as *const OverlayState);
+            if let Some(frame) = &state.compositor {
+                return if frame.alpha_at(point.x - bounds.left, point.y - bounds.top) != 0 {
+                    window
+                } else { null_mut() };
+            }
             let region = CreateRectRgn(0, 0, 0, 0);
             assert!(!region.is_null());
             assert_ne!(GetWindowRgn(window, region), 0);
-            let mut bounds: Rect = zeroed();
-            assert_ne!(GetWindowRect(window, &mut bounds), 0);
             let contains = PtInRegion(region, point.x - bounds.left, point.y - bounds.top) != 0;
             DeleteObject(region);
             if contains { window } else { null_mut() }
@@ -2827,6 +3193,7 @@ mod tests {
                     busy: true,
                     attention: true,
                     dock_request: 0,
+                    hidden_in_focus: false,
                 }
             },
             |target| {
@@ -2942,6 +3309,9 @@ mod tests {
                 panel_size: (1, 1),
                 shortcut_code: None,
                 shortcut_token: 0,
+                restoring: false,
+            compositor: None,
+            render_alpha: 255,
             };
             let now = Instant::now();
             let mut motion = Motion::new(now);
@@ -3036,6 +3406,9 @@ mod tests {
             panel_size: (1, 1),
             shortcut_code: None,
             shortcut_token: 0,
+            restoring: false,
+            compositor: None,
+            render_alpha: 255,
         };
         let bounds = Rect {
             left: 0,
@@ -3086,6 +3459,9 @@ mod tests {
             let rect = overlay_bounds(work, 440, 300, 20, position);
             assert!(rect.left >= work.left && rect.right <= work.right);
             assert!(rect.top >= work.top && rect.bottom <= work.bottom);
+            if position.ends_with("right") {
+                assert_eq!(rect.right, work.right, "expanded overlay stays flush with its screen edge");
+            }
         }
         assert_eq!(
             overlay_bounds(work, 440, 300, 20, "bottom-right").bottom,

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.59
+
+- Make hover and click expansion one continuous slide, presenting the panel position, visible size, shape, and pixels together. Keep the message at its original size and avoid a separate fill or resize after sliding.
+- Keep the drawer's right edge flat against the display, including its top and bottom corners, while retaining rounded corners on the exposed side.
+- Reuse the compositor after expansion so settling does not switch back to a differently sized painted surface. Reuse buffers and update only indicator pixels for busy/completion activity.
+- Preserve hover-out, interrupted slides, click/double-click, Copilot shortcuts, completion acknowledgement, reduced motion, and the editor-opening transition.
+
+## 0.1.58
+
+- Keep right-side previews and their restore transitions flush with the display edge, removing the gap when a tab expands.
+- Preserve the exact visible tab, panel, and rounded edges when opening a chat, including a hover transition already in progress. Enlarge proportionally instead of substituting a stretched message card.
+- Begin the 180 ms grow-and-fade when the activation worker is about to restore VS Code, so thread startup does not consume the animation and duplicate notifications cannot restart it.
+- Present position, size, shape, and opacity in one layered-window update, with preallocated image buffers and no text layout or bitmap allocation per frame.
+- Preserve click-through, independent tabs, failure recovery, stale-frame suppression, reduced motion, and the native minimize-event path.
+
+## 0.1.57
+
+- Expand and fade the selected overlay as its chat opens in a maximized VS Code window, using a 260 ms transition from the current tab or panel bounds.
+- Restore and route the editor on a worker with its own Windows message queue so activation cannot stall overlay frames.
+- Make the opening animation click-through and suspend that tab's shortcuts immediately; hide it after successful completion and recover controls if opening fails.
+- Preserve independent tabs, stale-frame suppression, reduced-motion preferences, and the minimize-event timing improvements.
+
+## 0.1.56
+
+- Start overlay docking from native Windows minimize and focus events, using the event timestamp so delivery delays do not restart the animation late.
+- Keep the three latest chat frames cached while the focused chat is hidden. Reveal cached content immediately and notify native windows when the reader publishes an update.
+- Coalesce minimize and foreground changes, preserve reopened hover panels when the reader catches up, and restore minimized tabs when switching chats in the same editor.
+- Respect Windows minimize-animation and client-area animation preferences, preserve no-focus-stealing behavior, and remove the extra 250 ms UI polling delay.
+
 ## 0.1.55
 
 - Add keyboard control for visible chat tabs: hold Copilot and press the first displayed letter to expand, then the second letter to open the matching chat in VS Code.

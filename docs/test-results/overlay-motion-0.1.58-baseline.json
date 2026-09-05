@@ -1,0 +1,65 @@
+{
+  "helper": "C:\\Users\\lenzi\\.vscode\\extensions\\kethayaya.codex-lid-guard-0.1.58\\bin\\win-x64\\CodexLidGuard.exe",
+  "scope": "native geometry delivery; six expansions of one of three tabs",
+  "expanded": [
+    {
+      "first_change_ms": 19.665,
+      "changes": 14,
+      "interval_median_ms": 17.459,
+      "interval_p95_ms": 19.767,
+      "final_change_ms": 236.871
+    },
+    {
+      "first_change_ms": 21.893,
+      "changes": 14,
+      "interval_median_ms": 16.784,
+      "interval_p95_ms": 19.82,
+      "final_change_ms": 239.336
+    },
+    {
+      "first_change_ms": 20.457,
+      "changes": 14,
+      "interval_median_ms": 16.238,
+      "interval_p95_ms": 20.375,
+      "final_change_ms": 236.102
+    },
+    {
+      "first_change_ms": 18.728,
+      "changes": 14,
+      "interval_median_ms": 16.962,
+      "interval_p95_ms": 18.457,
+      "final_change_ms": 234.477
+    },
+    {
+      "first_change_ms": 19.839,
+      "changes": 14,
+      "interval_median_ms": 16.946,
+      "interval_p95_ms": 18.658,
+      "final_change_ms": 239.23
+    },
+    {
+      "first_change_ms": 24.291,
+      "changes": 15,
+      "interval_median_ms": 14.667,
+      "interval_p95_ms": 19.664,
+      "final_change_ms": 235.705
+    }
+  ],
+  "cpu_percent_one_core": 11.319,
+  "before": {
+    "at": 635301.1524118,
+    "cpu": 0.1875,
+    "private_bytes": 2887680,
+    "working_set": 16322560,
+    "gdi": 24,
+    "user": 19
+  },
+  "after": {
+    "at": 635309.0208597,
+    "cpu": 1.078125,
+    "private_bytes": 2887680,
+    "working_set": 16343040,
+    "gdi": 26,
+    "user": 19
+  }
+}

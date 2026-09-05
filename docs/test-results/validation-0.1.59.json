@@ -1,0 +1,65 @@
+{
+  "version": "0.1.59",
+  "overlayChecks": {
+    "passed": 63,
+    "failed": 0,
+    "ignored": 0,
+    "unrelatedTestsFiltered": 67,
+    "elapsedSeconds": 24.23
+  },
+  "finalHideOrderCheck": "targeted native editor restore success/failure test passed",
+  "clippy": "all targets passed with warnings denied",
+  "slidePresentation": {
+    "frames": 42,
+    "displayScales": [
+      100,
+      150,
+      200
+    ],
+    "build": "debug",
+    "medianMs": 2.325,
+    "p95Ms": 4.743,
+    "maxMs": 5.591,
+    "unscaledSourcePixelsMatch": true,
+    "nativeRightEdgeMatchesWorkArea": true,
+    "rightCornerPixelsFilled": true,
+    "bitmapHandlesStable": true,
+    "expansionReversalAndEndpointsCovered": true
+  },
+  "interactionMs": {
+    "hoverExpand": 23.9466,
+    "tabClick": 32.4658,
+    "keyboardExpand": [
+      28.7826,
+      29.5028
+    ],
+    "cachedMinimize": 6.3323,
+    "messageClickIncluding500MsDoubleClickInterval": 549.0635,
+    "hoverLeaveIncludingGraceAndSlide": 489.9799,
+    "editorRestoreAfterSignal": 184.468
+  },
+  "measurementLimit": "Owned native test windows, pixels and geometry; not physical display presentation or a real editor restore.",
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "486fdc632977ff9231090cce8a0cea8861843dc8c24d477c6a06128229b795ee",
+  "releaseMotionBenchmark": {
+    "expansions": 6,
+    "firstGeometryChangeMsRange": [
+      20.286,
+      24.394
+    ],
+    "medianGeometryIntervalMsRange": [
+      16.286,
+      16.967
+    ],
+    "cpuPercentOneCore": 8.935,
+    "previousVersionCpuPercentOneCore": 11.319,
+    "privateBytesStable": 5513216,
+    "gdiHandlesStable": 27,
+    "comparisonLimit": "Single sequential samples with live desktop background activity; not a statistical CPU comparison."
+  },
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "confirmed active: live daemon reports 0.1.59",
+  "activationWorkerPid": 21560
+}

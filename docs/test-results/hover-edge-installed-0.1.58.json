@@ -1,0 +1,23 @@
+{
+  "scope": "Installed helper previews, genuine tab mouse-move hover path; only owned processes and windows touched",
+  "results": [
+    {
+      "version": "0.1.57",
+      "dpi": 144,
+      "hoverSamples": 71,
+      "maximumHoverGapPx": 30,
+      "maximumWidthPx": 702,
+      "monitorRight": 2560,
+      "workAreaRight": 2560
+    },
+    {
+      "version": "0.1.58",
+      "dpi": 144,
+      "hoverSamples": 72,
+      "maximumHoverGapPx": 0,
+      "maximumWidthPx": 702,
+      "monitorRight": 2560,
+      "workAreaRight": 2560
+    }
+  ]
+}

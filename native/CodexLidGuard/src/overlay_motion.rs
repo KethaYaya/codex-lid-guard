@@ -4,6 +4,43 @@ use std::time::{Duration, Instant};
 
 const DURATION: Duration = Duration::from_millis(180);
 
+pub(super) struct OpenMotion {
+    requested: Instant,
+    started: Option<Instant>,
+    animate: bool,
+}
+
+impl OpenMotion {
+    pub(super) fn new(started: Instant, animate: bool) -> Self {
+        Self {
+            requested: started,
+            started: None,
+            animate,
+        }
+    }
+    // The activation worker signals immediately before ShowWindow. Thread startup
+    // and foreground-input attachment must not consume the visible transition.
+    pub(super) fn begin(&mut self, at: Instant) {
+        if self.started.is_none() {
+            self.started = Some(at.max(self.requested));
+        }
+    }
+    pub(super) fn finished(&self, now: Instant) -> bool {
+        !self.animate || (self.started.is_some() && !self.sample(now).2)
+    }
+    pub(super) fn sample(&self, now: Instant) -> (f32, f32, bool) {
+        let t = if self.animate {
+            let Some(started) = self.started else {
+                return (0.0, 1.0, false);
+            };
+            (now.saturating_duration_since(started).as_secs_f32() / 0.180).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        (1.0 - (1.0 - t).powi(3), (1.0 - t).powi(2), t < 1.0)
+    }
+}
+
 struct Tween {
     from: f32,
     to: f32,
@@ -183,6 +220,41 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opening_expands_and_fades_on_one_clock_and_reduced_motion_finishes_immediately() {
+        let now = Instant::now();
+        let mut motion = OpenMotion::new(now, true);
+        assert_eq!(
+            motion.sample(now + Duration::from_secs(1)),
+            (0.0, 1.0, false)
+        );
+        assert!(!motion.finished(now + Duration::from_secs(1)));
+        motion.begin(now);
+        assert_eq!(motion.sample(now), (0.0, 1.0, true));
+        motion.begin(now + Duration::from_millis(30)); // Duplicate events never restart it.
+        let (growth, alpha, active) = motion.sample(now + Duration::from_millis(90));
+        assert!((growth - 0.875).abs() < 0.001 && (alpha - 0.25).abs() < 0.001 && active);
+        assert_eq!(
+            motion.sample(now + Duration::from_millis(300)),
+            (1.0, 0.0, false)
+        );
+        assert_eq!(OpenMotion::new(now, false).sample(now), (1.0, 0.0, false));
+    }
+
+    #[test]
+    fn restore_waits_for_activation_and_late_delivery_joins_without_restarting() {
+        let requested = Instant::now();
+        let began = requested + Duration::from_millis(500);
+        let mut motion = OpenMotion::new(requested, true);
+        assert_eq!(motion.sample(began), (0.0, 1.0, false));
+        assert!(!motion.finished(began));
+        motion.begin(began);
+        let delivered = began + Duration::from_millis(90);
+        assert_eq!(motion.sample(delivered), (0.875, 0.25, true));
+        motion.begin(delivered); // Foreground/result notification cannot reset the curve.
+        assert_eq!(motion.sample(delivered), (0.875, 0.25, true));
+        assert!(motion.finished(began + Duration::from_millis(180)));
+    }
 
     fn card(id: u64) -> Card {
         Card {

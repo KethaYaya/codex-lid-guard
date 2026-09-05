@@ -21,6 +21,12 @@ pub use overlay_window::run_session_overlay;
 #[path = "overlay_shortcuts.rs"]
 mod overlay_shortcuts;
 pub use overlay_shortcuts::OverlayShortcuts;
+#[path = "overlay_window_events.rs"]
+mod overlay_window_events;
+pub use overlay_window_events::OverlayUpdates;
+#[path = "overlay_open.rs"]
+mod overlay_open;
+pub use overlay_open::OverlayOpen;
 
 pub fn is_editor_window(window: u64) -> bool {
     unsafe {
@@ -1345,10 +1351,10 @@ pub fn is_window_focused(window: u64) -> bool {
 }
 
 pub fn focus_editor_window(window: u64) -> bool {
-    focus_editor_window_with_state(window, false)
+    focus_editor_window_with_state(window, false, || {})
 }
 
-fn focus_editor_window_with_state(window: u64, maximize: bool) -> bool {
+fn focus_editor_window_with_state(window: u64, maximize: bool, before_show: impl FnOnce()) -> bool {
     let window = window as usize as Hwnd;
     unsafe {
         if window.is_null() || IsWindow(window) == 0 {
@@ -1379,6 +1385,7 @@ fn focus_editor_window_with_state(window: u64, maximize: bool) -> bool {
             && target_thread != foreground_thread
             && AttachThreadInput(current_thread, target_thread, 1) != 0;
 
+        before_show();
         if maximize {
             ShowWindow(window, 3); // SW_MAXIMIZE
         } else if IsIconic(window) != 0 {
@@ -1403,10 +1410,10 @@ unsafe extern "system" {
         parameters: *const u16, directory: *const u16, show: i32) -> Handle;
 }
 
-pub fn activate_overlay_target(target: &crate::overlay::CardTarget) -> bool {
+fn activate_overlay_target(target: &crate::overlay::CardTarget, before_show: impl FnOnce()) -> bool {
     // Validate the saved HWND before focusing; completed messages can outlive
     // the active-turn entry, so this does not depend on daemon turn lookup.
-    if !focus_editor_window_with_state(target.window, true) {
+    if !focus_editor_window_with_state(target.window, true, before_show) {
         return false;
     }
     unsafe {
