@@ -1,7 +1,35 @@
 //! Restore the editor without blocking the overlay's animation or input loop.
 use super::*;
+use crate::codex_log::{ViewState, ViewStateReader};
 use crate::overlay::CardTarget;
+use std::collections::HashSet;
 use std::time::Instant;
+
+pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn wait_for_session_confirmation(
+    target: &CardTarget,
+    deadline: Instant,
+    mut observe: impl FnMut() -> Option<ViewState>,
+    focused: impl Fn() -> bool,
+) -> bool {
+    while Instant::now() < deadline && focused() {
+        let view = observe();
+        // A successful ShellExecute only means VS Code received the link.
+        // Another chat in the same window must never acknowledge this target.
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if matches!(view, Some(ViewState::Active(id)) if id.eq_ignore_ascii_case(&target.session_id))
+        {
+            return focused();
+        }
+        thread::sleep(
+            Duration::from_millis(75).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    false
+}
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -41,9 +69,20 @@ impl OverlayOpen {
                     let mut message: Message = zeroed();
                     PeekMessageW(&mut message, null_mut(), 0, 0, 0);
                 }
-                let opened = activate_overlay_target(&target, || {
+                let dispatched = activate_overlay_target(&target, || {
                     super::overlay_window_events::notify_open_started(overlay, target.window);
                 });
+                let mut views = ViewStateReader::default();
+                let sessions = HashSet::from([target.session_id.clone()]);
+                let opened = dispatched && wait_for_session_confirmation(
+                    &target,
+                    started + OPEN_TIMEOUT - Duration::from_millis(250),
+                    || views.for_sessions(&sessions).remove(&target.session_id).map(|view| view.state),
+                    || is_window_focused(target.window),
+                );
+                if dispatched && !opened {
+                    logging::write("The requested overlay chat was not confirmed active; keeping its notification available.");
+                }
                 if opened {
                     let _ = viewed.send((target, started));
                 }
@@ -81,6 +120,52 @@ impl OverlayOpen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmation_waits_for_the_requested_chat_in_a_shared_window() {
+        let target = CardTarget {
+            window: 10,
+            session_id: "chat-b".into(),
+        };
+        let mut observed = [
+            Some(ViewState::Active("chat-a".into())),
+            Some(ViewState::Inactive),
+            Some(ViewState::Active("chat-b".into())),
+        ]
+        .into_iter();
+        assert!(wait_for_session_confirmation(
+            &target,
+            Instant::now() + Duration::from_secs(1),
+            || observed.next().flatten(),
+            || true
+        ));
+        assert_eq!(observed.len(), 0);
+    }
+
+    #[test]
+    fn unconfirmed_expired_and_unfocused_opens_do_not_acknowledge() {
+        let target = CardTarget {
+            window: 10,
+            session_id: "chat-b".into(),
+        };
+        assert!(!wait_for_session_confirmation(
+            &target,
+            Instant::now() + Duration::from_millis(5),
+            || Some(ViewState::Active("chat-a".into())),
+            || true
+        ));
+        assert!(!wait_for_session_confirmation(
+            &target,
+            Instant::now(),
+            || Some(ViewState::Active("chat-b".into())),
+            || true
+        ));
+        assert!(!wait_for_session_confirmation(
+            &target,
+            Instant::now() + Duration::from_secs(1),
+            || Some(ViewState::Active("chat-b".into())),
+            || false
+        ));
+    }
     #[test]
     fn opening_completion_is_nonblocking_and_disconnection_is_failure() {
         let (sent, received) = mpsc::channel();

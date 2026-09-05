@@ -1,0 +1,55 @@
+{
+  "version": "0.1.66",
+  "appearance": "Completion checkmark removed; normal open chevron and initials remain steady while the background fades between charcoal and green.",
+  "clippy": "all targets passed with warnings denied",
+  "previewScreenshotsReviewed": true,
+  "previewCompletionCheckmarkAbsent": true,
+  "demoTextHeightsAt144Dpi": [
+    90,
+    90
+  ],
+  "renderedFade": {
+    "dpi": 144,
+    "opacityPercent": 82,
+    "samples": 40,
+    "sampledSeconds": 6.762,
+    "backgroundGreenRange": 82.0,
+    "maximumCenterEdgeGreenDifference": 3.58,
+    "tabBoundsStable": true,
+    "limit": "Screen capture of one completed composited tab over several cycles; desktop visible through configured translucency."
+  },
+  "releaseResourceSample": {
+    "completedTabs": 3,
+    "tabsUsingCompositor": 2,
+    "cpuPercentOneCore": 3.28,
+    "gdiStart": 32,
+    "gdiEnd": 34,
+    "gdiMin": 32,
+    "gdiMax": 36,
+    "privateBytesChange": -28672,
+    "userHandlesStable": true,
+    "limit": "Short resource sample with concurrent screenshot capture, not a comparative benchmark."
+  },
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "4c1f2b8b2ce85b14c4d665e93ef433eab536faddfa365820ad1cd9d3df181218",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "active",
+  "activationWorkerPid": 5504,
+  "liveVersionAtValidation": "0.1.64",
+  "activeTurnsAtValidation": 2,
+  "liveActivationVerification": {
+    "fromVersion": "0.1.64",
+    "liveVersion": "0.1.66",
+    "activeTurns": 2,
+    "isGuarding": true,
+    "originalPowerSettingsPreserved": true,
+    "currentLidActions": {
+      "AC": 0,
+      "DC": 0
+    },
+    "method": "controlled helper reload with active registrations restored",
+    "verifiedAt": 1788632230.4228742
+  }
+}

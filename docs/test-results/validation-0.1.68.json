@@ -1,0 +1,47 @@
+{
+  "version": "0.1.68",
+  "change": "Open the exact conversation editor and confirm the requested session before acknowledging its overlay.",
+  "extensionUnitTests": {
+    "passed": 36,
+    "failed": 0
+  },
+  "nativeTests": {
+    "passed": 129,
+    "failed": 0,
+    "ignored": 7
+  },
+  "clippy": "all targets passed with warnings denied",
+  "vscodeIntegration": {
+    "version": "1.136.1",
+    "result": "passed",
+    "environment": "Isolated extension development host using the real VS Code tab API and a fixture custom editor with the Codex view type; no live chats modified.",
+    "cases": [
+      "two sessions in one project/window",
+      "switch A to B and back",
+      "reuse exact URI including query",
+      "no duplicate tabs",
+      "restore existing editor group",
+      "acknowledge only selected session",
+      "invalid links do not navigate",
+      "create exact editor when absent"
+    ],
+    "command": "python scripts/test-session-navigation.py --code <absolute Code.exe path>",
+    "log": "codex-lid-guard-navigation-rhxpx5hd/test.log"
+  },
+  "packagePayloadVerified": true,
+  "installedFilesVerified": 18,
+  "helperSha256": "5c9de558d7fbfefc3d8fd57ee7a1526ee6e520f51500a9ab058ca0709b4eea3e",
+  "helperActivation": {
+    "fromVersion": "0.1.67",
+    "liveVersion": "0.1.68",
+    "activeTurns": 2,
+    "isGuarding": true,
+    "originalPowerSettingsPreserved": true,
+    "currentLidActions": {
+      "AC": 0,
+      "DC": 0
+    },
+    "reloadSeconds": 1.134
+  },
+  "extensionActivation": "Existing user windows require one reload to register the new URI handler. User chat windows were not reloaded during validation."
+}

@@ -1444,7 +1444,7 @@ fn overlay_session_uri(executable: &str, session_id: &str) -> Option<String> {
         "code - insiders.exe" => "vscode-insiders",
         _ => return None,
     };
-    Some(format!("{scheme}://openai.chatgpt/local/{}", session_id.to_ascii_lowercase()))
+    Some(format!("{scheme}://kethayaya.codex-lid-guard/local/{}", session_id.to_ascii_lowercase()))
 }
 
 pub fn show_notification_popup(
@@ -2489,7 +2489,7 @@ mod tests {
     #[test]
     fn overlay_chat_routes_are_local_and_validate_the_session_id() {
         let id = "01A07039-FCA0-7CC0-BC95-6A98923C844E";
-        assert_eq!(overlay_session_uri("Code.exe", id).as_deref(), Some("vscode://openai.chatgpt/local/01a07039-fca0-7cc0-bc95-6a98923c844e"));
+        assert_eq!(overlay_session_uri("Code.exe", id).as_deref(), Some("vscode://kethayaya.codex-lid-guard/local/01a07039-fca0-7cc0-bc95-6a98923c844e"));
         assert!(overlay_session_uri("Code - Insiders.exe", id).unwrap().starts_with("vscode-insiders://"));
         assert!(overlay_session_uri("unrelated.exe", id).is_none());
         for invalid in ["", "https://example.com", "../other", "01a07039-fca0-7cc0-bc95-6a98923c844g"] {

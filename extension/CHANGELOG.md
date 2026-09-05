@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.68
+
+- Open the exact Codex conversation editor from an overlay or session menu, reusing its existing tab and editor group when several chats share a project window.
+- Confirm that the requested session is active before dismissing its overlay or clearing its completion cue. Failed or unconfirmed opens keep the notification available.
+- Reload existing VS Code windows once after updating to register the new session navigation handler.
+
+## 0.1.67
+
+- Change the completed-tab background fade to the requested yellow, `#FFD000`, while keeping the same simple animation and steady session initials.
+
+## 0.1.66
+
+- Remove the completion checkmark from tabs. Use the background color fade as the completion cue, keeping the usual open chevron and session initials steady.
+
+## 0.1.65
+
+- Simplify completed tabs to a smooth, uniform background fade between charcoal and green. Remove the edge light and halo, and center the steady checkmark and initials again.
+- Reuse the existing completion animation and drawing buffer with a single background fill. Keep completion acknowledgement, expanded-panel dots, and reduced-motion support.
+
+## 0.1.64
+
+- Refine completed tabs with a charcoal surface, a slim pulsing emerald light and soft halo along the exposed edge, a mint checkmark, and steady off-white initials.
+- Keep completion easy to spot without flashing the whole tab. Expanded-panel completion dots, fixed screen attachment, input behavior, and reduced-motion support remain intact.
+
+## 0.1.63
+
+- Make completion pulses clearly visible by brightening and dimming the entire green tab and its rim together every 1.8 seconds. Keep white initials and the checkmark readable throughout.
+- Keep fixed tab geometry, existing paint buffers and timer, and steady completion styling when Windows animations are disabled.
+
+## 0.1.62
+
+- Make completed tabs clearly recognizable at a glance with a green background, bright pulsing green rim, white initials, and a checkmark. The completion color stays visible between pulses.
+- Preserve the existing flush screen edge, tab size, input behavior, and completion acknowledgement. Reduced motion keeps the completion styling steady.
+
+## 0.1.61
+
+- Add a subtle green inner glow to completed session tabs, synchronized with the existing completion dot pulse. Viewing the matching chat or starting a new turn clears both indicators.
+- Keep the glow inside the existing tab shape, preserving the flush screen edge, slide geometry, and hover/click targets. Reuse the existing animation timer and drawing buffer; reduced motion uses a steady glow.
+
 ## 0.1.60
 
 - Hide the matching overlay when its chat is open in the focused editor, even when newer command-line launches create empty log folders beside the running VS Code instance.

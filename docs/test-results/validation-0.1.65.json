@@ -1,0 +1,40 @@
+{
+  "version": "0.1.65",
+  "appearance": "Uniform tab background fades between charcoal and green every 1.8 seconds; centered mint checkmark and off-white initials stay steady. Edge light and halo removed.",
+  "completionTestsPassed": 6,
+  "animationTestPassed": true,
+  "clippy": "all targets passed with warnings denied",
+  "previewScreenshotsReviewed": true,
+  "renderedFade": {
+    "dpi": 144,
+    "opacityPercent": 82,
+    "samples": 40,
+    "sampledSeconds": 7.268,
+    "backgroundGreenRange": 82.0,
+    "maximumCenterEdgeGreenDifference": 0.0,
+    "tabBoundsStable": true,
+    "limit": "Screen capture of one completed composited tab over several cycles; desktop visible through configured translucency."
+  },
+  "previewLayout": "Initial validation caught a 15-pixel vertical shift from longer demo completion text. Shortened demo text to match the original 90-pixel measured height at 144 DPI; final native preview preserved all tab bounds.",
+  "releaseResourceSample": {
+    "completedTabs": 3,
+    "tabsUsingCompositor": 2,
+    "cpuPercentOneCore": 5.888,
+    "gdiStart": 32,
+    "gdiEnd": 34,
+    "gdiMin": 31,
+    "gdiMax": 37,
+    "privateBytesChange": -24576,
+    "userHandlesStable": true,
+    "limit": "Short resource sample with concurrent screenshot capture, not a comparative benchmark."
+  },
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "0334e3cc5f988335856878c7530c0718d078eaac50d4f05ea35eed2b5671be5c",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "waiting-for-idle",
+  "activationWorkerPid": 9596,
+  "liveVersionAtValidation": "0.1.64",
+  "activeTurnsAtValidation": 2
+}

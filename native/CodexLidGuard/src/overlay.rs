@@ -590,7 +590,7 @@ pub fn preview() -> io::Result<()> {
                 let elapsed = started.elapsed();
                 let completed = elapsed >= Duration::from_secs(15 + slot as u64 * 3);
                 let text = if completed {
-                    "This chat is complete. Its green dot pulses independently in the header and tab. Open another tab to keep track of multiple chats. This demo closes automatically."
+                    "This chat is complete. Its tab color fades while the session initials stay steady. The expanded panel has a green completion dot. This demo closes automatically."
                 } else {
                     "Each chat has its own tab. Click this message to tuck away just this panel, then hover over its tab to slide it back. Move away to tuck it again. Each chat keeps its own status."
                 };

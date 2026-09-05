@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
+import { handleSessionUri } from "./sessionEditor";
 import {
   quotePowerShellLiteral,
   guardHooksForPreference,
@@ -85,6 +86,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(statusBar);
 
   context.subscriptions.push(
+    vscode.window.registerUriHandler({
+      handleUri: (uri) => handleSessionUri(uri, (sessionId) => recordViewedSession(context, sessionId))
+        .catch((error) => { void vscode.window.showErrorMessage(`Could not open Codex chat: ${messageOf(error)}`); })
+    }),
     vscode.commands.registerCommand("codexLidGuard.enable", () => enable(context, statusBar, true)),
     vscode.commands.registerCommand("codexLidGuard.disable", () => disable(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.showStatus", () => showStatus(context, statusBar)),
@@ -516,12 +521,11 @@ async function openSession(
   if (route) {
     try {
       const opened = await vscode.env.openExternal(vscode.Uri.from({
-        scheme: "vscode",
-        authority: "openai.chatgpt",
+        scheme: vscode.env.uriScheme,
+        authority: "kethayaya.codex-lid-guard",
         path: route
       }));
       if (opened) {
-        recordViewedSession(context, activeItem.sessionId);
         return;
       }
     } catch {

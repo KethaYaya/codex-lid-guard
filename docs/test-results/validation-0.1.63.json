@@ -1,0 +1,40 @@
+{
+  "version": "0.1.63",
+  "appearance": "Whole green tab and rim visibly brighten and dim together every 1.8 seconds; white initials and checkmark remain readable",
+  "completionTestsPassed": 6,
+  "animationTestPassed": true,
+  "clippy": "all targets passed with warnings denied",
+  "windowsClientAreaAnimationsEnabled": true,
+  "previewScreenshotsReviewed": true,
+  "renderedPulse": {
+    "dpi": 144,
+    "opacityPercent": 82,
+    "samples": 40,
+    "sampledSeconds": 7.273,
+    "bodyGreenRange": 88.0,
+    "rimGreenRange": 128.0,
+    "tabBoundsStable": true,
+    "limit": "Screen capture of one completed composited tab over several cycles; background visible through configured translucency."
+  },
+  "releaseResourceSample": {
+    "completedTabs": 3,
+    "tabsUsingCompositor": 2,
+    "cpuPercentOneCore": 3.918,
+    "gdiStart": 37,
+    "gdiEnd": 36,
+    "gdiMin": 33,
+    "gdiMax": 40,
+    "privateBytesChange": 36864,
+    "userHandlesStable": true,
+    "limit": "Short resource sample with concurrent screenshot capture, not a comparative benchmark."
+  },
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "2f1a47bbf68e9eaae239acedb0ac84f54a3b0e1286d620afaec2e58c8307663a",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "waiting-for-idle",
+  "activationWorkerPid": 28436,
+  "liveVersionAtValidation": "0.1.61",
+  "activeTurnsAtValidation": 2
+}

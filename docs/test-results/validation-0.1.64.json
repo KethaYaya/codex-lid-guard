@@ -1,0 +1,39 @@
+{
+  "version": "0.1.64",
+  "appearance": "Charcoal tab with a slim pulsing emerald edge light and soft halo; steady mint checkmark and off-white initials, with spacing for the light. Expanded completion dots preserved.",
+  "completionTestsPassed": 6,
+  "animationTestPassed": true,
+  "clippy": "all targets passed with warnings denied",
+  "previewScreenshotsReviewed": true,
+  "renderedPulse": {
+    "dpi": 144,
+    "opacityPercent": 82,
+    "samples": 40,
+    "sampledSeconds": 7.001,
+    "surfaceGreenRange": 0.3,
+    "edgeLightGreenRange": 93.0,
+    "tabBoundsStable": true,
+    "limit": "Screen capture of one completed composited tab over several cycles; background visible through configured translucency."
+  },
+  "releaseResourceSample": {
+    "completedTabs": 3,
+    "tabsUsingCompositor": 2,
+    "cpuPercentOneCore": 3.609,
+    "gdiStart": 39,
+    "gdiEnd": 38,
+    "gdiMin": 34,
+    "gdiMax": 40,
+    "privateBytesChange": 0,
+    "userHandlesStable": true,
+    "limit": "Short resource sample with concurrent screenshot capture, not a comparative benchmark."
+  },
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "952f6493e323d1834fb63236e5e88a870dc75f21304ddf057035965fa37b9ace",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "waiting-for-idle",
+  "activationWorkerPid": 19924,
+  "liveVersionAtValidation": "0.1.63",
+  "activeTurnsAtValidation": 1
+}

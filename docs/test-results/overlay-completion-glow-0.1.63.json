@@ -1,0 +1,265 @@
+{
+  "version": "0.1.63",
+  "scope": "three completed tucked tabs, two after expansion and collapse; owned preview only",
+  "cpuPercentOneCore": 3.918,
+  "privateBytesStart": 7516160,
+  "privateBytesEnd": 7553024,
+  "gdiMin": 33,
+  "gdiMax": 40,
+  "userMin": 20,
+  "userMax": 20,
+  "tabBoundsStable": true,
+  "dpi": 144,
+  "samples": 41,
+  "gdiSamples": [
+    37,
+    37,
+    38,
+    37,
+    38,
+    36,
+    34,
+    35,
+    33,
+    38,
+    38,
+    37,
+    39,
+    38,
+    40,
+    40,
+    38,
+    35,
+    37,
+    37,
+    37,
+    37,
+    38,
+    40,
+    39,
+    38,
+    37,
+    39,
+    39,
+    38,
+    36,
+    36,
+    36,
+    37,
+    36,
+    37,
+    36,
+    36,
+    37,
+    38,
+    36
+  ],
+  "gdiStart": 37,
+  "gdiEnd": 36,
+  "brightnessSamples": [
+    {
+      "seconds": 0.157,
+      "bodyGreen": 129.75,
+      "rimGreen": 191.0
+    },
+    {
+      "seconds": 0.347,
+      "bodyGreen": 153.53,
+      "rimGreen": 214.5
+    },
+    {
+      "seconds": 0.514,
+      "bodyGreen": 153.53,
+      "rimGreen": 214.5
+    },
+    {
+      "seconds": 0.687,
+      "bodyGreen": 142.53,
+      "rimGreen": 206.5
+    },
+    {
+      "seconds": 0.86,
+      "bodyGreen": 116.53,
+      "rimGreen": 177.5
+    },
+    {
+      "seconds": 1.028,
+      "bodyGreen": 89.53,
+      "rimGreen": 132.5
+    },
+    {
+      "seconds": 1.205,
+      "bodyGreen": 72.53,
+      "rimGreen": 100.5
+    },
+    {
+      "seconds": 1.37,
+      "bodyGreen": 68.53,
+      "rimGreen": 90.5
+    },
+    {
+      "seconds": 1.547,
+      "bodyGreen": 77.53,
+      "rimGreen": 109.5
+    },
+    {
+      "seconds": 1.708,
+      "bodyGreen": 95.53,
+      "rimGreen": 145.5
+    },
+    {
+      "seconds": 1.871,
+      "bodyGreen": 124.53,
+      "rimGreen": 187.5
+    },
+    {
+      "seconds": 2.034,
+      "bodyGreen": 147.53,
+      "rimGreen": 210.5
+    },
+    {
+      "seconds": 2.2,
+      "bodyGreen": 155.53,
+      "rimGreen": 216.5
+    },
+    {
+      "seconds": 2.378,
+      "bodyGreen": 149.53,
+      "rimGreen": 212.5
+    },
+    {
+      "seconds": 2.548,
+      "bodyGreen": 134.53,
+      "rimGreen": 199.5
+    },
+    {
+      "seconds": 2.711,
+      "bodyGreen": 106.53,
+      "rimGreen": 163.5
+    },
+    {
+      "seconds": 2.876,
+      "bodyGreen": 86.53,
+      "rimGreen": 128.5
+    },
+    {
+      "seconds": 3.041,
+      "bodyGreen": 69.53,
+      "rimGreen": 92.5
+    },
+    {
+      "seconds": 3.203,
+      "bodyGreen": 68.53,
+      "rimGreen": 91.5
+    },
+    {
+      "seconds": 3.388,
+      "bodyGreen": 84.53,
+      "rimGreen": 123.5
+    },
+    {
+      "seconds": 3.553,
+      "bodyGreen": 111.53,
+      "rimGreen": 169.5
+    },
+    {
+      "seconds": 3.726,
+      "bodyGreen": 131.53,
+      "rimGreen": 196.5
+    },
+    {
+      "seconds": 3.904,
+      "bodyGreen": 150.53,
+      "rimGreen": 213.5
+    },
+    {
+      "seconds": 4.075,
+      "bodyGreen": 155.53,
+      "rimGreen": 216.5
+    },
+    {
+      "seconds": 4.257,
+      "bodyGreen": 142.53,
+      "rimGreen": 206.5
+    },
+    {
+      "seconds": 4.435,
+      "bodyGreen": 124.53,
+      "rimGreen": 187.5
+    },
+    {
+      "seconds": 4.624,
+      "bodyGreen": 92.53,
+      "rimGreen": 139.5
+    },
+    {
+      "seconds": 4.806,
+      "bodyGreen": 72.53,
+      "rimGreen": 99.5
+    },
+    {
+      "seconds": 4.988,
+      "bodyGreen": 68.53,
+      "rimGreen": 91.5
+    },
+    {
+      "seconds": 5.466,
+      "bodyGreen": 83.53,
+      "rimGreen": 121.5
+    },
+    {
+      "seconds": 5.632,
+      "bodyGreen": 147.53,
+      "rimGreen": 210.5
+    },
+    {
+      "seconds": 5.824,
+      "bodyGreen": 155.53,
+      "rimGreen": 216.5
+    },
+    {
+      "seconds": 6.013,
+      "bodyGreen": 149.53,
+      "rimGreen": 212.5
+    },
+    {
+      "seconds": 6.193,
+      "bodyGreen": 127.53,
+      "rimGreen": 191.5
+    },
+    {
+      "seconds": 6.375,
+      "bodyGreen": 100.53,
+      "rimGreen": 153.5
+    },
+    {
+      "seconds": 6.555,
+      "bodyGreen": 76.53,
+      "rimGreen": 109.5
+    },
+    {
+      "seconds": 6.74,
+      "bodyGreen": 67.53,
+      "rimGreen": 88.5
+    },
+    {
+      "seconds": 6.921,
+      "bodyGreen": 77.53,
+      "rimGreen": 109.5
+    },
+    {
+      "seconds": 7.097,
+      "bodyGreen": 94.53,
+      "rimGreen": 144.5
+    },
+    {
+      "seconds": 7.273,
+      "bodyGreen": 122.53,
+      "rimGreen": 185.5
+    }
+  ],
+  "bodyGreenRange": 88.0,
+  "rimGreenRange": 128.0,
+  "dimSample": 36,
+  "brightSample": 12
+}

@@ -1,0 +1,16 @@
+{
+  "name": "session-editor-test",
+  "publisher": "codex-lid-guard-tests",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.90.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "customEditors": [{
+      "viewType": "chatgpt.conversationEditor",
+      "displayName": "Test conversation",
+      "priority": "default",
+      "selector": [{ "filenamePattern": "openai-codex:/**/*" }]
+    }]
+  }
+}

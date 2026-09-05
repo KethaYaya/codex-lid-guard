@@ -298,12 +298,19 @@ impl Drop for PaintBuffer {
     }
 }
 
+fn completion_pulse(elapsed: Duration, animate: bool) -> f32 {
+    if !animate {
+        return 0.65;
+    }
+    let phase = (elapsed.as_secs_f64() % 1.8) / 1.8 * std::f64::consts::TAU;
+    (0.5 * (1.0 - phase.cos())) as f32
+}
+
 fn completion_strength(elapsed: Duration, animate: bool) -> f32 {
     if !animate {
         return 0.72;
     }
-    let phase = (elapsed.as_secs_f64() % 2.8) / 2.8 * std::f64::consts::TAU;
-    (0.55 + 0.20 * (1.0 - phase.cos())) as f32
+    0.55 + 0.40 * completion_pulse(elapsed, animate)
 }
 
 fn busy_strength(elapsed: Duration, dot: usize, animate: bool) -> f32 {
@@ -575,7 +582,7 @@ fn run_overlay_inner(
                     if open.result.is_none() { open.result = open.request.poll(); }
                     // Fallback for already focused editors or missing native events.
                     if open.result == Some(true) { open.motion.begin(real); }
-                    if open.result.is_none() && real.duration_since(open.started) >= Duration::from_secs(3) {
+                    if open.result.is_none() && real.duration_since(open.started) >= super::overlay_open::OPEN_TIMEOUT {
                         open.result = Some(false);
                     }
                     if open.result == Some(false) || (open.result == Some(true) && open.motion.finished(real)) {
@@ -1096,8 +1103,8 @@ fn run_overlay_inner(
                                 state.panel_dirty = true;
                                 paint_activity(window, &state);
                                 if let Some(layout) = state.layout && let Some(frame) = &mut state.compositor {
-                                    // Reuse the frame with only its indicator pixels changed.
-                                    // Completion/busy ticks must never redraw or lay out text.
+                                    // Reuse the frame after painting indicators or the tiny tab.
+                                    // Activity ticks never redraw or lay out message text.
                                     frame.present(window, state.buffer.dc, layout, state.dpi.max(96), state.render_alpha)?;
                                 }
                             }
@@ -1578,92 +1585,94 @@ unsafe fn paint_overlay_buffer(reference: Handle, state: &mut OverlayState, rect
                 RestoreDC(dc, saved);
             }
             if let Some(tab) = layout.tab {
-                let saved = SaveDC(dc);
-                IntersectClipRect(dc, tab.left, tab.top, tab.right, tab.bottom);
-                let full_left = tab.right - scale_dip(28, dpi);
-                let reveal = (tab.right - tab.left) as f32 / scale_dip(28, dpi) as f32;
-                fill_rectangle(
-                    dc,
-                    &tab,
-                    fade_color(
-                        if state.tab_pressed {
-                            0x005b493b
-                        } else {
-                            0x0044352c
-                        },
-                        reveal,
-                    ),
-                );
-                if state.attention {
-                    paint_completion_dot(
-                        dc,
-                        Point {
-                            x: full_left + scale_dip(14, dpi),
-                            y: tab.top + scale_dip(8, dpi),
-                        },
-                        completion_strength(
-                            state.activity_started.elapsed(),
-                            state.animate,
-                        ) * reveal,
-                        dpi,
-                    );
-                }
-                let mut arrow = Rect {
-                    left: full_left,
-                    top: tab.top + scale_dip(11, dpi),
-                    right: tab.right,
-                    bottom: tab.top + scale_dip(35, dpi),
-                };
-                draw_text(
-                    dc,
-                    "\u{2039}",
-                    &mut arrow,
-                    fade_color(0x00f6f2ef, reveal),
-                    DT_SINGLELINE | DT_VCENTER | 1,
-                );
-                let mut count = Rect {
-                    left: full_left,
-                    top: tab.top + scale_dip(35, dpi),
-                    right: tab.right,
-                    bottom: tab.bottom - scale_dip(5, dpi),
-                };
-                draw_text(
-                    dc,
-                    &state
-                        .shortcut_code
-                        .map(|code| String::from_utf8_lossy(&code).into_owned())
-                        .unwrap_or_else(|| tab_caption(&state.cards)),
-                    &mut count,
-                    fade_color(0x00cab98b, reveal),
-                    DT_SINGLELINE | DT_VCENTER | 1,
-                );
-                if state.busy {
-                    for dot in 0..3 {
-                        let left = full_left + scale_dip(6 + dot as i32 * 6, dpi);
-                        fill_rectangle(
-                            dc,
-                            &Rect {
-                                left,
-                                right: left + scale_dip(3, dpi),
-                                top: tab.bottom - scale_dip(7, dpi),
-                                bottom: tab.bottom - scale_dip(4, dpi),
-                            },
-                            fade_color(
-                                0x008bdcf6,
-                                busy_strength(
-                                    state.activity_started.elapsed(),
-                                    dot,
-                                    state.animate,
-                                ) * reveal,
-                            ),
-                        );
-                    }
-                }
-                RestoreDC(dc, saved);
+                paint_tab(dc, tab, state, dpi, state.activity_started.elapsed());
             }
         }
         SelectObject(dc, old_font);
         dc
+    }
+}
+
+unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi: u32, elapsed: Duration) {
+    unsafe {
+        let saved = SaveDC(dc);
+        SetBkMode(dc, TRANSPARENT);
+        let old_font = SelectObject(dc, state.font);
+        IntersectClipRect(dc, tab.left, tab.top, tab.right, tab.bottom);
+        let full_left = tab.right - scale_dip(28, dpi);
+        let reveal = (tab.right - tab.left) as f32 / scale_dip(28, dpi) as f32;
+        let pulse = completion_pulse(elapsed, state.animate);
+        let background = fade_color(
+            if state.attention {
+                if state.tab_pressed {
+                    blend_color(color_ref(37, 52, 58), color_ref(255, 208, 0), pulse)
+                } else {
+                    blend_color(color_ref(28, 39, 45), color_ref(255, 208, 0), pulse)
+                }
+            } else if state.tab_pressed {
+                0x005b493b
+            } else {
+                0x0044352c
+            },
+            reveal,
+        );
+        fill_rectangle(dc, &tab, background);
+        let mut arrow = Rect {
+            left: full_left,
+            top: tab.top + scale_dip(11, dpi),
+            right: tab.right,
+            bottom: tab.top + scale_dip(35, dpi),
+        };
+        draw_text(
+            dc,
+            "\u{2039}",
+            &mut arrow,
+            fade_color(0x00f6f2ef, reveal),
+            DT_SINGLELINE | DT_VCENTER | 1,
+        );
+        let mut count = Rect {
+            left: full_left,
+            top: tab.top + scale_dip(35, dpi),
+            right: tab.right,
+            bottom: tab.bottom - scale_dip(5, dpi),
+        };
+        draw_text(
+            dc,
+            &state
+                .shortcut_code
+                .map(|code| String::from_utf8_lossy(&code).into_owned())
+                .unwrap_or_else(|| tab_caption(&state.cards)),
+            &mut count,
+            fade_color(
+                if state.attention {
+                    color_ref(234, 244, 240)
+                } else {
+                    0x00cab98b
+                },
+                reveal,
+            ),
+            DT_SINGLELINE | DT_VCENTER | 1,
+        );
+        if state.busy {
+            for dot in 0..3 {
+                let left = full_left + scale_dip(6 + dot as i32 * 6, dpi);
+                fill_rectangle(
+                    dc,
+                    &Rect {
+                        left,
+                        right: left + scale_dip(3, dpi),
+                        top: tab.bottom - scale_dip(7, dpi),
+                        bottom: tab.bottom - scale_dip(4, dpi),
+                    },
+                    fade_color(
+                        0x008bdcf6,
+                        busy_strength(elapsed, dot, state.animate) * reveal,
+                    ),
+                );
+            }
+        }
+        SelectObject(dc, old_font);
+        RestoreDC(dc, saved);
     }
 }
 
@@ -2006,26 +2015,15 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
             }
         }
         if let Some(tab) = layout.tab {
-            let full_left = tab.right - scale_dip(28, dpi);
-            let reveal = (tab.right - tab.left) as f32 / scale_dip(28, dpi) as f32;
-            let background = fade_color(
-                if state.tab_pressed {
-                    0x005b493b
-                } else {
-                    0x0044352c
-                },
-                reveal,
-            );
             if state.attention {
-                let center = Point {
-                    x: full_left + scale_dip(14, dpi),
-                    y: tab.top + scale_dip(8, dpi),
-                };
-                update(dot_rect(&center), tab, background, &|dc| {
-                    paint_completion_dot(dc, Point { ..center }, pulse * reveal, dpi)
-                });
-            }
-            if state.busy {
+                // Repaint only the tiny tab; message text and panel caches stay intact.
+                update(tab, tab, 0x00241e1a, &|dc| paint_tab(dc, tab, state, dpi, elapsed));
+            } else if state.busy {
+                // Busy tabs still update only their three indicator squares.
+                let full_left = tab.right - scale_dip(28, dpi);
+                let reveal = (tab.right - tab.left) as f32 / scale_dip(28, dpi) as f32;
+                let background = fade_color(
+                    if state.tab_pressed { 0x005b493b } else { 0x0044352c }, reveal);
                 for dot in 0..3 {
                     let left = full_left + scale_dip(6 + dot as i32 * 6, dpi);
                     let rect = Rect {
@@ -2034,16 +2032,8 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
                         top: tab.bottom - scale_dip(7, dpi),
                         bottom: tab.bottom - scale_dip(4, dpi),
                     };
-                    update(rect, tab, background, &|dc| {
-                        fill_rectangle(
-                            dc,
-                            &rect,
-                            fade_color(
-                                0x008bdcf6,
-                                busy_strength(elapsed, dot, state.animate) * reveal,
-                            ),
-                        )
-                    });
+                    update(rect, tab, background, &|dc| fill_rectangle(dc, &rect,
+                        fade_color(0x008bdcf6, busy_strength(elapsed, dot, state.animate) * reveal)));
                 }
             }
         }
@@ -2052,7 +2042,10 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
 }
 
 fn fade_color(color: u32, opacity: f32) -> u32 {
-    let background = 0x00241e1a;
+    blend_color(0x00241e1a, color, opacity)
+}
+
+fn blend_color(background: u32, color: u32, opacity: f32) -> u32 {
     [0, 8, 16].into_iter().fold(0, |result, shift| {
         let base = ((background >> shift) & 0xff) as f32;
         let foreground = ((color >> shift) & 0xff) as f32;
@@ -2109,7 +2102,7 @@ mod tests {
             paint_completion_dot(
                 dc,
                 Point { x: 60, y: 10 },
-                completion_strength(Duration::from_millis(1400), true),
+                completion_strength(Duration::from_millis(900), true),
                 96,
             );
             let bright = GetPixel(dc, 60, 10);
@@ -2143,9 +2136,17 @@ mod tests {
 
     #[test]
     fn activity_pulses_are_smooth_and_reduced_motion_is_steady() {
+        assert_eq!(completion_pulse(Duration::ZERO, true), 0.0);
+        assert_eq!(completion_pulse(Duration::from_millis(900), true), 1.0);
+        assert_eq!(completion_pulse(Duration::from_millis(1800), true), 0.0);
         for ms in 0..5000 {
             let at = Duration::from_millis(ms);
             let next = at + Duration::from_millis(1);
+            assert!((completion_pulse(at, true) - completion_pulse(next, true)).abs() < 0.002);
+            assert_eq!(
+                completion_pulse(at, false),
+                completion_pulse(Duration::ZERO, false)
+            );
             assert!(
                 (completion_strength(at, true) - completion_strength(next, true)).abs() < 0.001
             );

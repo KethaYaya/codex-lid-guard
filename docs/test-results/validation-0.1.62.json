@@ -1,0 +1,27 @@
+{
+  "version": "0.1.62",
+  "appearance": "Green completed-tab background, bright pulsing two-DIP rim with seven-DIP falloff, white initials and checkmark; remains visibly green between pulses",
+  "completionTestsPassed": 6,
+  "clippy": "all targets passed with warnings denied",
+  "previewScreenshotsReviewed": true,
+  "previewDpi": 144,
+  "releaseResourceSample": {
+    "completedTabs": 3,
+    "samples": 31,
+    "cpuPercentOneCore": 6.229,
+    "gdiStart": 36,
+    "gdiEnd": 38,
+    "gdiMin": 34,
+    "gdiMax": 42,
+    "privateBytesChange": -28672,
+    "boundsStable": true,
+    "limit": "Single sample with desktop background activity; GDI counts fluctuate during painting."
+  },
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "f77e430811be9521d54b7c5fadc8d7d841206288470165220d3d772718e545ae",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "queued until the live guardian is idle",
+  "activationWorkerPid": 34052
+}

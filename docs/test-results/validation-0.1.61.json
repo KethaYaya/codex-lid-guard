@@ -1,0 +1,31 @@
+{
+  "version": "0.1.61",
+  "appearance": "Subtle five-DIP green inner glow on completed tabs; existing 2.8-second completion pulse; unchanged tab bounds and hit targets",
+  "existingCompletionTestsPassed": 6,
+  "reducedMotionAndActivityTestsPassed": 1,
+  "nativeIndependentTabTestsPassed": 1,
+  "clippy": "all targets passed with warnings denied",
+  "nativeHoverResponseMs": 23.3854,
+  "previewScreenshotsReviewed": true,
+  "previewDpi": 144,
+  "releaseResourceSample": {
+    "completedTabs": 3,
+    "samples": 31,
+    "cpuPercentOneCore": 6.244,
+    "previousVersionCpuPercentOneCore": 3.14,
+    "gdiStart": 41,
+    "gdiEnd": 41,
+    "gdiMin": 39,
+    "gdiMax": 44,
+    "privateBytesChange": 8192,
+    "boundsStable": true,
+    "limit": "Single sequential samples with desktop background activity. GDI handle counts fluctuate during drawing; no accumulating handle growth observed in this sample."
+  },
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "packagePayloadVerified": true,
+  "helperSha256": "1f7fddc3e3ebbfc283b84c800f8d6bb89628491e180225d8494c5c80e50d59cc",
+  "installedPayloadVerified": true,
+  "installedFilesVerified": 17,
+  "activation": "confirmed active: live daemon reports 0.1.61",
+  "activationWorkerPid": 18380
+}

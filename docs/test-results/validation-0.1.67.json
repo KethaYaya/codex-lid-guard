@@ -1,0 +1,45 @@
+{
+  "version": "0.1.67",
+  "completionTabColor": "#FFD000",
+  "clippy": "all targets passed with warnings denied",
+  "previewScreenshotsReviewed": true,
+  "renderedFade": {
+    "dpi": 144,
+    "opacityPercent": 82,
+    "sampleCount": 40,
+    "durationSeconds": 6.741,
+    "backgroundGreenRange": 138.0,
+    "peakRgbOnDesktop": [
+      214.2,
+      178.6,
+      11.2
+    ],
+    "boundsStable": true,
+    "note": "Configured transparency blends the requested color with the desktop."
+  },
+  "resourceSample": {
+    "cpuPercentOneCore": 3.517,
+    "privateBytesChange": -28672,
+    "gdiStart": 35,
+    "gdiEnd": 34,
+    "userHandlesStable": true,
+    "limit": "Short sample with concurrent screenshot capture, not a comparative benchmark."
+  },
+  "packagePayloadVerified": true,
+  "installedFilesVerified": 17,
+  "extensionValidation": "TypeScript compiled successfully during packaging",
+  "helperSha256": "ac09e075869da6876088b17cb2bc03ae523e5ebb13c45abfcb2648d453eea958",
+  "activation": "active",
+  "liveActivationVerification": {
+    "fromVersion": "0.1.66",
+    "liveVersion": "0.1.67",
+    "activeTurns": 2,
+    "isGuarding": true,
+    "originalPowerSettingsPreserved": true,
+    "currentLidActions": {
+      "AC": 0,
+      "DC": 0
+    },
+    "reloadSeconds": 0.679
+  }
+}
