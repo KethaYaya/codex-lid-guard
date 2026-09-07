@@ -30,7 +30,7 @@ fn native_copilot_tab_cycles_previews_and_enter_opens_the_exact_chat() {
                             .into(),
                         final_message: true,
                         attention: true,
-                        target: Some(CardTarget {
+                        target: Some(CardTarget { project: None,
                             window: 100,
                             session_id: format!("cycle-{slot}"),
                         }),
@@ -149,7 +149,7 @@ fn native_copilot_tab_cycles_previews_and_enter_opens_the_exact_chat() {
             activations
                 .recv_timeout(Duration::from_millis(200))
                 .unwrap(),
-            CardTarget {
+            CardTarget { project: None,
                 window: 100,
                 session_id: "cycle-1".into()
             }

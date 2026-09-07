@@ -33,6 +33,7 @@ export type GuardStatus = {
   isGuarding: boolean;
   lidState: "unknown" | "open" | "closed";
   sleepPending: boolean;
+  helperPaused?: boolean;
 };
 
 export function daemonHandoffRequired(
@@ -110,7 +111,7 @@ export type GuardMenuTheme =
 
 export async function runHelper(
   helperPath: string,
-  action: "status" | "status-with-recent" | "restore" | "sound-done" | "sound-request"
+  action: "status" | "status-with-recent" | "restore" | "resume" | "sound-done" | "sound-request"
 ): Promise<GuardStatus> {
   const args = action.startsWith("sound-") ? ["sound", action.slice("sound-".length)] : [action];
   const { stdout } = await execFileAsync(helperPath, args, {

@@ -61,7 +61,7 @@ When VS Code loses focus or minimizes, the message shrinks into its edge tab. Ne
 | Double-click the message | Maximize the originating VS Code window and open that exact chat, including chats sharing the same project window. |
 | Click **×** in the expanded header | Close that chat's panel and tab until its next turn. This does not stop the task or mark the chat as viewed. |
 
-Opening a chat reuses its existing editor tab and group. The overlay hides after confirming the selected chat is active; if opening fails, the notification stays available. Switching away from a viewed chat brings back its minimized tab.
+Opening a chat selects it in the existing Codex sidebar on the right, without creating an editor tab. Overlay clicks go directly to Lid Guard in the originating VS Code window. Closing the folder or VS Code keeps its recent overlay tabs available. Opening a retained chat reuses a window with that project, or launches VS Code with the original project folder (or saved workspace) and opens the chat. Changing the same window to a different folder still closes the previous folder's overlay tabs; tabs in other windows remain available. The overlay hides after confirming the selected chat is active; if opening fails, the notification stays available. Switching away from a viewed chat brings back its minimized tab.
 
 Right-side panels slide flush with the display edge. Minimize and restore transitions follow the editor's window events, and animations respect the Windows animation setting. Hover uses cached previews so reading messages does not wait for session-file access.
 
@@ -87,6 +87,12 @@ Completion indicators stay on until you open that chat or view it manually in it
 Unread completions remain available until viewed, subject to the three-tab limit. Closing a notification hides it until the next turn without acknowledging its completion. The latest previews for the three most recent chats stay cached; older previews use the configured retention time, paused while tucked away.
 
 Long messages are shortened in the overlay. Open the chat for the full reply. Updates appear after Codex writes them locally, rather than token by token. Chats without an identified editor window do not get overlays.
+
+### Tray icon and quitting
+
+A shield icon in the Windows notification area shows that the helper is running. Click or right-click it and choose **Quit Lid Guard (close all tabs)** to exit the helper, close every overlay tab, cancel pending sleep, and restore the original power settings. The helper stays stopped, including during background extension checks, until you run **Codex Lid Guard: Enable** or click **Lid Guard stopped** in the VS Code status bar.
+
+Retained tabs stay in memory while the helper runs; quitting the helper or restarting Windows clears them. Closing VS Code alone leaves them available, subject to the three-tab limit. Keeping the helper running does not itself keep Windows awake.
 
 ## Keyboard shortcuts
 
@@ -199,7 +205,7 @@ Before changing power settings, the guardian writes a recovery record to `%LOCAL
 | A tab disappeared | You may have viewed its chat, closed the notification, or brought a newer chat into the three-tab limit. A closed notification returns on that chat's next turn. |
 | Copilot opens Windows Settings or another app | Overlay shortcuts require a visible tab and the standard **Win + Shift + F23** key sequence. A Windows or keyboard-utility remap that replaces that sequence will prevent detection. Without visible tabs, the key keeps its normal Windows action. |
 | Enter or Esc does nothing to the preview | Select a tab using Copilot first, then press Enter or Esc within the active shortcut. On keyboards that emit a quick Copilot tap, the interval is 1.5 seconds. |
-| Double-click opens the window but not the right chat | If upgrading from before `0.1.68`, reload existing VS Code windows once to load the exact-chat navigation handler. |
+| Double-click opens the window but not the right chat | After installing `0.1.73`, reload existing VS Code windows once to activate direct session navigation and workspace tracking. Navigation failures appear in the **Codex Lid Guard Navigation** output channel. |
 | No alert sound | Check `alertSounds`. The current focused chat is quiet by default. Approval/question alerts also need optional hooks and their review. |
 | Windows stays awake after a task stops | Check the shield's active-turn count for another running chat. Use **Show Status** to inspect sessions or **Restore Power Settings Now** to restore the saved policy. |
 

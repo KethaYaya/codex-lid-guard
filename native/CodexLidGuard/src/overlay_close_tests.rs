@@ -39,7 +39,7 @@ fn native_close_button_and_escape_dismiss_only_the_selected_tab() {
                             .into(),
                         final_message: true,
                         attention: true,
-                        target: Some(CardTarget {
+                        target: Some(CardTarget { project: None,
                             window: 100,
                             session_id: format!("close-{slot}"),
                         }),
@@ -105,7 +105,7 @@ fn native_close_button_and_escape_dismiss_only_the_selected_tab() {
         assert_eq!(
             closures.recv_timeout(Duration::from_millis(200)).unwrap(),
             (
-                CardTarget {
+                CardTarget { project: None,
                     window: 100,
                     session_id: "close-0".into()
                 },
@@ -147,7 +147,7 @@ fn native_close_button_and_escape_dismiss_only_the_selected_tab() {
         assert_eq!(
             closures.recv_timeout(Duration::from_millis(200)).unwrap(),
             (
-                CardTarget {
+                CardTarget { project: None,
                     window: 100,
                     session_id: "close-1".into()
                 },

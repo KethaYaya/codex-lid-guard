@@ -24,7 +24,7 @@ fn native_restore_animation_keeps_drawing_during_open_and_recovers_from_failure(
             cards: vec![Card { id: 1, label: "Owned restore animation".into(),
                 text: "Keep drawing this cached message while editor restoration runs separately.".into(),
                 final_message: true, attention: true,
-                target: Some(CardTarget { window: 100, session_id: "open-animation".into() }) }],
+                target: Some(CardTarget { project: None, window: 100, session_id: "open-animation".into() }) }],
             attention: true, dock_request: epoch.load(Ordering::Relaxed),
             close: stop.load(Ordering::Relaxed), ..Frame::empty()
         }, |target, _| {

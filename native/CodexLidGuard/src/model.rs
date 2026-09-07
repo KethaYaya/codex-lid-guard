@@ -58,6 +58,8 @@ pub struct GuardResponse {
     pub is_guarding: bool,
     pub lid_state: String,
     pub sleep_pending: bool,
+    #[serde(default)]
+    pub helper_paused: bool,
 }
 
 impl Default for GuardResponse {
@@ -75,6 +77,7 @@ impl Default for GuardResponse {
             is_guarding: false,
             lid_state: "unknown".to_string(),
             sleep_pending: false,
+            helper_paused: false,
         }
     }
 }

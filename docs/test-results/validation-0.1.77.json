@@ -1,0 +1,23 @@
+{
+  "version": "0.1.77",
+  "change": "Embed the extension's existing PNG logo in the native helper and use it as the notification-area icon. Create the icon at the system small-icon dimensions and release its handle after tray shutdown.",
+  "sourceImage": "extension/images/codex-lid-guard-logo.png",
+  "trayIntegration": {
+    "passed": true,
+    "test": "win::tray::tests::tray_dispatches_quit_and_removes_its_owned_window_on_drop",
+    "scope": "Creates a separate tray icon with the embedded logo, verifies Explorer registration, dispatches Quit to a test callback, and verifies the owned window is removed. Does not quit the running helper."
+  },
+  "visualCheck": {
+    "passed": true,
+    "preview": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-tray-0.1.77.png",
+    "scope": "Inspected the 16x16 icon rendered from the source PNG using the same Windows icon API."
+  },
+  "clippyAllTargetsWarningsDenied": "passed",
+  "package": "passed",
+  "diffCheck": "passed",
+  "installedVersion": "0.1.77",
+  "installedHelperMatchesBuild": true,
+  "helperSha256": "d521c9f10a03a71006d58a60490cc734bf9b88174f8654eb98ef654c6654d9d9",
+  "activation": "Detached updater waits for active turns to finish before switching the helper; result is recorded in LOCALAPPDATA/CodexLidGuard/upgrade-0.1.77-result.json.",
+  "apiReference": "https://devblogs.microsoft.com/oldnewthing/20231025-00/?p=108925"
+}

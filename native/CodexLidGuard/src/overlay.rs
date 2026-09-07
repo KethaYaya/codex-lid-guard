@@ -29,6 +29,7 @@ pub struct Session {
 pub struct CardTarget {
     pub window: u64,
     pub session_id: String,
+    pub project: Option<crate::session_navigation::Project>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +79,7 @@ impl Frame {
 
 struct TrackedSession {
     session: Session,
+    project: Option<crate::session_navigation::Project>,
     label: String,
     fallback_title: Option<String>,
     cursor: Option<MessageCursor>,
@@ -170,11 +172,18 @@ impl Feed {
 
     fn frame(
         &mut self,
-        active: Vec<Session>,
+        mut active: Vec<Session>,
         settings: &GuardSettings,
         now: Instant,
         collapsed: &HashSet<String>,
     ) -> Vec<Frame> {
+        let contexts = crate::session_navigation::contexts(active.iter().filter_map(|session| session.window)
+            .chain(self.sessions.values().filter_map(|tracked| tracked.session.window)));
+        let allowed = |window: u64, cwd: Option<&str>| {
+            contexts.get(&window).is_none_or(|context| context.keeps_preview(cwd))
+        };
+        active.retain(|session| session.window.is_none_or(|window| allowed(window, session.cwd.as_deref())));
+        self.discard_stale_workspaces(allowed);
         // Keep the bounded preview cache available behind the tab, then give
         // reopened messages their normal reading time before expiry resumes.
         self.pause_expiry(collapsed, now);
@@ -192,6 +201,7 @@ impl Feed {
                     .entry(session.id.clone())
                     .or_insert_with(|| TrackedSession {
                         session: session.clone(),
+                        project: None,
                         label: String::new(),
                         fallback_title: None,
                         cursor: None,
@@ -210,7 +220,11 @@ impl Feed {
             }
             tracked.source_active = true;
             tracked.session.activity = tracked.session.activity.max(session.activity);
-            tracked.session.window = session.window;
+            // A late lifecycle entry can still carry the pre-reopen HWND.
+            if tracked.project.is_none() || tracked.session.window.is_none_or(|window|
+                contexts.get(&window).is_none_or(|context| !context.allows(tracked.session.cwd.as_deref()))) {
+                tracked.session.window = session.window;
+            }
             if session.cwd.is_some() {
                 tracked.session.cwd = session.cwd;
             }
@@ -225,6 +239,20 @@ impl Feed {
                 || now.duration_since(session.last_active) < Duration::from_secs(600)
         });
         self.dismissed.retain(|id| self.sessions.contains_key(id));
+        let refresh_connections = self.next_title_refresh.is_none_or(|next| now >= next);
+        for tracked in self.sessions.values_mut() {
+            if let Some(project) = tracked.session.window.and_then(|window| contexts.get(&window))
+                .and_then(|context| context.project(tracked.session.cwd.as_deref())) {
+                tracked.project = Some(project);
+            }
+            // A manually reopened project may now have a different HWND.
+            if refresh_connections && let Some(project) = &tracked.project
+                && tracked.session.window.is_some_and(|window| contexts.get(&window)
+                    .is_none_or(|context| !context.allows(Some(&project.cwd))))
+                && let Some(window) = crate::session_navigation::matching_window(project, tracked.session.window.unwrap_or(0)) {
+                tracked.session.window = Some(window);
+            }
+        }
         let refresh_titles =
             !self.sessions.is_empty() && self.next_title_refresh.is_none_or(|next| now >= next);
         if refresh_titles {
@@ -351,13 +379,16 @@ impl Feed {
                 .filter_map(|tracked| tracked.session.window)
                 .collect(),
         );
-        let focused_sessions = self
+        let focused_sessions: HashSet<_> = self
             .sessions
             .iter()
-            .filter(|(_, tracked)| focused.is_some() && tracked.session.window == focused)
+            .filter(|(_, tracked)| focused.is_some() && tracked.session.window == focused
+                && focused.and_then(|window| contexts.get(&window))
+                    .is_none_or(|context| context.allows(tracked.session.cwd.as_deref())))
             .map(|(id, _)| id.clone())
             .collect();
         let views = self.views.for_sessions(&focused_sessions);
+        self.opened.retain(|_, opened| focused_sessions.contains(&opened.session_id));
         self.reconcile_opened(focused, &views);
         let viewed = self.acknowledge_visible(
             |window| Some(window) == focused,
@@ -371,6 +402,15 @@ impl Feed {
         frames
     }
 
+    fn discard_stale_workspaces(&mut self, allowed: impl Fn(u64, Option<&str>) -> bool) {
+        self.sessions.retain(|_, tracked| tracked.session.window
+            .is_none_or(|window| allowed(window, tracked.session.cwd.as_deref())));
+        self.previews.retain(|preview| self.sessions.contains_key(&preview.session));
+        self.opened.retain(|_, opened| self.sessions.contains_key(&opened.session_id));
+        self.dismissed.retain(|id| self.sessions.contains_key(id));
+        self.was_collapsed.retain(|id| self.sessions.contains_key(id));
+    }
+
     fn dismiss(&mut self, target: &CardTarget, activity: u64) {
         if self.sessions.get(&target.session_id).is_some_and(|tracked|
             tracked.session.window == Some(target.window) && tracked.session.activity == activity) {
@@ -381,8 +421,10 @@ impl Feed {
 
     fn acknowledge(&mut self, target: &CardTarget, viewed: Instant) {
         if let Some(tracked) = self.sessions.get_mut(&target.session_id)
-            && tracked.session.window == Some(target.window)
+            && (tracked.session.window == Some(target.window)
+                || (target.project.is_some() && tracked.project == target.project))
         {
+            tracked.session.window = Some(target.window);
             // A successful explicit open is immediate evidence, even when the
             // extension's view log is missing or still describes the previous chat.
             self.opened.insert(
@@ -488,7 +530,8 @@ impl Feed {
                 tracked
                     .session
                     .window
-                    .filter(|window| *editors.entry(*window).or_insert_with(|| is_editor(*window)))
+                    .filter(|window| tracked.project.is_some()
+                        || *editors.entry(*window).or_insert_with(|| is_editor(*window)))
                     .and_then(|window| {
                         let preview = self.previews.iter().rev().find(|preview| {
                             &preview.session == id
@@ -516,6 +559,7 @@ impl Feed {
                 card.target = Some(CardTarget {
                     window,
                     session_id: id.clone(),
+                    project: tracked.project.clone(),
                 });
                 Frame {
                     session_id: Some(id.clone()),
@@ -553,7 +597,9 @@ fn session_label(cwd: Option<&str>, title: Option<&str>) -> String {
     format!("{folder} \u{2014} {title}")
 }
 
-pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) {
+pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let retained = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let keep_alive = retained.clone();
     std::thread::spawn(move || {
         let shortcuts = win::OverlayShortcuts::start()
             .map_err(|cause| {
@@ -571,12 +617,14 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) {
                 feed.acknowledge(&target, at);
             }
             let settings = GuardSettings::load();
-            if settings.message_overlay {
+            let frames = if settings.message_overlay {
                 feed.frame(source(), &settings, Instant::now(), collapsed)
             } else {
                 feed = Feed::default();
                 vec![]
-            }
+            };
+            keep_alive.store(!frames.is_empty(), std::sync::atomic::Ordering::Relaxed);
+            frames
         });
         for slot in 0..SESSION_LIMIT {
             let mut view = worker.view(slot);
@@ -597,6 +645,7 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) {
             });
         }
     });
+    retained
 }
 
 pub fn preview() -> io::Result<()> {
@@ -826,7 +875,7 @@ mod tests {
         for (id, window) in [("one", 1), ("two", 1), ("three", 2)] {
             feed.sessions.insert(id.into(), tracked(id, window, now));
         }
-        let target = CardTarget {
+        let target = CardTarget { project: None,
             window: 1,
             session_id: "one".into(),
         };
@@ -886,7 +935,7 @@ mod tests {
             "switching apps must make the tab available again"
         );
         feed.acknowledge(
-            &CardTarget {
+            &CardTarget { project: None,
                 window: 99,
                 session_id: "one".into(),
             },
@@ -1003,6 +1052,7 @@ mod tests {
 
     fn tracked(id: &str, window: u64, now: Instant) -> TrackedSession {
         TrackedSession {
+            project: None,
             session: Session {
                 activity: 0,
                 id: id.into(),
@@ -1018,6 +1068,70 @@ mod tests {
             busy: false,
             completion: None,
         }
+    }
+
+    #[test]
+    fn retained_project_tabs_survive_closed_windows_and_rebind_only_after_confirmed_open() {
+        let now = Instant::now();
+        let mut feed = Feed::default();
+        let project = crate::session_navigation::Project { cwd: r"C:\One".into(),
+            path: r"C:\One".into(), executable: r"C:\VS Code\Code.exe".into() };
+        let mut session = tracked("one", 10, now);
+        session.project = Some(project.clone());
+        session.completion = Some((1, now));
+        feed.sessions.insert("one".into(), session);
+        feed.previews.push_back(Preview { session: "one".into(), received: now,
+            card: Card { id: 1, label: "One".into(), text: "Finished".into(), final_message: true,
+                attention: true, target: None } });
+        let settings = GuardSettings::default();
+        feed.trim_previews(&settings, now + Duration::from_secs(3600));
+        let frames = feed.visible_frames(&settings, |_| false, &HashSet::new());
+        assert_eq!(frames.len(), 1, "a closed HWND must not hide a saved project");
+        assert!(frames[0].attention, "closing the editor is not acknowledgement");
+        assert_eq!(frames[0].cards[0].target.as_ref().unwrap().project, Some(project.clone()));
+        feed.acknowledge(&CardTarget { window: 20, session_id: "one".into(), project: None }, now);
+        assert_eq!(feed.sessions["one"].session.window, Some(10), "an unrelated open cannot take ownership");
+        feed.acknowledge(&CardTarget { window: 20, session_id: "one".into(), project: Some(project) }, now);
+        assert_eq!(feed.sessions["one"].session.window, Some(20));
+        assert!(feed.sessions["one"].completion.is_none());
+        let target = feed.visible_frames(&settings, |_| false, &HashSet::new())[0].cards[0].target.clone().unwrap();
+        feed.dismiss(&target, 0);
+        assert!(feed.visible_frames(&settings, |_| false, &HashSet::new()).is_empty(), "dismissed tabs allow idle shutdown");
+    }
+
+    #[test]
+    fn changing_folders_removes_old_busy_and_completed_tabs_but_keeps_other_windows() {
+        let now = Instant::now();
+        let mut feed = Feed::default();
+        for (index, id, window, cwd) in [
+            (1, "old-busy", 10, r"C:\Old"),
+            (2, "old-complete", 10, r"C:\Old"),
+            (3, "new", 10, r"C:\New"),
+            (4, "other-window", 20, r"C:\Old"),
+        ] {
+            let mut session = tracked(id, window, now);
+            session.session.cwd = Some(cwd.into());
+            session.busy = index == 1;
+            session.completion = (index == 2).then_some((index, now));
+            feed.sessions.insert(id.into(), session);
+            feed.was_collapsed.insert(id.into());
+            feed.previews.push_back(Preview {
+                session: id.into(), received: now,
+                card: Card { id: index, label: id.into(), text: "update".into(),
+                    final_message: index == 2, attention: index == 2, target: None },
+            });
+        }
+        feed.discard_stale_workspaces(|window, cwd| window != 10
+            || cwd.is_some_and(|cwd| crate::session_navigation::belongs_to_workspace(cwd, &[r"C:\New".into()])));
+        assert_eq!(feed.sessions.len(), 2);
+        assert!(feed.sessions.contains_key("new"));
+        assert!(feed.sessions.contains_key("other-window"));
+        assert_eq!(feed.previews.len(), 2);
+        assert!(!feed.was_collapsed.contains("old-complete"));
+        let frames = feed.visible_frames(&GuardSettings::default(), |_| true, &HashSet::new());
+        assert_eq!(frames.len(), 2, "removed tabs must not survive in the frame cache");
+        feed.discard_stale_workspaces(|window, _| window != 10);
+        assert_eq!(feed.sessions.len(), 1, "closing the replacement host clears its tab too");
     }
 
     #[test]
@@ -1236,14 +1350,14 @@ mod tests {
         assert!(feed.sessions["two"].completion.is_some());
 
         // An old click must not acknowledge a result that completed after that click.
-        let target = CardTarget {
+        let target = CardTarget { project: None,
             window: 2,
             session_id: "two".into(),
         };
         feed.acknowledge(&target, now - Duration::from_secs(1));
         assert!(feed.sessions["two"].completion.is_some());
         feed.acknowledge(
-            &CardTarget {
+            &CardTarget { project: None,
                 window: 1,
                 ..target.clone()
             },
@@ -1278,7 +1392,7 @@ mod tests {
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#).unwrap();
         feed.test_poll(active.clone(), &settings, now, false);
-        let target = CardTarget { window: 1, session_id: "one".into() };
+        let target = CardTarget { project: None, window: 1, session_id: "one".into() };
         feed.dismiss(&target, 99);
         assert!(feed.dismissed.is_empty(), "a stale close must not dismiss another turn");
         feed.dismiss(&target, 0);
@@ -1462,6 +1576,7 @@ mod tests {
             feed.sessions.insert(
                 id.into(),
                 TrackedSession {
+                    project: None,
                     session: Session {
                         activity: 0,
                         id: id.into(),
@@ -1648,6 +1763,7 @@ mod tests {
         feed.sessions.insert(
             "one".into(),
             TrackedSession {
+                project: None,
                 session: Session {
                     activity: 0,
                     id: "one".into(),

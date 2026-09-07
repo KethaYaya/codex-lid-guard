@@ -10,9 +10,11 @@ mod codex_session_index;
 mod codex_transcript;
 mod daemon;
 mod logging;
+mod helper_pause;
 mod model;
 mod overlay;
 mod paths;
+mod session_navigation;
 mod sound;
 mod win;
 
@@ -39,7 +41,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_ascii_lowercase();
     match command.as_str() {
         "daemon" => daemon::run()?,
+        "resume" => {
+            helper_pause::resume()?;
+            println!("{}", serde_json::to_string(&client::send(GuardRequest {
+                action: "status".into(), ..GuardRequest::default()
+            }))?);
+        }
         "overlay-preview" => overlay::preview()?,
+        "editor-window" => {
+            println!("{}", serde_json::json!({ "window": win::foreground_editor_window() }));
+        }
+        "open-editor-session" => {
+            let accepted = win::foreground_editor_window().is_some_and(|window| {
+                session_navigation::dispatch(window, arguments.get(1).map(String::as_str).unwrap_or_default(),
+                    arguments.get(2).map(String::as_str)) == Some(true)
+            });
+            println!("{}", serde_json::json!({ "accepted": accepted }));
+        }
         "hook" => run_hook(arguments.get(1).map(String::as_str).unwrap_or_default()),
         "sound" => run_sound(
             arguments.get(1).map(String::as_str).unwrap_or_default(),

@@ -1,0 +1,47 @@
+{
+  "version": "0.1.73",
+  "changes": [
+    "Retain overlay tabs after Close Folder and VS Code exit; reopen the original folder or saved workspace and exact chat",
+    "Remove previous project tabs when a live window changes folder",
+    "Tray icon with graceful quit, power restoration, and explicit restart"
+  ],
+  "extensionUnitTests": {
+    "passed": 38,
+    "failed": 0
+  },
+  "nativeTests": {
+    "passed": 147,
+    "failed": 0,
+    "ignored": 10
+  },
+  "nativeTrayTest": {
+    "passed": 1,
+    "failed": 0,
+    "cases": [
+      "Explorer icon registration verified through Shell_NotifyIconGetRect",
+      "Quit command dispatch",
+      "Owned tray window removed on drop"
+    ]
+  },
+  "clippy": "all targets passed with warnings denied",
+  "vscodeIntegration": {
+    "result": "passed",
+    "log": "codex-lid-guard-navigation-l4ktnjf5/test.log",
+    "environment": "Disposable VS Code extension development host; real tab APIs, fixture chat webview and packaged native pipe dispatch.",
+    "cases": [
+      "Absent conversation tab loads content",
+      "Existing URI and editor group reuse",
+      "Reject old-folder navigation before and after bridge publication"
+    ]
+  },
+  "retentionValidation": "Unit coverage for folder closure, disconnected owner, live folder replacement, saved workspace/root capture, retention after one hour, and confirmed reattachment to a new HWND. Full live Codex cold restart was not exercised.",
+  "quitValidation": "Isolated power-policy test verifies release, pending-sleep cancellation, and rejection of late acquisitions. Pause marker stays until explicit resume.",
+  "packagePayloadVerified": true,
+  "installedFilesVerified": 23,
+  "readmePackaging": "VSCE rewrites relative screenshot links; installed README matches the VSIX.",
+  "helperSha256": "94415bc443554670fbb71039227d2662034b2aacaa982daeecef969683d6fe80",
+  "extensionReloadRequired": true,
+  "liveHelperVersionAtInstall": "0.1.72",
+  "activeTurnsAtInstall": 1,
+  "activation": "Installed locally. Reload existing VS Code windows once after active tasks finish. The running helper upgrades automatically when idle."
+}

@@ -1,0 +1,38 @@
+{
+  "version": "0.1.71",
+  "changes": [
+    "Direct native-helper to owning extension-host navigation over a local named pipe",
+    "Remove busy and completed overlays when the owning window changes workspace",
+    "Reject queued requests from stale or unfocused workspaces"
+  ],
+  "extensionUnitTests": {
+    "passed": 38,
+    "failed": 0
+  },
+  "nativeTests": {
+    "passed": 142,
+    "failed": 0,
+    "ignored": 9
+  },
+  "clippy": "all targets passed with warnings denied",
+  "vscodeIntegration": {
+    "result": "passed",
+    "environment": "Disposable VS Code extension development host with the packaged native helper, real named pipes and tab APIs, and a fixture conversation webview. Did not automate live Codex chats.",
+    "cases": [
+      "native helper dispatch without external URI",
+      "previously absent tab loads session-specific webview content",
+      "reuse existing tab URI and editor group",
+      "reject old-folder clicks before and after context publication",
+      "invalid links do not navigate or acknowledge"
+    ],
+    "command": "python scripts/test-session-navigation.py --code <Code.exe> --helper extension/bin/win-x64/CodexLidGuard.exe",
+    "log": "codex-lid-guard-navigation-2623uct7/test.log"
+  },
+  "packagePayloadVerified": true,
+  "installedFilesVerified": 23,
+  "manifestVerification": "Matches package after excluding VS Code installer __metadata.",
+  "helperSha256": "1c7355f55331002833118e2b1ee43991c651f7b57617effb89c3d38e7c47ce81",
+  "extensionReloadRequired": true,
+  "liveHelperVersionAtInstall": "0.1.70",
+  "activation": "Installed locally. Existing VS Code windows require reload. The native helper upgrades automatically when the existing guardian has no active turns; active tasks were not restarted."
+}

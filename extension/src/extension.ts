@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
-import { handleSessionUri } from "./sessionEditor";
+import { handleSessionUri, openSessionSidebar } from "./sessionSidebar";
+import { createSessionBridge, sessionBelongsToWorkspace } from "./sessionBridge";
 import {
   quotePowerShellLiteral,
   guardHooksForPreference,
@@ -87,7 +88,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.window.registerUriHandler({
-      handleUri: (uri) => handleSessionUri(uri, (sessionId) => recordViewedSession(context, sessionId))
+      handleUri: (uri) => handleSessionUri(uri, (sessionId) => recordViewedSession(context, sessionId),
+        (sessionId) => isCodexSessionSelected(context, sessionId))
         .catch((error) => { void vscode.window.showErrorMessage(`Could not open Codex chat: ${messageOf(error)}`); })
     }),
     vscode.commands.registerCommand("codexLidGuard.enable", () => enable(context, statusBar, true)),
@@ -127,6 +129,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.globalState.get<SessionAttentionState>(sessionAttentionStateKey)
   );
   sessionAttentionPersistence = Promise.resolve();
+  const navigationLog = vscode.window.createOutputChannel("Codex Lid Guard Navigation", { log: true });
+  context.subscriptions.push(navigationLog);
+  const reportNavigationError = (error: unknown) => navigationLog.error(messageOf(error));
+  try {
+    const bridge = await createSessionBridge({
+      directory: path.join(process.env.LOCALAPPDATA!, "CodexLidGuard", "windows"),
+      roots: () => vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
+      workspaceFile: () => vscode.workspace.workspaceFile?.scheme === "file"
+        ? vscode.workspace.workspaceFile.fsPath : undefined,
+      focused: () => vscode.window.state.focused,
+      open: async (sessionId) => {
+        navigationLog.info(`Opening session ${sessionId}`);
+        if (!await openSessionSidebar(sessionId, (id) => isCodexSessionSelected(context, id))) {
+          throw new Error("The requested Codex chat was not confirmed selected before navigation ended.");
+        }
+        navigationLog.info(`Codex confirmed selected session ${sessionId}`);
+        // Codex's own view watcher acknowledges the loaded conversation.
+      },
+      reportError: reportNavigationError
+    });
+    const bind = () => bridge.bind(helperPath(context)).catch(reportNavigationError);
+    context.subscriptions.push(bridge,
+      vscode.window.onDidChangeWindowState((state) => { if (state.focused) { void bind(); } }),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => { void bind(); }));
+    await bind();
+  } catch (error) { reportNavigationError(error); }
   await syncSettings();
   startStatusWatcher(context, statusBar);
   context.subscriptions.push({
@@ -166,6 +194,7 @@ async function enable(
     ensureWindows();
     const helper = helperPath(context);
     await fs.access(helper);
+    if (notify) { await runHelper(helper, "resume"); }
     await syncSettings();
     const hooksChanged = await syncOptionalHooks(context, helper);
     await setEnabledSetting(true);
@@ -498,11 +527,20 @@ async function showSessions(
   }
 }
 
+async function isCodexSessionSelected(context: vscode.ExtensionContext, sessionId: string): Promise<boolean> {
+  return await readFocusedCodexSession(codexLogPathForExtensionLog(context.logUri.fsPath)) === sessionId;
+}
+
 async function openSession(
   context: vscode.ExtensionContext,
   menuEntry: SessionMenuEntry
 ): Promise<void> {
   const activeItem = menuEntry.activeItem;
+  const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+  if (activeItem.cwd && sessionBelongsToWorkspace(activeItem.cwd, roots)) {
+    await openSessionSidebar(activeItem.sessionId, (id) => isCodexSessionSelected(context, id));
+    return;
+  }
   if (menuEntry.awake) {
     try {
       await focusHelperSession(
@@ -755,6 +793,15 @@ function stopCodexTurnStartWatcher(): void {
 function updateStatusBar(statusBar: vscode.StatusBarItem, status: GuardStatus): void {
   if (isGuardianPipeName(status.pipeName)) {
     guardianPipeName = status.pipeName;
+  }
+  statusBar.command = status.helperPaused ? "codexLidGuard.enable" : "codexLidGuard.showStatus";
+  if (status.helperPaused) {
+    guardianPipeName = undefined;
+    statusBar.text = "$(circle-slash) Lid Guard stopped";
+    statusBar.tooltip = "Quit from the tray. Click to restart Lid Guard.";
+    statusBar.backgroundColor = undefined;
+    statusBar.show();
+    return;
   }
   if (!status.ok) {
     setError(statusBar, status.message);

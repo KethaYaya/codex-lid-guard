@@ -26,6 +26,9 @@ mod close_tests;
 #[cfg(test)]
 #[path = "overlay_cycle_tests.rs"]
 mod cycle_tests;
+#[cfg(test)]
+#[path = "overlay_retention_tests.rs"]
+mod retention_tests;
 
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -70,6 +73,7 @@ unsafe extern "system" {
         flags: u32,
     ) -> Bool;
     fn MonitorFromWindow(window: Hwnd, flags: u32) -> Handle;
+    fn MonitorFromPoint(point: Point, flags: u32) -> Handle;
     fn GetMonitorInfoW(monitor: Handle, info: *mut MonitorInfo) -> Bool;
     fn SetThreadDpiAwarenessContext(context: Handle) -> Handle;
     fn SetWindowRgn(window: Hwnd, region: Handle, redraw: Bool) -> i32;
@@ -82,6 +86,30 @@ unsafe extern "system" {
     fn GetDoubleClickTime() -> u32;
     fn SetWindowTextW(window: Hwnd, text: *const u16) -> Bool;
     fn SystemParametersInfoW(action: u32, parameter: u32, value: *mut c_void, flags: u32) -> Bool;
+}
+
+// A retained tab outlives its editor HWND. Resolve the display independently:
+// keep the overlay on its own display when the source closes, and retry after
+// failed Win32 calls because a window can disappear between those calls.
+unsafe fn overlay_display(origin: Option<u64>, overlay: Hwnd) -> io::Result<(MonitorInfo, u32)> {
+    unsafe {
+        let source = origin.map(|value| value as usize as Hwnd).unwrap_or(GetForegroundWindow());
+        for anchor in [source, overlay] {
+            if IsWindow(anchor) == 0 { continue; }
+            let mut info: MonitorInfo = zeroed();
+            info.size = size_of::<MonitorInfo>() as u32;
+            if GetMonitorInfoW(MonitorFromWindow(anchor, 2), &mut info) != 0 {
+                return Ok((info, GetDpiForWindow(anchor).max(96)));
+            }
+        }
+        // Covers initial layout when neither window supplies a usable monitor.
+        let mut info: MonitorInfo = zeroed();
+        info.size = size_of::<MonitorInfo>() as u32;
+        if GetMonitorInfoW(MonitorFromPoint(Point { x: 0, y: 0 }, 1), &mut info) != 0 {
+            return Ok((info, GetDpiForWindow(overlay).max(96)));
+        }
+        Err(error("Read overlay monitor"))
+    }
 }
 
 #[link(name = "gdi32")]
@@ -764,16 +792,7 @@ fn run_overlay_inner(
                         state.clicks = ClickTracker::default();
                         KillTimer(window, 3);
                     } else {
-                        let anchor = frame
-                            .window
-                            .map(|value| value as usize as Hwnd)
-                            .unwrap_or(GetForegroundWindow());
-                        let mut info: MonitorInfo = zeroed();
-                        info.size = size_of::<MonitorInfo>() as u32;
-                        if GetMonitorInfoW(MonitorFromWindow(anchor, 2), &mut info) == 0 {
-                            return Err(error("Read overlay monitor"));
-                        }
-                        let dpi = GetDpiForWindow(anchor).max(96);
+                        let (info, dpi) = overlay_display(frame.window, window)?;
                         let font_changed = state.dpi != dpi;
                         if font_changed {
                             let font = CreateFontW(
@@ -1861,9 +1880,15 @@ unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
                 dpi,
             );
         }
+        let project = state
+            .cards
+            .first()
+            .and_then(|card| card.label.split_once(" \u{2014} "))
+            .map(|(folder, _)| folder)
+            .unwrap_or("Codex");
         draw_text(
             dc,
-            "CODEX  ·  LIVE UPDATES",
+            &format!("{project}  ·  LIVE UPDATES"),
             &mut header,
             0x00cab98b,
             DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -2591,7 +2616,7 @@ mod tests {
                 cards: vec![Card { id: slot as u64, label: format!("Project \u{2014} Chat {slot}"),
                     text: "This panel belongs to one chat. Other panels must stay in place.".into(),
                     final_message: slot == 1, attention: slot == 1,
-                    target: Some(CardTarget { window: 100 + slot as u64, session_id: format!("chat-{slot}") }) }],
+                    target: Some(CardTarget { project: None, window: 100 + slot as u64, session_id: format!("chat-{slot}") }) }],
                 dock_request: if slot == 2 { focus_epoch.load(Ordering::Relaxed) as u64 } else { 0 },
                 busy: slot != 1, attention: slot == 1, close: stop.load(Ordering::Relaxed),
                 ..Frame::empty()
@@ -2744,7 +2769,7 @@ mod tests {
             click(windows[2], false, true);
             assert_eq!(
                 received.recv_timeout(Duration::from_secs(1)).unwrap(),
-                CardTarget {
+                CardTarget { project: None,
                     window: 102,
                     session_id: "chat-2".into()
                 }
@@ -2822,7 +2847,7 @@ mod tests {
                 cards: vec![Card { id: slot as u64, label: format!("Project \u{2014} {}", ["Dry run", "Deploy", "Build"][slot]),
                     text: "Keyboard shortcuts must route to this exact chat without typing into other apps.".into(),
                     final_message: true, attention: true,
-                    target: Some(CardTarget { window: 100+slot as u64, session_id: format!("keys-{slot}") }) }],
+                    target: Some(CardTarget { project: None, window: 100+slot as u64, session_id: format!("keys-{slot}") }) }],
                 dock_request: 1, attention: true, close: stop.load(Ordering::Relaxed), ..Frame::empty()
             }, |target, _| { opened.send(target.clone()).unwrap(); true.into() }, || None, Some(publisher), None).unwrap()));
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -2898,7 +2923,7 @@ mod tests {
                 service.test_key(code[1] as u32, true);
                 assert_eq!(
                     received.recv_timeout(Duration::from_secs(1)).unwrap(),
-                    CardTarget {
+                    CardTarget { project: None,
                         window: 100 + slot as u64,
                         session_id: format!("keys-{slot}")
                     }
@@ -3269,7 +3294,7 @@ mod tests {
                                 .into(),
                             final_message: double,
                             attention: double,
-                            target: Some(CardTarget {
+                            target: Some(CardTarget { project: None,
                                 window: 123,
                                 session_id: "test-session".into(),
                             }),
@@ -3319,7 +3344,7 @@ mod tests {
         if double {
             assert_eq!(
                 clicked,
-                [CardTarget {
+                [CardTarget { project: None,
                     window: 123,
                     session_id: "test-session".into()
                 }]
@@ -3385,7 +3410,7 @@ mod tests {
                         text: "message".into(),
                         final_message: false,
                         attention: false,
-                        target: Some(CardTarget {
+                        target: Some(CardTarget { project: None,
                             window: id,
                             session_id: id.to_string(),
                         }),
@@ -3440,7 +3465,7 @@ mod tests {
     fn single_click_waits_but_double_click_opens_without_dismissing() {
         let card = ClickedCard {
             id: 1,
-            target: Some(CardTarget {
+            target: Some(CardTarget { project: None,
                 window: 10,
                 session_id: "one".into(),
             }),
@@ -3534,7 +3559,7 @@ mod tests {
     fn different_messages_in_the_same_session_do_not_form_a_double_click() {
         let first = ClickedCard {
             id: 1,
-            target: Some(CardTarget {
+            target: Some(CardTarget { project: None,
                 window: 10,
                 session_id: "one".into(),
             }),

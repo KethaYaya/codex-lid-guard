@@ -1,0 +1,57 @@
+{
+  "version": "0.1.75",
+  "observedDefect": "The navigation pipe accepted the correct session at 12:34:42.150. Native confirmation timed out at 12:34:47.170; Codex reported that session active at 12:34:47.930 and resume success at 12:34:52.656.",
+  "changes": [
+    "Wait up to 35 seconds after dispatch for Codex confirmation, within a 75-second total window-launch/open budget.",
+    "Confirm both the requested active editor and the same session in the current extension host Codex log.",
+    "Reapply the actual saved URI/group once if startup replaces the editor selection.",
+    "Keep a progress indicator until confirmation; cancel on a newer open, focus loss or workspace replacement."
+  ],
+  "nativeTests": {
+    "passed": 148,
+    "failed": 0,
+    "ignored": 11,
+    "slowRendererRegression": "passes with confirmation after 5.25 seconds"
+  },
+  "extensionUnitTests": {
+    "passed": 38,
+    "failed": 0
+  },
+  "clippy": "all targets passed with warnings denied",
+  "restoreRegression": {
+    "passed": true,
+    "logDirectory": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-restore-6uxgc7xf",
+    "cases": [
+      "Two actual VS Code processes sharing a disposable saved workspace/profile",
+      "Saved maximized secondary sidebar; verifies editor area is shown after navigation",
+      "Two saved chat tabs with a different last-active tab",
+      "Competing delayed restoration and 6.5-second content delay",
+      "Correct target content loads; no duplicate target resolver or tab",
+      "A newer open cancels the previous pending request without a delayed reselect"
+    ]
+  },
+  "realCodexSmoke": {
+    "passed": true,
+    "extensionVersion": "26.901.22334",
+    "logDirectory": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-restore-uv5uoej4",
+    "scope": "Opened an existing local session in a disposable VS Code profile, closed the process, then reopened and verified the saved session remains selected beyond the 30-second renderer startup timer. No prompt was sent.",
+    "observation": "The restored session reported resume success; no renderer startup timeout occurred."
+  },
+  "limitations": "The original Codex renderer_ready_timeout was not reproduced in the real-provider smoke test, which also passed before this change. This update addresses the confirmed premature timeout and adds recovery for competing startup selection; it does not modify Codex itself.",
+  "diffCheck": "passed",
+  "installation": "Installed locally; activation waits for the active turn to finish and a VS Code window reload/reopen.",
+  "installedFilesVerified": 23,
+  "helperSha256": "6734dea7217661d95dee7bfd1e3a53e9478fbea11fe4ed03deca762f8217ba1d",
+  "nativePipeIntegration": {
+    "passed": true,
+    "log": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-navigation-ancy0q3x/test.log",
+    "cases": [
+      "native pipe delivery",
+      "absent tab content",
+      "existing tab URI/group reuse",
+      "stale workspace rejection"
+    ],
+    "testHarnessFix": "Explicitly focus the disposable VS Code window before probing its HWND. VS Code extension-test mode reported focused=true while native Windows still had another app in front."
+  },
+  "activation": "Detached updater queued to activate installed helper after active turns drain. Reload/reopen VS Code to activate the extension changes."
+}

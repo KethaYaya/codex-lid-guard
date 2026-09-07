@@ -1,0 +1,47 @@
+{
+  "version": "0.1.76",
+  "problem": "Overlay navigation used vscode.openWith and selected or created a conversation editor in the centre. The user intended to reuse the existing Codex sidebar on the right.",
+  "change": "Open the validated saved-session route through Codex's URI handler. Resolve it with VS Code asExternalUri to retain the originating window ID, focus the Codex sidebar, and dispatch via vscode.open without editor options. Preserve startup confirmation, one retry and cancellation.",
+  "extensionUnitTests": {
+    "passed": 38,
+    "failed": 0
+  },
+  "sidebarAndBridgeIntegration": {
+    "passed": true,
+    "log": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-navigation-xliuymg7/test.log",
+    "cases": [
+      "A matching conversation editor already exists in the centre",
+      "Switch two sessions in one visible sidebar",
+      "No editor tabs added, replaced or selected",
+      "Invalid session routes rejected",
+      "Windows navigation pipe delivers to the sidebar",
+      "Stale workspace requests rejected"
+    ],
+    "scope": "The navigation bridge is exercised through a Node client of the Windows pipe with an isolated registration. Native foreground CLI testing was unavailable while another application held Windows focus; native navigation code is unchanged in this release."
+  },
+  "coldRestoreIntegration": {
+    "passed": true,
+    "directory": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-restore-qp_b2ddj",
+    "cases": [
+      "Two actual VS Code process launches sharing only a disposable profile/workspace",
+      "Maximized sidebar layout preserved",
+      "Delayed sidebar rendering and competing restored selection",
+      "Requested session loads in the same sidebar",
+      "Saved file editor unchanged and no conversation editor created",
+      "A newer open cancels an older request"
+    ]
+  },
+  "realCodexSmoke": {
+    "state": "passed",
+    "extensionVersion": "26.901.22334",
+    "directory": "C:/Users/lenzi/AppData/Local/Temp/codex-lid-guard-restore-ldhbffnk",
+    "scope": "Read an existing local session in a disposable VS Code profile, close the process, reopen, then verify Codex view activity and that editor tabs remain unchanged. No prompt sent."
+  },
+  "nativeChanges": "Version only; native navigation logic unchanged.",
+  "uriConsent": "Existing user profile already trusts the openai.chatgpt URI handler. Tests configure the same trust only in disposable profiles; no live trust settings are changed.",
+  "diffCheck": "passed",
+  "installation": "Installed locally; reload/reopen VS Code to activate sidebar navigation.",
+  "package": "passed",
+  "installedFilesVerified": 23,
+  "helperSha256": "849ead1d963ed424d904cc432d0ac225900973bb90ca0bbfd68a4da9c03e486b"
+}

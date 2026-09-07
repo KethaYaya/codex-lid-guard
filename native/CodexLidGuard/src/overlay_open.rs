@@ -5,7 +5,13 @@ use crate::overlay::CardTarget;
 use std::collections::HashSet;
 use std::time::Instant;
 
-pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(75);
+
+fn confirmation_deadline(started: Instant, dispatched: Instant) -> Instant {
+    // A new extension host can be registered well before Codex's renderer is
+    // ready. Allow the renderer its full startup interval after window launch.
+    (dispatched + Duration::from_secs(35)).min(started + OPEN_TIMEOUT - Duration::from_millis(250))
+}
 
 fn wait_for_session_confirmation(
     target: &CardTarget,
@@ -69,15 +75,23 @@ impl OverlayOpen {
                     let mut message: Message = zeroed();
                     PeekMessageW(&mut message, null_mut(), 0, 0, 0);
                 }
-                let dispatched = activate_overlay_target(&target, || {
-                    super::overlay_window_events::notify_open_started(overlay, target.window);
-                });
+                let original_window = target.window;
                 let mut views = ViewStateReader::default();
                 let sessions = HashSet::from([target.session_id.clone()]);
+                let baseline = views.for_sessions(&sessions).remove(&target.session_id);
+                let resolved = crate::session_navigation::resolve_window(&target, started + Duration::from_secs(32));
+                let mut target = target;
+                if let Some(window) = resolved { target.window = window; }
+                let dispatched = resolved.is_some() && activate_overlay_target(&target, || {
+                    super::overlay_window_events::notify_open_started(overlay, original_window);
+                });
                 let opened = dispatched && wait_for_session_confirmation(
                     &target,
-                    started + OPEN_TIMEOUT - Duration::from_millis(250),
-                    || views.for_sessions(&sessions).remove(&target.session_id).map(|view| view.state),
+                    confirmation_deadline(started, Instant::now()),
+                    || views.for_sessions(&sessions).remove(&target.session_id)
+                        .filter(|view| target.window == original_window || baseline.as_ref()
+                            .is_none_or(|old| old.revision != view.revision))
+                        .map(|view| view.state),
                     || is_window_focused(target.window),
                 );
                 if dispatched && !opened {
@@ -121,8 +135,20 @@ impl OverlayOpen {
 mod tests {
     use super::*;
     #[test]
+    fn cold_renderer_can_confirm_after_the_old_five_second_limit() {
+        let target = CardTarget { project: None, window: 10, session_id: "chat-b".into() };
+        let started = Instant::now();
+        assert!(wait_for_session_confirmation(
+            &target,
+            confirmation_deadline(started, started),
+            || (started.elapsed() >= Duration::from_millis(5250))
+                .then(|| ViewState::Active("chat-b".into())),
+            || true,
+        ));
+    }
+    #[test]
     fn confirmation_waits_for_the_requested_chat_in_a_shared_window() {
-        let target = CardTarget {
+        let target = CardTarget { project: None,
             window: 10,
             session_id: "chat-b".into(),
         };
@@ -143,7 +169,7 @@ mod tests {
 
     #[test]
     fn unconfirmed_expired_and_unfocused_opens_do_not_acknowledge() {
-        let target = CardTarget {
+        let target = CardTarget { project: None,
             window: 10,
             session_id: "chat-b".into(),
         };
@@ -181,7 +207,7 @@ mod tests {
     fn activation_worker_rejects_a_closed_window_without_acknowledging_the_chat() {
         let (viewed, acknowledgements) = mpsc::channel();
         let request = OverlayOpen::activate(
-            CardTarget {
+            CardTarget { project: None,
                 window: 0,
                 session_id: "00000000-0000-0000-0000-000000000001".into(),
             },

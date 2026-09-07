@@ -27,6 +27,9 @@ pub use overlay_window_events::OverlayUpdates;
 #[path = "overlay_open.rs"]
 mod overlay_open;
 pub use overlay_open::OverlayOpen;
+#[path = "tray.rs"]
+mod tray;
+pub use tray::TrayIcon;
 
 pub fn is_editor_window(window: u64) -> bool {
     unsafe {
@@ -35,6 +38,16 @@ pub fn is_editor_window(window: u64) -> bool {
         IsWindow(hwnd) != 0
             && GetWindowThreadProcessId(hwnd, &mut process_id) != 0
             && process_executable_name(process_id).as_deref().is_some_and(is_supported_editor_process)
+    }
+}
+
+pub fn is_process_running(process_id: u32) -> bool {
+    unsafe {
+        let process = OpenProcess(SYNCHRONIZE, 0, process_id);
+        if process.is_null() { return false; }
+        let running = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+        CloseHandle(process);
+        running
     }
 }
 
@@ -1415,6 +1428,12 @@ fn activate_overlay_target(target: &crate::overlay::CardTarget, before_show: imp
     // the active-turn entry, so this does not depend on daemon turn lookup.
     if !focus_editor_window_with_state(target.window, true, before_show) {
         return false;
+    }
+    let cwd = target.project.as_ref().map(|project| project.cwd.clone())
+        .or_else(|| crate::codex_lifecycle::session_metadata(&target.session_id).1);
+    if let Some(accepted) = crate::session_navigation::dispatch(target.window, &target.session_id, cwd.as_deref()) {
+        if !accepted { logging::write("The chat's workspace navigation bridge rejected or could not receive the open request."); }
+        return accepted;
     }
     unsafe {
         let window = target.window as usize as Hwnd;

@@ -1,0 +1,36 @@
+{
+  "version": "0.1.74",
+  "rootCause": "A retained frame kept the destroyed VS Code HWND as its display anchor. MonitorFromWindow/GetMonitorInfoW failed, ending that overlay worker.",
+  "liveEvidence": "guard.log at 2026-09-07T12:19:53.214: Message overlay stopped: Read overlay monitor: Invalid monitor handle. (os error 1461)",
+  "change": "Resolve display and DPI from the source while available; fall back to the independent overlay window and then the primary monitor.",
+  "regressionTest": {
+    "name": "native_tab_survives_source_window_destruction_and_remains_interactive",
+    "beforeFix": "Failed after DestroyWindow with the exact live error: Invalid monitor handle (1461).",
+    "afterFix": "Passed",
+    "cases": [
+      "Source HWND actually destroyed",
+      "Overlay worker stays alive",
+      "Tab stays visible at the same bounds",
+      "New content reaches the retained tab",
+      "Open shortcut retains project target",
+      "Failed simulated launch leaves the tab available"
+    ],
+    "scope": "Owned native source window and overlay; no live user editor was closed. Launch callback is simulated."
+  },
+  "nativeUnitTests": {
+    "passed": 147,
+    "failed": 0,
+    "ignored": 11
+  },
+  "explicitNativeRegression": {
+    "passed": 1,
+    "failed": 0
+  },
+  "clippy": "All targets passed with warnings denied",
+  "extensionBuild": "TypeScript compile and VSIX package passed",
+  "installedFilesVerified": 23,
+  "helperSha256": "e78934b5bbdb641f22c806b4380ec368923a495ac0154a3f2853883be43b78a2",
+  "liveHelperVersionAtInstall": "0.1.73",
+  "activeTurnsAtInstall": 1,
+  "activation": "Installed locally. Reload VS Code windows once when active tasks finish; the helper upgrades when idle. Existing active protection was not interrupted."
+}

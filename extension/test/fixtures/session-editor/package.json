@@ -1,11 +1,16 @@
 {
-  "name": "session-editor-test",
-  "publisher": "codex-lid-guard-tests",
+  "name": "chatgpt",
+  "publisher": "openai",
+  "displayName": "Codex sidebar test fixture",
   "version": "0.0.1",
   "engines": { "vscode": "^1.90.0" },
   "main": "./extension.js",
   "activationEvents": ["onStartupFinished"],
   "contributes": {
+    "viewsContainers": { "secondarySidebar": [{
+      "id": "codexSecondaryViewContainer", "title": "Test Codex", "icon": "icon.svg"
+    }] },
+    "views": { "codexSecondaryViewContainer": [{ "id": "chatgpt.sidebarSecondaryView", "type": "webview", "name": "Test Codex" }] },
     "customEditors": [{
       "viewType": "chatgpt.conversationEditor",
       "displayName": "Test conversation",

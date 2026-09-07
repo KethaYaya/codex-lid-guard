@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.77
+
+- Use the extension's Lid Guard logo for the helper's tray icon, embedded in the executable and sized for the Windows notification area.
+
+## 0.1.76
+
+- Open saved chats in the existing Codex sidebar on the right instead of creating or selecting a conversation editor tab in the centre.
+- Use Codex's sidebar URI handler with VS Code's window-specific URI so navigation stays with the original project. Keep startup confirmation, retry and cancellation.
+- Verify sidebar reuse, unchanged editor tabs, native-pipe routing and a full close/reopen with both a delayed sidebar fixture and the installed Codex extension.
+
+## 0.1.75
+
+- Wait for the requested chat to become active in Codex after reopening a project, with progress shown while its renderer starts. Retry the saved editor once if startup restores another selection. Cancel pending navigation when another open is requested, the window loses focus, or its workspace changes.
+- Allow 35 seconds for chat confirmation after the new window registers, instead of five seconds.
+- Add tests that close and reopen a real VS Code process with saved tabs, delayed content, and competing restoration; include an optional smoke test with the installed Codex extension.
+
+## 0.1.74
+
+- Fix retained tabs disappearing when their VS Code window closes: use the overlay's own display and DPI when the original window handle becomes invalid.
+- Add a native regression test that destroys the originating window, then verifies the tab remains visible, updates in place, and can still open its saved project.
+
+## 0.1.73
+
+- Keep recent overlay tabs after closing a project folder or VS Code. Reuse an open project or reopen its folder/saved workspace before selecting the exact chat. Switching the same window to another folder still removes its old tabs.
+- Keep the helper running while tabs are retained, without extending lid protection after tasks finish.
+- Add a Windows tray shield with Quit Lid Guard to close all tabs, restore power settings, and stop the helper. Background checks respect quitting; use Enable or the stopped status-bar item to restart.
+
+## 0.1.72
+
+- Show the chat's project folder name in the live-updates heading.
+
+## 0.1.71
+
+- Open overlay chats through a direct connection to the owning VS Code extension host, including sessions with no existing editor tab. Keep exact-tab and editor-group reuse.
+- Remove old overlay tabs when the same VS Code window switches to a different folder. Reject queued clicks from the previous workspace and preserve tabs in other windows.
+- Add navigation diagnostics and end-to-end native-pipe tests for absent tabs, loaded webview content, and workspace changes. Reload existing VS Code windows after installing this update.
+
 ## 0.1.70
 
 - Cycle through visible overlay tabs with Copilot + Tab. Expand the selected preview, tuck the previous one, skip hidden tabs, and wrap after the last tab.

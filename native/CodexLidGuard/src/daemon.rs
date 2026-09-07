@@ -21,6 +21,7 @@ const PRE_ACQUIRE_TTL: Duration = Duration::from_secs(10);
 static STATUS_CACHE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
 
 struct DaemonState {
+    shutdown: bool,
     active_turns: HashMap<String, TrackedTurn>,
     transcript_cursors: HashMap<String, TranscriptCursor>,
     latest_session_by_window: HashMap<u64, String>,
@@ -65,6 +66,7 @@ impl DaemonState {
 
     fn with_power_policy(power_policy: win::PowerPolicy) -> Self {
         Self {
+            shutdown: false,
             active_turns: HashMap::new(),
             transcript_cursors: HashMap::new(),
             latest_session_by_window: HashMap::new(),
@@ -87,6 +89,15 @@ impl DaemonState {
         }
     }
 
+    fn stop(&mut self) -> io::Result<()> {
+        self.shutdown = true;
+        self.active_turns.clear();
+        self.transcript_cursors.clear();
+        self.latest_session_by_window.clear();
+        self.cancel_pending_sleep();
+        self.power_policy.release()
+    }
+
     fn snapshot(&self, ok: bool, message: impl Into<String>) -> GuardResponse {
         let mut active_items = self
             .active_turns
@@ -102,6 +113,7 @@ impl DaemonState {
             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pipe_name: Some(paths::pipe_name()),
             ok,
+            helper_paused: self.shutdown,
             message: message.into(),
             active_turns: self.active_turns.len(),
             active_items: active_items.into_iter().map(|(_, info)| info).collect(),
@@ -121,12 +133,15 @@ impl DaemonState {
 }
 
 pub fn run() -> io::Result<()> {
+    if crate::helper_pause::paused() { return Ok(()); }
     let Some(_instance) = win::InstanceMutex::acquire(&paths::mutex_name())? else {
         return Ok(());
     };
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let _tray = win::TrayIcon::start(|| { std::thread::spawn(client::request_quit); })
+        .map_err(|error| logging::write(format!("Could not create the Lid Guard tray icon: {error}"))).ok();
     let overlay_state = Arc::clone(&state);
-    crate::overlay::start(move || {
+    let retained_overlays = crate::overlay::start(move || {
         overlay_state.lock().map(|state| {
             state.active_turns.values().map(|turn| crate::overlay::Session {
                 id: turn.info.session_id.clone(),
@@ -207,6 +222,7 @@ pub fn run() -> io::Result<()> {
     });
 
     loop {
+        if state.lock().is_ok_and(|state| state.shutdown) { break; }
         let has_active_turns = state
             .lock()
             .map(|value| !value.active_turns.is_empty())
@@ -231,7 +247,7 @@ pub fn run() -> io::Result<()> {
                     .lock()
                     .map(|value| value.active_turns.is_empty() && value.pending_sleep.is_none())
                     .unwrap_or(false);
-                if still_idle {
+                if still_idle && !retained_overlays.load(Ordering::Relaxed) {
                     logging::write("Guardian daemon reached its idle timeout.");
                     break;
                 }
@@ -300,7 +316,14 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -
         let Ok(mut state) = shared.lock() else {
             return failure("guardian state lock was poisoned");
         };
+        if state.shutdown { return crate::helper_pause::response(); }
         let response = match action.as_str() {
+            "quit" => {
+                match crate::helper_pause::pause().and_then(|()| state.stop()) {
+                    Ok(()) => state.snapshot(true, "Lid Guard quit. All tabs are closed and power settings restored."),
+                    Err(error) => state.snapshot(false, format!("Could not finish quitting Lid Guard: {error}")),
+                }
+            }
             "acquire" => acquire(&mut state, &request),
             "pre-acquire" => {
                 let (response, acquired, durable) = pre_acquire(&mut state, &mut request);
@@ -975,6 +998,26 @@ fn failure(message: impl Into<String>) -> GuardResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_shutdown_releases_protection_cancels_sleep_and_rejects_late_acquisitions() {
+        let mut state = DaemonState::new_for_test();
+        let request = GuardRequest { action: "acquire".into(), session_id: Some("tray-test".into()),
+            turn_id: Some("turn".into()), ..GuardRequest::default() };
+        assert!(acquire(&mut state, &request).ok);
+        assert!(state.power_policy.is_guarding());
+        let sleep = Arc::new(AtomicBool::new(false));
+        state.pending_sleep = Some(sleep.clone());
+        state.stop().unwrap();
+        assert!(sleep.load(Ordering::Acquire));
+        assert!(state.active_turns.is_empty() && state.pending_sleep.is_none());
+        assert!(!state.power_policy.is_guarding());
+        let shared = Arc::new(Mutex::new(state));
+        let response = handle_request(&shared, request);
+        assert!(response.helper_paused);
+        assert!(!response.is_guarding);
+        assert!(shared.lock().unwrap().active_turns.is_empty());
+    }
 
     #[test]
     fn turn_keys_default_missing_ids() {

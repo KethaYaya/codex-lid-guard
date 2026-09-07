@@ -13,6 +13,7 @@ const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn send(mut request: GuardRequest) -> GuardResponse {
+    if crate::helper_pause::paused() { return crate::helper_pause::response(); }
     request.client_version = Some(env!("CARGO_PKG_VERSION").to_string());
     let mut response = try_send(&request, Duration::from_millis(25));
     if let Some(value) = response.as_ref() {
@@ -58,6 +59,7 @@ fn try_send(request: &GuardRequest, timeout: Duration) -> Option<GuardResponse> 
 }
 
 fn start_daemon() -> std::io::Result<()> {
+    if crate::helper_pause::paused() { return Ok(()); }
     let executable = std::env::current_exe()?;
     match spawn_daemon(&executable, CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB) {
         Ok(()) => Ok(()),
@@ -67,6 +69,14 @@ fn start_daemon() -> std::io::Result<()> {
             ));
             spawn_daemon(&executable, CREATE_NO_WINDOW)
         }
+    }
+}
+
+pub fn request_quit() {
+    // A tray action only addresses the existing daemon; it never starts one.
+    if try_send(&GuardRequest { action: "quit".into(), ..GuardRequest::default() },
+        Duration::from_secs(1)).is_none() {
+        logging::write("The tray could not deliver its quit request.");
     }
 }
 
