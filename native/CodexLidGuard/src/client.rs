@@ -13,6 +13,13 @@ const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn send(mut request: GuardRequest) -> GuardResponse {
+    if request.action == "background-start" && request.session_id.is_none() {
+        // Generate once, outside retries, so a lost response cannot duplicate a task.
+        static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let next = NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        request.session_id = Some(format!("lidguard-background-{}-{stamp}-{next}", std::process::id()));
+    }
     if crate::helper_pause::paused() { return crate::helper_pause::response(); }
     request.client_version = Some(env!("CARGO_PKG_VERSION").to_string());
     let mut response = try_send(&request, Duration::from_millis(25));
@@ -113,6 +120,7 @@ fn is_compatible(response: &GuardResponse) -> bool {
 fn should_replace_idle_daemon(request: &GuardRequest, response: &GuardResponse) -> bool {
     request.action.eq_ignore_ascii_case("status")
         && response.active_turns == 0
+        && response.background_tasks == 0
         && response
             .daemon_version
             .as_deref()
@@ -216,6 +224,13 @@ mod tests {
             active_turns: 0,
             ..GuardResponse::default()
         };
+        assert!(!should_replace_idle_daemon(&request, &response));
+    }
+
+    #[test]
+    fn idle_background_conversations_prevent_daemon_replacement() {
+        let request = GuardRequest { action: "status".into(), ..Default::default() };
+        let response = GuardResponse { daemon_version: Some("0.1.5".into()), background_tasks: 1, ..Default::default() };
         assert!(!should_replace_idle_daemon(&request, &response));
     }
 

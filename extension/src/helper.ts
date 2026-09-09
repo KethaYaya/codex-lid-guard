@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { createConnection } from "node:net";
@@ -34,13 +34,15 @@ export type GuardStatus = {
   lidState: "unknown" | "open" | "closed";
   sleepPending: boolean;
   helperPaused?: boolean;
+  backgroundTasks?: number;
+  backgroundSessionId?: string;
 };
 
 export function daemonHandoffRequired(
   status: GuardStatus,
   currentVersion: string
 ): boolean {
-  if (status.activeTurns !== 0) {
+  if (status.activeTurns !== 0 || (status.backgroundTasks ?? 0) !== 0) {
     return false;
   }
   const candidate = parseReleaseVersion(status.daemonVersion);
@@ -120,6 +122,54 @@ export async function runHelper(
     encoding: "utf8"
   });
   return JSON.parse(stdout) as GuardStatus;
+}
+
+export type BackgroundRequest =
+  | { action: "background-start"; background: { codexPath: string; cwd: string; prompt: string } }
+  | { action: "background-show"; sessionId: string }
+  | { action: "background-list" };
+
+export async function requestBackground(helperPath: string, request: BackgroundRequest): Promise<GuardStatus> {
+  // Status starts/updates an idle daemon. An older busy daemon must finish safely first.
+  const status = await runHelper(helperPath, "status");
+  if (!status.ok) { throw new Error(status.message); }
+  const version = parseReleaseVersion(status.daemonVersion);
+  if (!version || (version[0] === 0 && version[1] < 2)) {
+    throw new Error("Background sessions need the updated Lid Guard helper. Finish active Codex tasks, then reload VS Code.");
+  }
+  return new Promise((resolve, reject) => {
+    // Send the prompt over stdin, never in process arguments or shell commands.
+    const child = spawn(helperPath, ["background-request"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    let output = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      finish(new Error("Lid Guard did not confirm the request. Check Background Sessions before retrying."));
+      child.kill();
+    }, 7000);
+    const finish = (error?: Error, result?: GuardStatus): void => {
+      if (settled) { return; }
+      settled = true;
+      clearTimeout(timer);
+      if (error) { reject(error); } else { resolve(result!); }
+    };
+    child.on("error", (error) => finish(error));
+    child.stdin.on("error", (error) => finish(error));
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      output += chunk;
+      if (output.length > 256 * 1024) { finish(new Error("Lid Guard returned an oversized response.")); child.kill(); }
+    });
+    child.stderr.resume();
+    child.on("close", (code) => {
+      try {
+        if (code !== 0) { throw new Error("The background session request failed."); }
+        const result = JSON.parse(output) as GuardStatus;
+        if (!result.ok) { throw new Error(result.message || "Could not open the background session."); }
+        finish(undefined, result);
+      } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    });
+    child.stdin.end(JSON.stringify(request));
+  });
 }
 
 export async function preAcquireHelper(

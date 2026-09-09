@@ -41,6 +41,8 @@ pub struct GuardRequest {
     pub transcript_path: Option<String>,
     pub origin_window: Option<u64>,
     pub origin_window_authoritative: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,6 +62,9 @@ pub struct GuardResponse {
     pub sleep_pending: bool,
     #[serde(default)]
     pub helper_paused: bool,
+    pub background_tasks: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_session_id: Option<String>,
 }
 
 impl Default for GuardResponse {
@@ -78,6 +83,8 @@ impl Default for GuardResponse {
             lid_state: "unknown".to_string(),
             sleep_pending: false,
             helper_paused: false,
+            background_tasks: 0,
+            background_session_id: None,
         }
     }
 }
@@ -189,6 +196,7 @@ mod tests {
             transcript_path: Some(r"C:\rollout.jsonl".into()),
             origin_window: Some(42),
             origin_window_authoritative: true,
+            background: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("sessionId"));

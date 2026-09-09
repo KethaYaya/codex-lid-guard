@@ -17,6 +17,11 @@ const READ_LIMIT: u64 = 256 * 1024;
 const LINE_LIMIT: usize = 1024 * 1024;
 pub const SESSION_LIMIT: usize = 10;
 
+pub(crate) fn next_activity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 pub struct Session {
     pub id: String,
@@ -614,9 +619,10 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) -> std::sync::A
             .ok();
         let mut feed = Feed::default();
         let (viewed, acknowledgements) = std::sync::mpsc::channel();
-        let (dismissed, dismissals) = std::sync::mpsc::channel();
+        let (dismissed, dismissals) = std::sync::mpsc::channel::<(CardTarget, u64)>();
         let worker = FeedWorker::new(move |collapsed| {
             for (target, activity) in dismissals.try_iter() {
+                crate::background::dismiss(&target.session_id, activity);
                 feed.dismiss(&target, activity);
             }
             for (target, at) in acknowledgements.try_iter() {
@@ -624,7 +630,11 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) -> std::sync::A
             }
             let settings = GuardSettings::load();
             let frames = if settings.message_overlay {
-                feed.frame(source(), &settings, Instant::now(), collapsed)
+                let mut frames = crate::background::frames(&settings);
+                frames.extend(feed.frame(source(), &settings, Instant::now(), collapsed));
+                frames.sort_by_key(|frame| std::cmp::Reverse(frame.activity));
+                frames.truncate(settings.overlay_max_tabs);
+                frames
             } else {
                 feed = Feed::default();
                 vec![]
@@ -641,7 +651,10 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) -> std::sync::A
                 let result = win::run_session_overlay(
                     slot,
                     |collapsed| view.snapshot(collapsed),
-                    move |target: &CardTarget, window| win::OverlayOpen::activate(target.clone(), viewed.clone(), window),
+                    move |target: &CardTarget, window| {
+                        if crate::background::is_task(&target.session_id) { crate::background::show(&target.session_id).into() }
+                        else { win::OverlayOpen::activate(target.clone(), viewed.clone(), window) }
+                    },
                     shortcuts,
                     Some(updates),
                 );

@@ -27,6 +27,7 @@ test("hands an idle older daemon over to the installed helper", () => {
 
   assert.equal(daemonHandoffRequired(status, "0.1.26"), true);
   assert.equal(daemonHandoffRequired({ ...status, activeTurns: 1 }, "0.1.26"), false);
+  assert.equal(daemonHandoffRequired({ ...status, backgroundTasks: 1 }, "0.2.0"), false);
   assert.equal(daemonHandoffRequired({ ...status, daemonVersion: "0.1.26" }, "0.1.26"), false);
   assert.equal(daemonHandoffRequired({ ...status, daemonVersion: "0.2.0" }, "0.1.26"), false);
 });

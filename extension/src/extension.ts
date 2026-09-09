@@ -24,6 +24,7 @@ import {
   preAcquireHelper,
   previewHelperOverlay,
   readHelperStatus,
+  requestBackground,
   runHelper,
   showHelperMenu,
   type GuardMenuTheme,
@@ -96,6 +97,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexLidGuard.enable", () => enable(context, statusBar, true)),
     vscode.commands.registerCommand("codexLidGuard.disable", () => disable(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.showStatus", () => showStatus(context, statusBar)),
+    vscode.commands.registerCommand("codexLidGuard.startBackgroundTask", () => startBackgroundTask(context)),
+    vscode.commands.registerCommand("codexLidGuard.backgroundSessions", async () => {
+      try { await requestBackground(helperPath(context), { action: "background-list" }); }
+      catch (error) { void vscode.window.showErrorMessage(messageOf(error)); }
+    }),
     vscode.commands.registerCommand("codexLidGuard.restorePowerSettings", () => restorePowerSettings(context, statusBar)),
     vscode.commands.registerCommand("codexLidGuard.configureOptionalHooks", () => configureOptionalHooks(context, statusBar)),
     // Keep the old command ID working for users with an existing keybinding.
@@ -528,6 +534,41 @@ async function showSessions(
   }
 }
 
+async function startBackgroundTask(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    if (process.platform !== "win32" || vscode.env.remoteName) {
+      throw new Error("Background sessions currently support local Windows projects.");
+    }
+    if (!vscode.workspace.isTrusted) {
+      throw new Error("Trust this workspace in VS Code before starting a background Codex task.");
+    }
+    if (!configuration().get<boolean>("enabled", true)) {
+      throw new Error("Enable Codex Lid Guard before starting a background task.");
+    }
+    const folders = vscode.workspace.workspaceFolders?.filter((folder) => folder.uri.scheme === "file") ?? [];
+    if (folders.length === 0) { throw new Error("Open a local project folder before starting a background task."); }
+    const folder = folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick({
+      placeHolder: "Choose the project for the background Codex task"
+    });
+    if (!folder || folder.uri.scheme !== "file") { return; }
+    const extension = vscode.extensions.getExtension("openai.chatgpt");
+    if (!extension) { throw new Error("Install the Codex extension and sign in first."); }
+    const codexPath = path.join(extension.extensionPath, "bin", "windows-x86_64", "codex.exe");
+    await fs.access(codexPath);
+    const prompt = await vscode.window.showInputBox({
+      title: "New Background Codex Task",
+      prompt: "Runs in Lid Guard after VS Code closes. Can edit this project; additional permissions require your approval.",
+      placeHolder: "Describe the task…", ignoreFocusOut: true,
+      validateInput: (text) => Buffer.byteLength(text, "utf8") > 128 * 1024 ? "The task must be at most 128 KB." : undefined
+    });
+    if (!prompt?.trim()) { return; }
+    // Opening the task's own window and submitting the prompt happen only after explicit input.
+    await requestBackground(helperPath(context), { action: "background-start", background: {
+      codexPath, cwd: folder.uri.fsPath, prompt
+    } });
+  } catch (error) { void vscode.window.showErrorMessage(`Could not start background Codex: ${messageOf(error)}`); }
+}
+
 async function isCodexSessionSelected(context: vscode.ExtensionContext, sessionId: string): Promise<boolean> {
   return await readFocusedCodexSession(codexLogPathForExtensionLog(context.logUri.fsPath)) === sessionId;
 }
@@ -537,6 +578,10 @@ async function openSession(
   menuEntry: SessionMenuEntry
 ): Promise<void> {
   const activeItem = menuEntry.activeItem;
+  if (activeItem.sessionId.startsWith("lidguard-background-")) {
+    await requestBackground(helperPath(context), { action: "background-show", sessionId: activeItem.sessionId });
+    return;
+  }
   const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
   if (activeItem.cwd && sessionBelongsToWorkspace(activeItem.cwd, roots)) {
     await openSessionSidebar(activeItem.sessionId, (id) => isCodexSessionSelected(context, id));

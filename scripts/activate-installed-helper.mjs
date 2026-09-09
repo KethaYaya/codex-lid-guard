@@ -68,7 +68,7 @@ while (Date.now() < deadline) {
       await record("ready", { runningVersion: status.daemonVersion, daemonPath: status.daemonPath });
       process.exit(0);
     }
-    if (status.activeTurns === 0 && !status.sleepPending) {
+    if (status.activeTurns === 0 && !status.backgroundTasks && !status.sleepPending) {
       // The native client checks the active count again before replacing an
       // older helper, so a newly arriving turn cannot be interrupted here.
       const { stdout } = await exec(helper, ["status"], { windowsHide: true, timeout: 10_000 });

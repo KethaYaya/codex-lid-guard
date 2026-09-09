@@ -4,6 +4,7 @@
 compile_error!("Codex Lid Guard supports Windows only.");
 
 mod client;
+mod background;
 mod codex_lifecycle;
 mod codex_log;
 mod codex_session_index;
@@ -42,6 +43,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_ascii_lowercase();
     match command.as_str() {
         "daemon" => daemon::run()?,
+        "background-request" => {
+            let mut input = String::new();
+            std::io::stdin().take(256 * 1024).read_to_string(&mut input)?;
+            let request: GuardRequest = serde_json::from_str(&input)?;
+            if !matches!(request.action.as_str(), "background-start" | "background-show" | "background-list") {
+                return Err("Unsupported background action".into());
+            }
+            let response = client::send(request);
+            println!("{}", serde_json::to_string(&response)?);
+        }
         "resume" => {
             helper_pause::resume()?;
             println!("{}", serde_json::to_string(&client::send(GuardRequest {
@@ -202,6 +213,7 @@ fn run_hook(action: &str) {
         transcript_path: payload.transcript_path,
         origin_window,
         origin_window_authoritative: true,
+        background: None,
     });
     if !response.ok {
         logging::write(format!(

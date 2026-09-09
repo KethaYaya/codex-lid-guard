@@ -185,11 +185,16 @@ unsafe extern "system" fn procedure(window: Hwnd, message: u32, wparam: Wparam, 
                 (state.quit)();
                 return 0;
             }
+            if message == WM_COMMAND && wparam & 0xffff == 2 {
+                thread::spawn(crate::background::show_tasks);
+                return 0;
+            }
             if message == TRAY_EVENT && matches!(lparam as u32, 0x0202 | 0x0205 | 0x007b) {
                 let menu = CreatePopupMenu();
                 if !menu.is_null() {
                     AppendMenuW(menu, 0x0002, 0, wide("Codex Lid Guard is running").as_ptr());
                     AppendMenuW(menu, 0x0800, 0, null());
+                    AppendMenuW(menu, 0, 2, wide("Background Codex sessions…").as_ptr());
                     AppendMenuW(menu, 0, QUIT, wide("Quit Lid Guard (close all tabs)").as_ptr());
                     let mut point: Point = zeroed();
                     GetCursorPos(&mut point);
@@ -197,7 +202,7 @@ unsafe extern "system" fn procedure(window: Hwnd, message: u32, wparam: Wparam, 
                     let selected = TrackPopupMenu(menu, 0x0100 | 0x0002, point.x, point.y, 0, window, null());
                     DestroyMenu(menu);
                     PostMessageW(window, 0, 0, 0);
-                    if selected as usize == QUIT { SendMessageW(window, WM_COMMAND, QUIT, 0); }
+                    if selected != 0 { SendMessageW(window, WM_COMMAND, selected as usize, 0); }
                 }
                 return 0;
             }

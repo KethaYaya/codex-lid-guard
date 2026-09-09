@@ -12,6 +12,7 @@ Keep local Codex tasks running with your Windows laptop lid closed, and follow y
 | --- | --- |
 | Work with the lid closed | Automatic protection for local turns, including long tasks and automatic continuations. |
 | Multiple sessions | Protection stays active until the final running turn stops, across chats and VS Code windows. |
+| Background Codex sessions | Start tasks in Lid Guard, close VS Code, and keep working through the desktop tab and task window. |
 | Restore normal sleep | Your previous battery and plugged-in lid actions are saved and restored exactly. |
 | Desktop message previews | A configurable number of translucent overlays (1-10, default 3) on the originating editor's display. |
 | Quick chat switching | Hover to peek, cycle with Copilot shortcuts, or double-click to open the exact chat in a maximized VS Code window. |
@@ -148,6 +149,16 @@ The bundled Herdr **done** sound plays when a task stops. Optional hooks add imm
 
 To enable request alerts, run **Codex Lid Guard: Enable Optional Hook Alerts** and follow the one-time Codex hook review. Core protection already works without this review. **Test Alert Sounds** plays both samples regardless of focus, provided sounds are enabled.
 
+## Background sessions after closing VS Code
+
+Run **Codex Lid Guard: Start Background Task** from the Command Palette in a trusted local project. Enter the task and Lid Guard opens a native conversation window. These sessions use the Codex runtime and sign-in from the installed official Codex extension, with workspace write access and explicit approval requests for additional permissions.
+
+Choose **Minimize to tab** or close the conversation window. The task continues in Lid Guard, including after all VS Code windows close. Enable **Toggle Message Overlay** to see its tab, progress, and busy indicator. Double-click the preview or use the existing overlay shortcuts to reopen the conversation. The tray's **Background Codex sessions…** menu also opens sessions when overlays are disabled or a tab has been dismissed.
+
+In the task window, review commands and file changes before choosing **Allow once** or **Deny**, answer questions, stop a turn, or send follow-up messages after completion. Closing the window keeps the session; **End session** stops its worker. Up to ten sessions can remain open. Sleep protection stays active while a turn is working or awaiting your response.
+
+This mode starts a new Codex conversation. It does not transfer a task already running inside VS Code. The helper must remain running and Windows must remain awake for work to continue. **Quit Lid Guard** ends background workers as well as closing tabs; restarting Windows or the helper interrupts running tasks. Codex saves the conversation in its normal local history, but Lid Guard does not automatically resume interrupted work. Features requiring an unsupported interaction (such as secret input or MCP elicitation) return an error without granting permission.
+
 ## Command Palette
 
 Open with **Ctrl + Shift + P**, then search for **Codex Lid Guard**.
@@ -157,6 +168,8 @@ Open with **Ctrl + Shift + P**, then search for **Codex Lid Guard**.
 | **Codex Lid Guard: Enable** | Enable automatic protection for local turns. |
 | **Codex Lid Guard: Disable and Restore Power Settings** | Disable monitoring, restore saved power settings, and remove optional Lid Guard hooks. |
 | **Codex Lid Guard: Show Status** | Show guardian status or the running/recent session menu. |
+| **Codex Lid Guard: Start Background Task** | Start a new Codex session that continues after VS Code closes. |
+| **Codex Lid Guard: Background Sessions** | Open a background session's native conversation window. |
 | **Codex Lid Guard: Restore Power Settings Now** | Restore saved Windows power settings immediately. |
 | **Codex Lid Guard: Toggle Message Overlay** | Turn desktop previews on or off. |
 | **Codex Lid Guard: Preview Message Overlay** | Run the independent 35-second demo. |

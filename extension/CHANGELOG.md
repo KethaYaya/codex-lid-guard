@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Start independent background Codex sessions from a trusted local VS Code project. The native helper owns the app-server worker so tasks and follow-ups remain available after VS Code closes.
+- Add a native conversation window with streamed assistant messages, command/file approval, question responses, stop-turn and end-session controls. Closing the window docks the session without stopping it.
+- Integrate background progress and busy indicators with the existing overlay tabs, keyboard shortcuts, and tray menu. Keep sleep protection while tasks await a response.
+- Isolate each worker's process tree and clean it up on failure or session exit. Deduplicate retried start requests and keep idle background conversations alive during helper update checks.
+- Existing VS Code turns are not transferred. Helper/Windows restarts interrupt background work; saved conversations remain in Codex history. Unsupported interactions receive errors without permission being granted.
+
+
 ## 0.1.81
 
 - After Copilot + Tab expands a preview, release both keys and press Tab alone to fold that preview immediately. Keep Copilot + Tab cycling and the three-second automatic fold.

@@ -30,6 +30,15 @@ pub use overlay_open::OverlayOpen;
 #[path = "tray.rs"]
 mod tray;
 pub use tray::TrayIcon;
+#[path = "background_window.rs"]
+mod background_window;
+pub use background_window::{run_background_window, show_background_window, background_window_visible};
+#[path = "child_job.rs"]
+mod child_job;
+pub use child_job::ChildJob;
+#[path = "execution_lease.rs"]
+mod execution_lease;
+use execution_lease::ExecutionLease;
 
 pub fn is_editor_window(window: u64) -> bool {
     unsafe {
@@ -1058,6 +1067,7 @@ impl SavedPowerState {
 pub struct PowerPolicy {
     saved: Option<SavedPowerState>,
     guarding: bool,
+    execution: Option<ExecutionLease>,
     #[cfg(test)]
     recovery_enabled: bool,
     #[cfg(test)]
@@ -1069,6 +1079,7 @@ impl PowerPolicy {
         let mut value = Self {
             saved: None,
             guarding: false,
+            execution: None,
             #[cfg(test)]
             recovery_enabled: true,
             #[cfg(test)]
@@ -1083,6 +1094,7 @@ impl PowerPolicy {
         Self {
             saved: None,
             guarding: false,
+            execution: None,
             recovery_enabled: false,
             system_changes_enabled: false,
         }
@@ -1100,7 +1112,7 @@ impl PowerPolicy {
             self.guarding = true;
             return Ok(());
         }
-        set_execution_state(true)?;
+        let execution = ExecutionLease::acquire()?;
         let result = (|| {
             let scheme = active_scheme()?;
             let ac = power_read(true, &scheme)?;
@@ -1130,6 +1142,7 @@ impl PowerPolicy {
         })();
         match result {
             Ok(saved) => {
+                self.execution = Some(execution);
                 self.guarding = true;
                 logging::write(format!(
                     "Guard acquired for power scheme {}; original lid actions AC={}, DC={}.",
@@ -1141,7 +1154,6 @@ impl PowerPolicy {
                 if let Some(saved) = self.saved.take() {
                     let _ = restore_power_state(&saved);
                 }
-                let _ = set_execution_state(false);
                 Err(cause)
             }
         }
@@ -1157,7 +1169,7 @@ impl PowerPolicy {
         if !self.guarding && self.saved.is_none() && !recovery_exists {
             return Ok(());
         }
-        let _ = set_execution_state(false);
+        self.execution.take();
         let state = self
             .saved
             .clone()

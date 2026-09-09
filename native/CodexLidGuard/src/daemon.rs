@@ -114,6 +114,8 @@ impl DaemonState {
             pipe_name: Some(paths::pipe_name()),
             ok,
             helper_paused: self.shutdown,
+            background_tasks: crate::background::count(),
+            background_session_id: None,
             message: message.into(),
             active_turns: self.active_turns.len(),
             active_items: active_items.into_iter().map(|(_, info)| info).collect(),
@@ -138,12 +140,14 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     };
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let background_state = Arc::clone(&state);
+    crate::background::initialize(move |request| handle_request(&background_state, request));
     let _tray = win::TrayIcon::start(|| { std::thread::spawn(client::request_quit); })
         .map_err(|error| logging::write(format!("Could not create the Lid Guard tray icon: {error}"))).ok();
     let overlay_state = Arc::clone(&state);
     let retained_overlays = crate::overlay::start(move || {
         overlay_state.lock().map(|state| {
-            state.active_turns.values().map(|turn| crate::overlay::Session {
+            state.active_turns.values().filter(|turn| !crate::background::is_task(&turn.info.session_id)).map(|turn| crate::overlay::Session {
                 id: turn.info.session_id.clone(),
                 activity: turn.sequence,
                 cwd: turn.info.cwd.clone(),
@@ -174,6 +178,7 @@ pub fn run() -> io::Result<()> {
     }
     let lifecycle_state = Arc::clone(&state);
     let _lifecycle_watcher = codex_lifecycle::start(move |start| {
+        if crate::background::owns_thread(&start.session_id) { return; }
         let Some(cursor) =
             TranscriptCursor::new_for_active_session(start.transcript_path.as_deref())
         else {
@@ -247,7 +252,7 @@ pub fn run() -> io::Result<()> {
                     .lock()
                     .map(|value| value.active_turns.is_empty() && value.pending_sleep.is_none())
                     .unwrap_or(false);
-                if still_idle && !retained_overlays.load(Ordering::Relaxed) {
+                if still_idle && !retained_overlays.load(Ordering::Relaxed) && crate::background::count() == 0 {
                     logging::write("Guardian daemon reached its idle timeout.");
                     break;
                 }
@@ -256,6 +261,7 @@ pub fn run() -> io::Result<()> {
         }
     }
 
+    crate::background::shutdown();
     if let Ok(mut state) = state.lock() {
         state.cancel_pending_sleep();
         state.active_turns.clear();
@@ -307,6 +313,26 @@ fn shield_newer_daemon_from_legacy_status(request: &GuardRequest, response: &mut
 
 fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -> GuardResponse {
     let action = request.action.to_ascii_lowercase();
+    // Worker callbacks also acquire the daemon lock. Never hold it across startup or shutdown.
+    if action.starts_with("background-") {
+        if shared.lock().is_ok_and(|state| state.shutdown) { return crate::helper_pause::response(); }
+        let result: Result<Option<String>, String> = match action.as_str() {
+            "background-start" => serde_json::from_value::<crate::background::Start>(request.background.take().unwrap_or_default())
+                .map_err(|error| error.to_string()).and_then(|input| crate::background::start(input, request.session_id.clone().unwrap_or_default()).map(Some).map_err(|error| error.to_string())),
+            "background-show" => if request.session_id.as_deref().is_some_and(crate::background::show) { Ok(None) } else { Err("Background session is no longer available.".into()) },
+            "background-list" => { std::thread::spawn(crate::background::show_tasks); Ok(None) }
+            _ => Err("Unknown background action.".into()),
+        };
+        return match result {
+            Ok(id) => { let mut response = shared.lock().unwrap().snapshot(true, "Background session opened."); response.background_session_id = id; response }
+            Err(error) => shared.lock().unwrap().snapshot(false, error),
+        };
+    }
+    if action == "quit" { crate::background::shutdown(); }
+    if request.session_id.as_deref().is_some_and(|id| !crate::background::is_task(id) && crate::background::owns_thread(id))
+        && matches!(action.as_str(), "acquire" | "pre-acquire" | "metadata-acquire" | "release" | "release-session" | "associate-window") {
+        return shared.lock().unwrap().snapshot(true, "The background worker owns this session's lifecycle.");
+    }
     let mut sleep_schedule = None;
     let mut sound_schedule = None;
     let mut alert_window = None;
@@ -519,7 +545,7 @@ fn acquire(state: &mut DaemonState, request: &GuardRequest) -> GuardResponse {
         ));
     }
     let info = active_turn_info(request);
-    state.next_turn_sequence = state.next_turn_sequence.wrapping_add(1);
+    state.next_turn_sequence = crate::overlay::next_activity();
     let sequence = state.next_turn_sequence;
     let inserted = match state.active_turns.entry(key.clone()) {
         Entry::Vacant(entry) => {
