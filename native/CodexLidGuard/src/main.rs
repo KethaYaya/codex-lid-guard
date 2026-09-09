@@ -15,6 +15,7 @@ mod model;
 mod overlay;
 mod paths;
 mod session_navigation;
+mod shortcut_config;
 mod sound;
 mod win;
 

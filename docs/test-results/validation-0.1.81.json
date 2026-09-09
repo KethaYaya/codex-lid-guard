@@ -1,0 +1,50 @@
+{
+  "version": "0.1.81",
+  "change": "After Copilot+Tab expands a preview, release the keys and press Tab alone to fold the selected preview immediately.",
+  "nativeTests": {
+    "passed": 161,
+    "ignored": 13,
+    "failed": 0
+  },
+  "extensionTests": {
+    "passed": 40,
+    "failed": 0
+  },
+  "nativeDesktopTests": {
+    "passed": 3,
+    "plainTabToFoldedMillisecondsIncludingSlide": 239.3707,
+    "automaticReleaseToFoldedSecondsIncludingSlide": 3.2506905,
+    "expandedBusyPixelPatterns": 54,
+    "verified": [
+      "Copilot+Tab expands a preview; releasing both keys and pressing Tab alone folds it without opening or dismissing any chat.",
+      "Every other tab remains available and no other preview expands.",
+      "Later plain Tab presses do not re-expand the preview.",
+      "Holding Copilot continues cycling and Enter opens the exact selected chat.",
+      "Released macro prefixes support a fresh Copilot+Tab cycle; the automatic three-second fold remains active.",
+      "Custom shortcuts and live tab limits still work."
+    ],
+    "scope": "Owned Windows overlays and simulated shortcut-thread events. No desktop key injection; the physical OEM Copilot key was not exercised."
+  },
+  "keyboardRegressionCoverage": [
+    "Tab can fold an expanded selection both before and after the 1.5-second activation chord expires.",
+    "Folded, replaced, mouse-expanded, and mouse-reopened previews leave ordinary Tab alone.",
+    "Typing or a different foreground app cancels the plain-Tab target.",
+    "Shift+Tab and Ctrl+Tab are not intercepted after releasing Copilot.",
+    "Auto-repeat does not act twice, and consumed key-down events have matching key-up handling."
+  ],
+  "clippyAllTargetsWarningsDenied": "passed",
+  "diffCheck": "passed",
+  "package": "passed",
+  "installedVersion": "0.1.81",
+  "installedFilesVerified": 24,
+  "helperSha256": "2a8c90be8045877d5df2e244eb4c2bc4c17501903928b4215a295a5b629da2cd",
+  "activation": {
+    "state": "waiting-for-idle",
+    "targetVersion": "0.1.81",
+    "updaterPid": 23164,
+    "updatedAt": "2026-09-08T06:18:33.238Z",
+    "runningVersion": "0.1.79",
+    "activeTurns": 2
+  },
+  "supersedesPendingUpdate": "0.1.80"
+}

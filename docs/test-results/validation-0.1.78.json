@@ -1,0 +1,44 @@
+{
+  "version": "0.1.78",
+  "change": "Add live extension preferences for 1-10 overlay tabs, a global shortcut prefix, cycle/open/close keys, and a shortcut enable switch. Defaults remain three tabs with Copilot, Tab, Enter and Escape.",
+  "extensionTests": {
+    "passed": 40,
+    "failed": 0
+  },
+  "nativeUnitTests": {
+    "passed": 156,
+    "failed": 0,
+    "ignored": 12
+  },
+  "nativeOverlayIntegration": {
+    "passed": 2,
+    "failed": 0,
+    "scope": "Owned native overlay windows and the real shortcut dispatch thread, using simulated key events that never reach desktop applications. No real chat is opened.",
+    "cases": [
+      "Default Copilot cycling and exact chat dispatch with three tabs",
+      "Custom Ctrl+Alt+Space prefix, Down cycling and Right opening across ten tabs",
+      "Reduce the tab limit while windows remain open",
+      "Disable shortcuts while retaining mouse-accessible tabs",
+      "Re-enable with a different prefix; the previous binding no longer expands the tab",
+      "Remapped close key dismisses the selected tab",
+      "Cycling never gives an overlay foreground focus"
+    ]
+  },
+  "additionalCoverage": [
+    "Lowering the limit moves surviving sessions out of disabled slots and clears stale collapse flags",
+    "Dense tabs remain distinct at multiple display sizes and DPI values while expanded messages retain readable height",
+    "Settings changes cancel pending chords and balance previously swallowed key releases",
+    "Ordinary typing, expired shortcuts and disabled shortcuts pass through",
+    "Invalid or duplicate bindings are rejected",
+    "A letter used in the prefix can also select its tab without reviving an expired selection"
+  ],
+  "clippyAllTargetsWarningsDenied": "passed",
+  "activation": "Install locally and reload VS Code once to activate the settings writer. Subsequent preference changes apply live. Helper activation uses the existing idle updater.",
+  "defaultPreferencesChanged": false,
+  "package": "passed",
+  "installedVersion": "0.1.78",
+  "installedFilesVerified": 23,
+  "installedSettingsManifestVerified": true,
+  "helperSha256": "959aa6f77dd37d984f4bbfa95ddbf01d5737c900d189adc2f6a82af407085686",
+  "diffCheck": "passed"
+}

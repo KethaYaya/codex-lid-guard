@@ -3,13 +3,13 @@ use super::{Frame, SESSION_LIMIT};
 use std::collections::HashSet;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicU16, AtomicUsize, Ordering},
     mpsc::{self, SyncSender},
 };
 use std::time::{Duration, Instant};
 
 struct Shared {
-    collapsed: AtomicU8,
+    collapsed: AtomicU16,
     latest: Mutex<[Frame; SESSION_LIMIT]>,
     windows: [Arc<AtomicUsize>; SESSION_LIMIT],
 }
@@ -27,9 +27,11 @@ pub(super) struct FeedView {
 }
 
 // Surviving chats keep their lanes even when their recency order changes.
-fn assign_slots(slots: &mut [Frame; SESSION_LIMIT], mut frames: Vec<Frame>) -> u8 {
-    let previous = slots.each_ref().map(|frame| frame.session_id.clone());
-    for slot in slots.iter_mut() {
+fn assign_slots(slots: &mut [Frame], mut frames: Vec<Frame>) -> u16 {
+    let previous: Vec<_> = slots.iter().map(|frame| frame.session_id.clone()).collect();
+    let limit = frames.first().map_or(slots.len(), |frame| frame.max_tabs.min(slots.len()));
+    for (index, slot) in slots.iter_mut().enumerate() {
+        if index >= limit { *slot = Frame::empty(); continue; }
         *slot = frames
             .iter()
             .position(|frame| frame.session_id == slot.session_id)
@@ -37,7 +39,7 @@ fn assign_slots(slots: &mut [Frame; SESSION_LIMIT], mut frames: Vec<Frame>) -> u
             .unwrap_or_else(Frame::empty);
     }
     let mut remaining = frames.into_iter();
-    for slot in slots.iter_mut().filter(|slot| slot.session_id.is_none()) {
+    for slot in slots.iter_mut().take(limit).filter(|slot| slot.session_id.is_none()) {
         if let Some(frame) = remaining.next() {
             *slot = frame;
         }
@@ -57,7 +59,7 @@ impl FeedWorker {
         mut read: impl FnMut(&HashSet<String>) -> Vec<Frame> + Send + 'static,
     ) -> Self {
         let shared = Arc::new(Shared {
-            collapsed: AtomicU8::new(0),
+            collapsed: AtomicU16::new(0),
             latest: Mutex::new(std::array::from_fn(|_| Frame::empty())),
             windows: std::array::from_fn(|_| Arc::new(AtomicUsize::new(0))),
         });
@@ -76,7 +78,7 @@ impl FeedWorker {
                     .collect();
                 let changed = assign_slots(&mut slots, read(&collapsed));
                 background.collapsed.fetch_and(!changed, Ordering::Relaxed);
-                // One reader and at most three cached frames serve all native windows.
+                // One reader serves every native window, including inactive slots.
                 *background.latest.lock().unwrap() = slots.clone();
                 for window in &background.windows {
                     crate::win::OverlayUpdates::notify(window);
@@ -133,6 +135,21 @@ impl FeedView {
 mod tests {
     use super::*;
     use crate::overlay::Card;
+
+    #[test]
+    fn lowering_the_limit_moves_surviving_tabs_out_of_disabled_slots() {
+        let mut slots: [Frame; SESSION_LIMIT] = std::array::from_fn(|_| Frame::empty());
+        let frame = |id: usize, max_tabs| Frame { session_id: Some(id.to_string()), max_tabs, ..Frame::empty() };
+        assign_slots(&mut slots, (0..10).map(|id| frame(id, 10)).collect());
+        assert_eq!(slots[9].session_id.as_deref(), Some("9"));
+        let changed = assign_slots(&mut slots, vec![frame(9, 1)]);
+        assert_eq!(changed, 0x3ff);
+        assert_eq!(slots[0].session_id.as_deref(), Some("9"));
+        assert!(slots[1..].iter().all(|frame| frame.session_id.is_none()));
+        assign_slots(&mut slots, (0..10).map(|id| frame(id, 10)).collect());
+        assert_eq!(slots[0].session_id.as_deref(), Some("9"));
+        assert_eq!(slots.iter().filter(|frame| frame.session_id.is_some()).count(), 10);
+    }
 
     #[test]
     fn surviving_tabs_keep_their_slots_when_another_chat_is_replaced_or_hidden() {

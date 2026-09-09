@@ -1,0 +1,48 @@
+{
+  "version": "0.1.80",
+  "change": "Minimize cycled previews three seconds after prefix release and animate amber busy dots in expanded headers.",
+  "nativeTests": {
+    "passed": 159,
+    "ignored": 13,
+    "failed": 0
+  },
+  "extensionTests": {
+    "passed": 40,
+    "failed": 0
+  },
+  "nativeDesktopTests": {
+    "passed": 3,
+    "tests": [
+      "native_copilot_tab_cycles_previews_and_enter_opens_the_exact_chat",
+      "native_cycle_release_folds_after_three_seconds_and_expanded_busy_dots_animate",
+      "native_ten_tabs_use_custom_keys_and_apply_lower_limits_live"
+    ],
+    "releaseToFoldedSecondsIncludingSlide": 3.2446598,
+    "expandedBusyPixelPatterns": 55,
+    "verified": [
+      "Holding the prefix for more than three seconds keeps the selected preview expanded.",
+      "Prefix release permits the full three-second delay and then folds the preview while retaining its tab.",
+      "A macro prefix released before Tab starts a countdown on cycling; subsequent cycling replaces that countdown.",
+      "Re-pressing the prefix suspends a countdown until release.",
+      "Manual expansion cancels the keyboard countdown.",
+      "All three amber busy dots remain visible and animate with unchanged message cards.",
+      "Default and custom shortcut cycling preserve exact chat activation and live tab limits."
+    ],
+    "scope": "Owned Windows overlays and simulated shortcut-thread events; no keyboard events were injected into desktop applications. The physical OEM Copilot key was not exercised.",
+    "finalLayoutRetest": "passed"
+  },
+  "clippyAllTargetsWarningsDenied": "passed",
+  "diffCheck": "passed",
+  "package": "passed",
+  "installedVersion": "0.1.80",
+  "installedFilesVerified": 24,
+  "helperSha256": "fb164348f676477762e55ede318910f4819610629b80b08d2ea6f67a72f12365",
+  "activation": {
+    "state": "waiting-for-idle",
+    "targetVersion": "0.1.80",
+    "updaterPid": 4284,
+    "updatedAt": "2026-09-08T06:07:58.505Z",
+    "runningVersion": "0.1.79",
+    "activeTurns": 2
+  }
+}

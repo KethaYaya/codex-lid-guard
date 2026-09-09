@@ -206,6 +206,14 @@ export async function showHelperMenu(
   return result.selectedIndex;
 }
 
+export type OverlayShortcuts = {
+  enabled: boolean;
+  prefix: string;
+  cycleKey: string;
+  openKey: string;
+  closeKey: string;
+};
+
 export async function writeHelperSettings(
   settingsPath: string,
   alertSounds: boolean,
@@ -215,7 +223,11 @@ export async function writeHelperSettings(
   messageOverlay = false,
   overlayOpacity = 82,
   overlayDurationSeconds = 90,
-  overlayPosition = "bottom-right"
+  overlayPosition = "bottom-right",
+  overlayMaxTabs = 3,
+  overlayShortcuts: OverlayShortcuts = {
+    enabled: true, prefix: "Copilot", cycleKey: "Tab", openKey: "Enter", closeKey: "Escape"
+  }
 ): Promise<void> {
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
   const settings = {
@@ -223,6 +235,8 @@ export async function writeHelperSettings(
     overlayOpacity: Math.round(Math.max(30, Math.min(100, overlayOpacity))),
     overlayDurationSeconds: Math.round(Math.max(10, Math.min(600, overlayDurationSeconds))),
     overlayPosition,
+    overlayMaxTabs: Number.isFinite(overlayMaxTabs) ? Math.round(Math.max(1, Math.min(10, overlayMaxTabs))) : 3,
+    overlayShortcuts,
     alertSounds,
     alertSoundsOnlyWhenUnfocused,
     sleepWhenLidClosed,

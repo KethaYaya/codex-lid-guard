@@ -194,12 +194,23 @@ test("writes the background-only alert setting for the native guardian", async (
     assert.equal(settings.alertSounds, true);
     assert.equal(settings.alertSoundsOnlyWhenUnfocused, true);
     assert.equal(settings.messageOverlay, false);
+    assert.equal(settings.overlayMaxTabs, 3);
+    assert.deepEqual(settings.overlayShortcuts, { enabled: true, prefix: "Copilot", cycleKey: "Tab", openKey: "Enter", closeKey: "Escape" });
     await writeHelperSettings(settingsPath, true, true, true, 10, true, 20, 900, "top-left");
     const updated = JSON.parse(await readFile(settingsPath, "utf8"));
     assert.equal(updated.messageOverlay, true);
     assert.equal(updated.overlayOpacity, 30);
     assert.equal(updated.overlayDurationSeconds, 600);
     assert.equal(updated.overlayPosition, "top-left");
+    const shortcuts = { enabled: true, prefix: "Ctrl+Alt+Space", cycleKey: "Down", openKey: "Right", closeKey: "Delete" };
+    await writeHelperSettings(settingsPath, true, true, true, 10, true, 82, 90, "top-right", 10, shortcuts);
+    const custom = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(custom.overlayMaxTabs, 10);
+    assert.deepEqual(custom.overlayShortcuts, shortcuts);
+    for (const [requested, expected] of [[0, 1], [100, 10], [Number.NaN, 3]]) {
+      await writeHelperSettings(settingsPath, true, true, true, 10, true, 82, 90, "top-right", requested);
+      assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).overlayMaxTabs, expected);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

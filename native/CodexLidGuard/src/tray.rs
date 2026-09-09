@@ -20,7 +20,8 @@ unsafe extern "system" {
     fn CreateIconFromResourceEx(bits: *mut u8, size: u32, icon: Bool, version: u32,
         width: i32, height: i32, flags: u32) -> Handle;
     fn DestroyIcon(icon: Handle) -> Bool;
-    fn GetSystemMetrics(index: i32) -> i32;
+    fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
+    fn FindWindowW(class: *const u16, name: *const u16) -> Hwnd;
     fn RegisterWindowMessageW(message: *const u16) -> u32;
     fn CreatePopupMenu() -> Handle;
     fn AppendMenuW(menu: Handle, flags: u32, id: usize, text: *const u16) -> Bool;
@@ -32,25 +33,53 @@ unsafe extern "system" {
 
 struct TrayState {
     data: NotifyIconData,
+    icon: OwnedIcon,
     taskbar_created: u32,
     quit: Box<dyn Fn() + Send>,
 }
 
-struct OwnedIcon(Handle);
+struct OwnedIcon(Handle, (i32, i32));
+
+fn tray_icon_size() -> (i32, i32) {
+    unsafe {
+        // The helper's hidden thread may be DPI-unaware. Use Explorer's actual
+        // taskbar DPI so Windows does not stretch a 16px icon on scaled displays.
+        let taskbar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), null());
+        let dpi = GetDpiForWindow(taskbar).max(96);
+        (GetSystemMetricsForDpi(49, dpi).max(16), GetSystemMetricsForDpi(50, dpi).max(16))
+    }
+}
 
 impl OwnedIcon {
     fn load() -> io::Result<Self> {
-        // Windows accepts PNG icon resources. Embed the extension's exact logo,
-        // aligned as required by CreateIconFromResourceEx, without a runtime file.
+        let (width, height) = tray_icon_size();
+        Self::sized(width, height)
+    }
+
+    fn sized(width: i32, height: i32) -> io::Result<Self> {
+        match width.max(height) {
+            ..=16 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-16.png"), width, height),
+            17..=20 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-20.png"), width, height),
+            21..=24 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-24.png"), width, height),
+            25..=28 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-28.png"), width, height),
+            29..=32 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-32.png"), width, height),
+            33..=40 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-40.png"), width, height),
+            41..=48 => Self::decode(include_bytes!("../Assets/Tray/lid-guard-48.png"), width, height),
+            _ => Self::decode(include_bytes!("../Assets/Tray/lid-guard-64.png"), width, height),
+        }
+    }
+
+    fn decode<const N: usize>(source: &[u8; N], width: i32, height: i32) -> io::Result<Self> {
+        // PNG icon resources need DWORD alignment; no runtime asset files.
         #[repr(align(4))]
         struct IconBytes<const N: usize>([u8; N]);
-        let mut bytes = IconBytes(*include_bytes!("../../../extension/images/codex-lid-guard-logo.png"));
+        let mut bytes = IconBytes(*source);
         let icon = unsafe {
             CreateIconFromResourceEx(bytes.0.as_mut_ptr(), bytes.0.len() as u32, 1, 0x0003_0000,
-                GetSystemMetrics(49), GetSystemMetrics(50), 0) // SM_CXSMICON, SM_CYSMICON
+                width, height, 0)
         };
         if icon.is_null() { Err(error("Load Lid Guard tray icon")) }
-        else { Ok(Self(icon)) }
+        else { Ok(Self(icon, (width, height))) }
     }
 }
 
@@ -114,7 +143,7 @@ fn tray_loop(ready: mpsc::SyncSender<Result<isize, String>>, quit: Box<dyn Fn() 
         data.icon = icon.0;
         let tip = wide("Codex Lid Guard is running");
         data.tip[..tip.len()].copy_from_slice(&tip);
-        let mut state = Box::new(TrayState { data, quit,
+        let mut state = Box::new(TrayState { data, icon, quit,
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) });
         SetWindowLongPtrW(window, GWLP_USERDATA, (&mut *state) as *mut TrayState as isize);
         // Explorer may be restarting. Retry until it accepts the icon.
@@ -137,8 +166,17 @@ unsafe extern "system" fn procedure(window: Hwnd, message: u32, wparam: Wparam, 
     unsafe {
         let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut TrayState;
         if !pointer.is_null() {
+            let taskbar_created = (*pointer).taskbar_created != 0 && message == (*pointer).taskbar_created;
+            if (taskbar_created || matches!(message, 0x001a | 0x007e)) // settings / display change
+                && tray_icon_size() != (*pointer).icon.1
+                && let Ok(icon) = OwnedIcon::load() {
+                let previous = std::mem::replace(&mut (*pointer).icon, icon);
+                (*pointer).data.icon = (*pointer).icon.0;
+                Shell_NotifyIconW(1, &(*pointer).data); // NIM_MODIFY; keep the old handle until copied.
+                drop(previous);
+            }
             let state = &*pointer;
-            if (state.taskbar_created != 0 && message == state.taskbar_created) || message == 0x0113 {
+            if taskbar_created || message == 0x0113 {
                 if Shell_NotifyIconW(0, &state.data) != 0 { KillTimer(window, 1); }
                 else { SetTimer(window, 1, 2000, null()); }
                 return 0;
@@ -187,6 +225,11 @@ mod tests {
     #[ignore = "briefly displays an owned tray icon; never quits the real helper"]
     fn tray_dispatches_quit_and_removes_its_owned_window_on_drop() {
         assert_eq!(size_of::<NotifyIconData>(), 976);
+        for dpi in [96, 120, 144, 168, 192, 240, 288, 384] {
+            let size = unsafe { GetSystemMetricsForDpi(49, dpi) };
+            let icon = OwnedIcon::sized(size, size).unwrap();
+            assert!(!icon.0.is_null(), "load the tray artwork at {dpi} DPI");
+        }
         let (quit, received) = mpsc::channel();
         let tray = TrayIcon::start(move || { quit.send(()).unwrap(); }).unwrap();
         let window = tray.window;

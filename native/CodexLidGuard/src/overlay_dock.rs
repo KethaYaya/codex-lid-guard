@@ -9,6 +9,9 @@ pub(super) struct DockLayout {
     pub flush_right: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TabPlacement { pub center: i32, pub height: i32 }
+
 pub(super) fn opening_target(from: Rect, work: Rect, dpi: u32) -> Rect {
     let width = (from.right - from.left).max(1);
     let height = (from.bottom - from.top).max(1);
@@ -57,8 +60,13 @@ pub(super) fn opening_bounds(from: Rect, to: Rect, progress: f32) -> Rect {
 }
 
 // A newly backgrounded message folds into its tab without reflowing its text.
+#[cfg(test)]
 pub(super) fn arrival_layout(expanded: Rect, work: Rect, progress: f32, dpi: u32) -> DockLayout {
-    let target = dock_layout(expanded, work, 1.0, dpi, None);
+    arrival_layout_custom(expanded, work, progress, dpi, None)
+}
+
+pub(super) fn arrival_layout_custom(expanded: Rect, work: Rect, progress: f32, dpi: u32, tab: Option<TabPlacement>) -> DockLayout {
+    let target = dock_layout_custom(expanded, work, 1.0, dpi, None, tab);
     if progress >= 1.0 {
         return target;
     }
@@ -83,6 +91,7 @@ pub(super) fn arrival_layout(expanded: Rect, work: Rect, progress: f32, dpi: u32
     }
 }
 
+#[cfg(test)]
 pub(super) fn dock_layout(
     expanded: Rect,
     work: Rect,
@@ -90,14 +99,21 @@ pub(super) fn dock_layout(
     dpi: u32,
     tab_center: Option<i32>,
 ) -> DockLayout {
+    dock_layout_custom(expanded, work, progress, dpi, tab_center, None)
+}
+
+pub(super) fn dock_layout_custom(
+    expanded: Rect, work: Rect, progress: f32, dpi: u32,
+    tab_center: Option<i32>, tab: Option<TabPlacement>,
+) -> DockLayout {
     let width = expanded.right - expanded.left;
     let height = expanded.bottom - expanded.top;
     let tab_width = scale_dip(28, dpi).min(work.right - work.left);
-    let tab_height = scale_dip(64, dpi).min(height);
+    let tab_height = tab.map_or(scale_dip(64, dpi), |tab| tab.height).min(height);
     let travel = work.right - expanded.left;
     let distance = (travel as f32 * progress.clamp(0.0, 1.0)).round() as i32;
     let left = expanded.left + distance;
-    let docked_top = (tab_center.unwrap_or(expanded.top + height / 2) - tab_height / 2)
+    let docked_top = (tab.map(|tab| tab.center).or(tab_center).unwrap_or(expanded.top + height / 2) - tab_height / 2)
         .clamp(work.top, work.bottom - tab_height);
     // A changed message height can leave the stored tab outside the panel.
     // Bring it inside before its final pixels retract, avoiding a vertical snap too.

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.81
+
+- After Copilot + Tab expands a preview, release both keys and press Tab alone to fold that preview immediately. Keep Copilot + Tab cycling and the three-second automatic fold.
+- Use the actual expanded state and keyboard selection so folded tabs, unrelated typing, mouse-opened previews, and modified Tab navigation do not capture ordinary Tab presses.
+
+## 0.1.80
+
+- Fold previews selected with Copilot + Tab three seconds after releasing Copilot. Keep them expanded while the prefix is held, restart the delay when cycling, and handle keyboards that send the Copilot sequence as a quick tap.
+- Show animated amber busy dots in the expanded preview header as well as the minimized tab, with steady dots when Windows animations are disabled.
+
+## 0.1.79
+
+- Redraw the tray icon for small sizes: a bright cyan shield, clear laptop silhouette, and a contrasting outline for dark and light taskbars.
+- Embed artwork from 16 to 64 pixels, choose it using the taskbar display scale, and refresh it after display settings changes.
+
+## 0.1.78
+
+- Configure the maximum overlay tab count from 1 to 10, with live resizing and retained chat routing.
+- Configure the global shortcut prefix and cycle, open and close keys, or disable overlay shortcuts. Preserve current defaults and cancel pending shortcuts when bindings change.
+- Show the configured prefix in overlay hints and keep dense tabs distinct while allowing readable expanded previews.
+
 ## 0.1.77
 
 - Use the extension's Lid Guard logo for the helper's tray icon, embedded in the executable and sized for the Windows notification area.

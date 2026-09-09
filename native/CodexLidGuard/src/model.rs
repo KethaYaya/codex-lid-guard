@@ -89,6 +89,8 @@ pub struct GuardSettings {
     pub overlay_opacity: u8,
     pub overlay_duration_seconds: u64,
     pub overlay_position: String,
+    pub overlay_max_tabs: usize,
+    pub overlay_shortcuts: crate::shortcut_config::ShortcutSettings,
     pub alert_sounds: bool,
     pub alert_sounds_only_when_unfocused: bool,
     pub sleep_when_lid_closed: bool,
@@ -102,6 +104,8 @@ impl Default for GuardSettings {
             overlay_opacity: 82,
             overlay_duration_seconds: 90,
             overlay_position: "bottom-right".into(),
+            overlay_max_tabs: 3,
+            overlay_shortcuts: Default::default(),
             alert_sounds: true,
             alert_sounds_only_when_unfocused: true,
             sleep_when_lid_closed: true,
@@ -133,6 +137,7 @@ impl GuardSettings {
     pub fn clamp(mut self) -> Self {
         self.overlay_opacity = self.overlay_opacity.clamp(30, 100);
         self.overlay_duration_seconds = self.overlay_duration_seconds.clamp(10, 600);
+        self.overlay_max_tabs = self.overlay_max_tabs.clamp(1, crate::overlay::SESSION_LIMIT);
         self.sleep_delay_seconds = self.sleep_delay_seconds.min(300);
         self
     }
@@ -168,6 +173,9 @@ mod tests {
         assert!(settings.alert_sounds_only_when_unfocused);
         assert!(settings.sleep_when_lid_closed);
         assert_eq!(settings.sleep_delay_seconds, 300);
+        assert_eq!(settings.overlay_max_tabs, 3);
+        assert_eq!(GuardSettings { overlay_max_tabs: 0, ..Default::default() }.clamp().overlay_max_tabs, 1);
+        assert_eq!(GuardSettings { overlay_max_tabs: 100, ..Default::default() }.clamp().overlay_max_tabs, 10);
     }
 
     #[test]

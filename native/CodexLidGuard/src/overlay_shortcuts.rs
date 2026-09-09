@@ -1,9 +1,10 @@
-//! One dedicated input thread for the three overlay windows.
+//! One dedicated input thread for all overlay windows.
 //! See https://learn.microsoft.com/windows/win32/winmsg/lowlevelkeyboardproc.
 use super::*;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
+use crate::{overlay::SESSION_LIMIT, shortcut_config::ShortcutConfig};
 
 #[path = "overlay_shortcut_keys.rs"]
 mod keys;
@@ -77,10 +78,10 @@ unsafe extern "system" {
 
 struct HookState {
     keys: Keys,
-    bindings: [Option<Binding>; 3],
+    bindings: [Option<Binding>; SESSION_LIMIT],
 }
 thread_local! {
-    static HOOK_STATE: RefCell<HookState> = RefCell::new(HookState { keys: Keys::default(), bindings: [None; 3] });
+    static HOOK_STATE: RefCell<HookState> = RefCell::new(HookState { keys: Keys::default(), bindings: [None; SESSION_LIMIT] });
 }
 
 unsafe fn dispatch(action: Action) {
@@ -93,11 +94,14 @@ unsafe fn dispatch(action: Action) {
             Action::Expand(binding) => post(binding, 0),
             Action::Open(binding) => post(binding, 1),
             Action::Close(binding) => post(binding, 2),
-            Action::Cycle { previous, selected } => {
+            Action::Collapse(binding) => post(binding, 3),
+            Action::HoldPreview(binding) => post(binding, 7),
+            Action::ReleasePreview(binding) => post(binding, 6),
+            Action::Cycle { previous, selected, held } => {
                 if let Some(previous) = previous.filter(|previous| *previous != selected) {
                     post(previous, 3); // Tuck the previous preview; keep its tab available.
                 }
-                post(selected, 0);
+                post(selected, if held { 4 } else { 5 });
             }
         }
     }
@@ -128,8 +132,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: Wparam, lparam: Lpara
             )
         });
         if outcome.mask_windows_key {
-            // The Copilot macro's Win/Shift events have already passed through.
-            // Mark Win as used so its release cannot open Start. No text is injected.
+            // Prefix modifiers already passed through. Mark Win/Alt as used so
+            // their release cannot open Start or a menu. No text is injected.
             let input = [0, 2].map(|flags| Input {
                 kind: 1,
                 data: InputData {
@@ -169,9 +173,11 @@ struct Identity {
 struct Entry {
     identity: Identity,
     binding: Binding,
+    expanded: bool,
 }
 struct Shared {
-    entries: Mutex<[Option<Entry>; 3]>,
+    entries: Mutex<[Option<Entry>; SESSION_LIMIT]>,
+    config: Mutex<ShortcutConfig>,
     thread: AtomicU32,
     next_token: AtomicUsize,
 }
@@ -194,6 +200,8 @@ pub struct ShortcutPublisher {
     slot: usize,
     identity: Option<Identity>,
     binding: Option<Binding>,
+    config: ShortcutConfig,
+    expanded: bool,
 }
 
 impl OverlayShortcuts {
@@ -204,6 +212,7 @@ impl OverlayShortcuts {
     fn start_with_hook(install_hook: bool) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             entries: Mutex::new(std::array::from_fn(|_| None)),
+            config: Mutex::new(ShortcutConfig::default()),
             thread: AtomicU32::new(0),
             next_token: AtomicUsize::new(1),
         });
@@ -219,15 +228,18 @@ impl OverlayShortcuts {
             let mut hook: Handle = null_mut();
             while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
                 if message.message == WM_REFRESH {
-                    let bindings = worker
-                        .entries
-                        .lock()
-                        .unwrap()
-                        .each_ref()
-                        .map(|entry| entry.as_ref().map(|entry| entry.binding));
+                    let (bindings, expanded) = {
+                        let entries = worker.entries.lock().unwrap();
+                        (entries.each_ref().map(|entry| entry.as_ref().map(|entry| entry.binding)),
+                            entries.each_ref().map(|entry| entry.as_ref().filter(|entry| entry.expanded).map(|entry| entry.binding)))
+                    };
                     HOOK_STATE.with(|state| {
                         let mut state = state.borrow_mut();
+                        if let Some(action) = state.keys.configure(worker.config.lock().unwrap().clone()) {
+                            dispatch(action);
+                        }
                         state.bindings = bindings;
+                        state.keys.set_expanded(expanded);
                         if bindings.iter().all(Option::is_none) {
                             state.keys.cancel();
                         }
@@ -288,6 +300,8 @@ impl OverlayShortcuts {
             slot,
             identity: None,
             binding: None,
+            config: ShortcutConfig::default(),
+            expanded: false,
         }
     }
 
@@ -320,12 +334,26 @@ impl OverlayShortcuts {
 }
 
 impl ShortcutPublisher {
+    pub(super) fn configure(&mut self, config: &ShortcutConfig) {
+        if &self.config != config {
+            self.clear();
+            self.config = config.clone();
+        }
+        let shared = &self.owner.shared;
+        let mut current = shared.config.lock().unwrap();
+        if &*current == config { return; }
+        *current = config.clone();
+        drop(current);
+        unsafe { PostThreadMessageW(shared.thread.load(Ordering::Relaxed), WM_REFRESH, 0, 0); }
+    }
+
     pub(super) fn publish(
         &mut self,
         window: usize,
         origin: u64,
         session: &str,
         label: &str,
+        expanded: bool,
     ) -> ([u8; 2], usize) {
         if self.identity.as_ref().is_some_and(|old| {
             old.window == window
@@ -334,6 +362,11 @@ impl ShortcutPublisher {
                 && old.label == label
         }) {
             let binding = self.binding.unwrap();
+            if self.expanded != expanded {
+                self.expanded = expanded;
+                self.owner.shared.entries.lock().unwrap()[self.slot].as_mut().unwrap().expanded = expanded;
+                unsafe { PostThreadMessageW(self.owner.shared.thread.load(Ordering::Relaxed), WM_REFRESH, 0, 0); }
+            }
             return (binding.code, binding.token);
         }
         let identity = Identity {
@@ -364,9 +397,11 @@ impl ShortcutPublisher {
         entries[self.slot] = Some(Entry {
             identity: identity.clone(),
             binding,
+            expanded,
         });
         self.identity = Some(identity);
         self.binding = Some(binding);
+        self.expanded = expanded;
         drop(entries);
         unsafe {
             PostThreadMessageW(shared.thread.load(Ordering::Relaxed), WM_REFRESH, 0, 0);
@@ -405,11 +440,12 @@ mod tests {
         let service = OverlayShortcuts::simulated();
         let mut first = service.publisher(0);
         let mut second = service.publisher(1);
-        let original = first.publish(10, 100, "one", "Project — Dry run");
+        let original = first.publish(10, 100, "one", "Project — Dry run", false);
         assert_eq!(original.0, *b"DR");
-        assert_eq!(second.publish(11, 100, "two", "Project — Deploy").0, *b"EP");
-        assert_eq!(first.publish(10, 100, "one", "Project — Dry run"), original);
-        let renamed = first.publish(10, 100, "one", "Project — A new title");
+        assert_eq!(second.publish(11, 100, "two", "Project — Deploy", false).0, *b"EP");
+        assert_eq!(first.publish(10, 100, "one", "Project — Dry run", true), original);
+        assert!(service.owner.shared.entries.lock().unwrap()[0].as_ref().unwrap().expanded);
+        let renamed = first.publish(10, 100, "one", "Project — A new title", false);
         assert_eq!(
             renamed.0, original.0,
             "visible chat shortcuts should stay stable across renames"
@@ -417,7 +453,7 @@ mod tests {
         assert_ne!(renamed.1, original.1);
         first.clear();
         assert!(service.test_binding(0).is_none());
-        let replacement = first.publish(10, 200, "replacement", "Project — Dry run");
+        let replacement = first.publish(10, 200, "replacement", "Project — Dry run", false);
         assert_ne!(replacement.1, renamed.1);
         assert_ne!(replacement.0[0], service.test_binding(1).unwrap().0[0]);
     }

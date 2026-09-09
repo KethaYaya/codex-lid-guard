@@ -10,7 +10,9 @@ mod overlay_motion;
 use overlay_motion::{AnimatedRow, DockMotion, Motion, MotionClock, OpenMotion};
 #[path = "overlay_dock.rs"]
 mod overlay_dock;
-use overlay_dock::{DockLayout, arrival_layout, dock_layout, opening_bounds, opening_target};
+use overlay_dock::{DockLayout, TabPlacement, arrival_layout_custom, dock_layout_custom, opening_bounds, opening_target};
+#[cfg(test)]
+use overlay_dock::dock_layout;
 #[path = "overlay_open_surface.rs"]
 mod overlay_open_surface;
 use overlay_open_surface::{FrameSurface, OpenSurface, reset_layered_mode};
@@ -184,6 +186,7 @@ struct OverlayState {
     pending_target: Option<CardTarget>,
     collapsed: bool,
     hover_open: Option<HoverOpen>,
+    keyboard_preview: Option<KeyboardPreview>,
     tab_pressed: bool,
     close_pressed: bool,
     activity: u64,
@@ -197,6 +200,7 @@ struct OverlayState {
     panel_dirty: bool,
     panel_size: (i32, i32),
     shortcut_code: Option<[u8; 2]>,
+    shortcut_prefix: Option<String>,
     shortcut_token: usize,
     restoring: bool,
     compositor: Option<FrameSurface>,
@@ -218,6 +222,33 @@ struct Opening {
 struct HoverOpen {
     anchor: Rect,
     outside_since: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+enum KeyboardPreview {
+    Held,
+    Released(Instant),
+}
+
+const KEYBOARD_PREVIEW_DELAY: Duration = Duration::from_secs(3);
+
+unsafe fn set_keyboard_preview(window: Hwnd, state: &mut OverlayState, preview: Option<KeyboardPreview>) -> io::Result<()> {
+    unsafe {
+        KillTimer(window, 6);
+        state.keyboard_preview = preview;
+        if let Some(KeyboardPreview::Released(deadline)) = preview {
+            let delay = deadline.saturating_duration_since(Instant::now()).as_millis().max(1) as u32;
+            if SetTimer(window, 6, delay, null()) == 0 {
+                return Err(error("Start keyboard preview timer"));
+            }
+        }
+        Ok(())
+    }
+}
+
+unsafe fn cancel_keyboard_preview(window: Hwnd, state: &mut OverlayState) {
+    state.keyboard_preview = None;
+    unsafe { KillTimer(window, 6); }
 }
 
 struct OpenedOverlay {
@@ -364,9 +395,8 @@ fn needs_activity_timer(
     animate: bool,
     attention: bool,
     busy: bool,
-    tab: bool,
 ) -> bool {
-    visible && animate && (attention || (busy && tab))
+    visible && animate && (attention || busy)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -554,6 +584,7 @@ fn run_overlay_inner(
             pending_target: None,
             collapsed: false,
             hover_open: None,
+            keyboard_preview: None,
             tab_pressed: false,
             close_pressed: false,
             activity: 0,
@@ -567,6 +598,7 @@ fn run_overlay_inner(
             panel_dirty: true,
             panel_size: (1, 1),
             shortcut_code: None,
+            shortcut_prefix: Some("Copilot".into()),
             shortcut_token: 0,
             restoring: false,
             compositor: None,
@@ -607,6 +639,7 @@ fn run_overlay_inner(
             let mut motion = Motion::new(started);
             let mut dock = DockMotion::new(started);
             let mut dock_center = None;
+            let mut dense_tab = None;
             let mut dock_request = 0;
             let mut arrival = None;
             let mut opened_overlay: Option<OpenedOverlay> = None;
@@ -651,6 +684,7 @@ fn run_overlay_inner(
                 let mut activity_changed = false;
                 if !state.clicks.due(real).is_empty() {
                     cancel_hover(window, &mut state);
+                    cancel_keyboard_preview(window, &mut state);
                     KillTimer(window, 3);
                     if dock_center.is_none() {
                         dock_center = state.layout.map(|layout| {
@@ -699,6 +733,7 @@ fn run_overlay_inner(
                     }
                     if displayed_session != frame.session_id {
                         cancel_hover(window, &mut state);
+                        cancel_keyboard_preview(window, &mut state);
                         // A replaced lane must never inherit another chat's click or dock state.
                         if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                             ReleaseCapture();
@@ -723,6 +758,14 @@ fn run_overlay_inner(
                         awaiting_dock_request = None;
                     }
                     closing = frame.close;
+                    let prefix = frame.shortcuts.enabled.then(|| frame.shortcuts.prefix.clone());
+                    if state.shortcut_prefix != prefix {
+                        state.shortcut_prefix = prefix;
+                        state.panel_dirty = true;
+                    }
+                    if !frame.cards.is_empty() && let Some(shortcuts) = &mut shortcuts {
+                        shortcuts.configure(&frame.shortcuts);
+                    }
                     let mut enabled: Bool = 1;
                     // SPI_GETCLIENTAREAANIMATION follows Windows accessibility preferences.
                     if SystemParametersInfoW(0x1042, 0, (&mut enabled as *mut Bool).cast(), 0) != 0
@@ -753,6 +796,7 @@ fn run_overlay_inner(
                     if auto_dock {
                         let already_tucked = state.collapsed && dock.sample(now).0 == 1.0 && arrival.is_none();
                         cancel_hover(window, &mut state);
+                        cancel_keyboard_preview(window, &mut state);
                         if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                             ReleaseCapture();
                         }
@@ -824,8 +868,9 @@ fn run_overlay_inner(
                         let next_width = scale_dip(440, dpi)
                             .min((info.work.right - info.work.left - margin * 2).max(1));
                         let next_work = slot
-                            .map(|slot| session_work_area(info.work, slot, dpi, &frame.position))
+                            .map(|slot| configured_session_area(info.work, slot, dpi, &frame.position, frame.max_tabs).0)
                             .unwrap_or(info.work);
+                        dense_tab = slot.and_then(|slot| configured_session_area(info.work, slot, dpi, &frame.position, frame.max_tabs).1);
                         let changed = font_changed
                             || state.cards != frame.cards
                             || width != next_width
@@ -896,7 +941,7 @@ fn run_overlay_inner(
                 state.panel_dirty |= repaint;
                 state.rows = rows;
                 if let Some(shortcuts) = &mut shortcuts {
-                    if !closing && !state.restoring && !state.rows.is_empty() && !state.cards.is_empty() {
+                    if state.shortcut_prefix.is_some() && !closing && !state.restoring && !state.rows.is_empty() && !state.cards.is_empty() {
                         let card = &state.cards[0];
                         let (code, token) = shortcuts.publish(
                             window as usize,
@@ -906,18 +951,30 @@ fn run_overlay_inner(
                                 .unwrap_or(0),
                             displayed_session.as_deref().unwrap_or("preview"),
                             &card.label,
+                            !state.collapsed,
                         );
                         repaint |= state.shortcut_code != Some(code);
                         state.panel_dirty |= state.shortcut_code != Some(code);
                         state.shortcut_code = Some(code);
+                        if state.shortcut_token != token && state.keyboard_preview.is_some() {
+                            // A renamed binding cannot receive its old prefix release.
+                            set_keyboard_preview(window, &mut state,
+                                Some(KeyboardPreview::Released(real + KEYBOARD_PREVIEW_DELAY)))?;
+                        }
                         state.shortcut_token = token;
                     } else {
                         shortcuts.clear();
+                        state.shortcut_code = None;
+                        if state.shortcut_token != 0 && state.keyboard_preview.is_some() {
+                            set_keyboard_preview(window, &mut state,
+                                Some(KeyboardPreview::Released(real + KEYBOARD_PREVIEW_DELAY)))?;
+                        }
                         state.shortcut_token = 0;
                     }
                 }
                 if state.rows.is_empty() {
                     cancel_hover(window, &mut state);
+                    cancel_keyboard_preview(window, &mut state);
                     state.collapsed = false;
                     state.tab_pressed = false;
                     state.layout = None;
@@ -968,9 +1025,9 @@ fn run_overlay_inner(
                     bounds.top += slide;
                     bounds.bottom += slide;
                     let layout = if let Some(progress) = arrival_progress {
-                        arrival_layout(bounds, work, progress, dpi)
+                        arrival_layout_custom(bounds, work, progress, dpi, dense_tab)
                     } else {
-                        dock_layout(bounds, work, docked, dpi, dock_center)
+                        dock_layout_custom(bounds, work, docked, dpi, dock_center, dense_tab)
                     };
                     let shape_changed = state.layout != Some(layout);
                     state.layout = Some(layout);
@@ -1050,7 +1107,6 @@ fn run_overlay_inner(
                     animate && !needs_timer && opening.is_none(),
                     state.attention,
                     state.busy,
-                    state.layout.is_some_and(|layout| layout.tab.is_some()),
                 );
                 if needs_activity != activity_timer {
                     if needs_activity {
@@ -1114,7 +1170,7 @@ fn run_overlay_inner(
                         }
                         if message.lparam == 0 {
                             message.message = WM_APP_EXPAND_OVERLAY;
-                            message.wparam = 0; // Keyboard expansion stays open, like a tab click.
+                            message.wparam = 0; // Letter selection stays open, like a tab click.
                         } else if message.lparam == 1 {
                             state.pending_target =
                                 state.cards.first().and_then(|card| card.target.clone());
@@ -1124,6 +1180,16 @@ fn run_overlay_inner(
                             message.lparam = state.activity as isize;
                         } else if message.lparam == 3 {
                             message.message = WM_APP_COLLAPSE_OVERLAY;
+                        } else if matches!(message.lparam, 4 | 5) {
+                            message.wparam = if message.lparam == 4 { 2 } else { 3 };
+                            message.message = WM_APP_EXPAND_OVERLAY;
+                        } else if matches!(message.lparam, 6 | 7) {
+                            if state.keyboard_preview.is_some() {
+                                let preview = if message.lparam == 7 { KeyboardPreview::Held }
+                                    else { KeyboardPreview::Released(Instant::now() + KEYBOARD_PREVIEW_DELAY) };
+                                set_keyboard_preview(window, &mut state, Some(preview))?;
+                            }
+                            continue;
                         } else {
                             continue;
                         }
@@ -1141,6 +1207,7 @@ fn run_overlay_inner(
                             updates.dismiss(target, state.activity);
                         }
                         cancel_hover(window, &mut state);
+                        cancel_keyboard_preview(window, &mut state);
                         state.clicks = ClickTracker::default();
                         state.tab_pressed = false;
                         state.close_pressed = false;
@@ -1148,6 +1215,18 @@ fn run_overlay_inner(
                         ReleaseCapture();
                         refresh = true;
                         break;
+                    }
+                    if message.message == WM_TIMER && message.wparam == 6 {
+                        if let Some(KeyboardPreview::Released(deadline)) = state.keyboard_preview {
+                            if Instant::now() < deadline {
+                                let preview = state.keyboard_preview;
+                                set_keyboard_preview(window, &mut state, preview)?;
+                                continue;
+                            }
+                            message.message = WM_APP_COLLAPSE_OVERLAY;
+                        } else {
+                            continue;
+                        }
                     }
                     if message.message == WM_TIMER {
                         if message.wparam == 5 {
@@ -1160,6 +1239,7 @@ fn run_overlay_inner(
                                     dock_center =
                                         Some((hover.anchor.top + hover.anchor.bottom) / 2);
                                     cancel_hover(window, &mut state);
+                                    cancel_keyboard_preview(window, &mut state);
                                     state.collapsed = true;
                                     refresh = true;
                                     break;
@@ -1206,6 +1286,7 @@ fn run_overlay_inner(
                                 }
                             } else { None };
                             cancel_hover(window, &mut state);
+                            cancel_keyboard_preview(window, &mut state);
                             state.clicks = ClickTracker::default();
                             KillTimer(window, 3);
                             state.tab_pressed = false;
@@ -1248,6 +1329,7 @@ fn run_overlay_inner(
                             });
                         }
                         cancel_hover(window, &mut state);
+                        cancel_keyboard_preview(window, &mut state);
                         if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                             ReleaseCapture();
                         }
@@ -1266,12 +1348,17 @@ fn run_overlay_inner(
                             continue;
                         }
                         cancel_hover(window, &mut state);
+                        cancel_keyboard_preview(window, &mut state);
                         if message.wparam == 1 {
                             state.hover_open =
                                 state.layout.map(|layout| HoverOpen::new(layout.window));
                             if state.hover_open.is_some() && SetTimer(window, 5, 50, null()) == 0 {
                                 return Err(error("Start overlay hover timer"));
                             }
+                        } else if matches!(message.wparam, 2 | 3) {
+                            let preview = if message.wparam == 2 { KeyboardPreview::Held }
+                                else { KeyboardPreview::Released(Instant::now() + KEYBOARD_PREVIEW_DELAY) };
+                            set_keyboard_preview(window, &mut state, Some(preview))?;
                         }
                         state.collapsed = false;
                         arrival = None;
@@ -1293,6 +1380,7 @@ fn run_overlay_inner(
         KillTimer(window, 3);
         KillTimer(window, 4);
         KillTimer(window, 5);
+        KillTimer(window, 6);
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         DestroyWindow(window);
         if !state.font.is_null() {
@@ -1463,8 +1551,8 @@ fn overlay_bounds(work: Rect, width: i32, height: i32, margin: i32, position: &s
 }
 
 // Fixed lanes reserve space for expansion, so another chat's animation cannot move a tab.
-fn session_work_area(work: Rect, slot: usize, dpi: u32, position: &str) -> Rect {
-    let height = ((work.bottom - work.top) / crate::overlay::SESSION_LIMIT as i32)
+fn session_work_area(work: Rect, slot: usize, dpi: u32, position: &str, count: usize) -> Rect {
+    let height = ((work.bottom - work.top) / count.clamp(1, crate::overlay::SESSION_LIMIT) as i32)
         .min(scale_dip(272, dpi))
         .max(1);
     let top = if position.starts_with("top") {
@@ -1477,6 +1565,20 @@ fn session_work_area(work: Rect, slot: usize, dpi: u32, position: &str) -> Rect 
         bottom: top + height,
         ..work
     }
+}
+
+fn configured_session_area(work: Rect, slot: usize, dpi: u32, position: &str, count: usize) -> (Rect, Option<TabPlacement>) {
+    let count = count.clamp(1, crate::overlay::SESSION_LIMIT);
+    let lane = session_work_area(work, slot.min(count - 1), dpi, position, count);
+    if count <= 3 { return (lane, None); }
+    // Dense tabs keep distinct positions; a selected preview still has room for
+    // its message instead of shrinking the whole card into a narrow strip.
+    let center = (lane.top + lane.bottom) / 2;
+    let height = scale_dip(272, dpi).min(work.bottom - work.top);
+    let top = (center - height / 2).clamp(work.top, work.bottom - height);
+    (Rect { top, bottom: top + height, ..work }, Some(TabPlacement {
+        center, height: scale_dip(64, dpi).min((lane.bottom - lane.top - scale_dip(6, dpi)).max(1)),
+    }))
 }
 
 fn tab_caption(cards: &[Card]) -> String {
@@ -1571,6 +1673,7 @@ unsafe extern "system" fn window_procedure(
                     arm_click_timer(window, &state.clicks);
                     if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                         cancel_hover(window, state);
+                        cancel_keyboard_preview(window, state);
                         SetCapture(window);
                     }
                 }
@@ -1866,9 +1969,16 @@ unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
         let mut header = Rect {
             left: inset,
             top: scale_dip(12, dpi),
-            right: rect.right - scale_dip(68, dpi),
+            right: rect.right - scale_dip(if state.busy { 92 } else { 68 }, dpi),
             bottom: scale_dip(34, dpi),
         };
+        if state.busy {
+            let elapsed = state.activity_started.elapsed();
+            for dot in 0..3 {
+                fill_rectangle(dc, &header_busy_dot(rect, dot, dpi),
+                    fade_color(0x008bdcf6, busy_strength(elapsed, dot, state.animate)));
+            }
+        }
         if state.attention {
             paint_completion_dot(
                 dc,
@@ -1995,9 +2105,9 @@ unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             right: rect.right - inset,
             bottom: rect.bottom - scale_dip(6, dpi),
         };
-        let shortcut_hint = state.shortcut_code.map(|code| {
+        let shortcut_hint = state.shortcut_code.zip(state.shortcut_prefix.as_ref()).map(|(code, prefix)| {
             format!(
-                "Open: double-click or Copilot+{}, {}",
+                "Open: double-click or {prefix}, {}, {}",
                 code[0] as char, code[1] as char
             )
         });
@@ -2039,6 +2149,16 @@ fn intersect_rect(first: Rect, second: Rect) -> Option<Rect> {
         bottom: first.bottom.min(second.bottom),
     };
     (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
+}
+
+fn header_busy_dot(panel: Rect, dot: usize, dpi: u32) -> Rect {
+    let left = panel.right - scale_dip(84 - dot as i32 * 6, dpi);
+    Rect {
+        left,
+        right: left + scale_dip(3, dpi),
+        top: panel.top + scale_dip(20, dpi),
+        bottom: panel.top + scale_dip(23, dpi),
+    }
 }
 
 unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
@@ -2094,6 +2214,13 @@ unsafe fn paint_activity(window: Hwnd, state: &OverlayState) {
         };
         if let Some(panel) = layout.panel {
             let inset = scale_dip(18, dpi);
+            if state.busy {
+                for dot in 0..3 {
+                    let rect = header_busy_dot(panel, dot, dpi);
+                    update(rect, panel, 0x00241e1a, &|dc| fill_rectangle(dc, &rect,
+                        fade_color(0x008bdcf6, busy_strength(elapsed, dot, state.animate))));
+                }
+            }
             if state.attention {
                 let center = Point {
                     x: panel.right - scale_dip(52, dpi),
@@ -2291,12 +2418,11 @@ mod tests {
             busy_strength(Duration::from_millis(400), 1, true)
                 > busy_strength(Duration::from_millis(400), 0, true)
         );
-        assert!(!needs_activity_timer(false, true, true, true, true));
-        assert!(!needs_activity_timer(true, false, true, true, true));
-        assert!(!needs_activity_timer(true, true, false, true, false));
-        assert!(!needs_activity_timer(true, true, false, false, true));
-        assert!(needs_activity_timer(true, true, false, true, true));
-        assert!(needs_activity_timer(true, true, true, false, false));
+        assert!(!needs_activity_timer(false, true, true, true));
+        assert!(!needs_activity_timer(true, false, true, true));
+        assert!(needs_activity_timer(true, true, false, true));
+        assert!(!needs_activity_timer(true, true, false, false));
+        assert!(needs_activity_timer(true, true, true, false));
     }
 
     #[link(name = "user32")]
@@ -2332,7 +2458,7 @@ mod tests {
                 };
                 for position in ["top-left", "top-right", "bottom-left", "bottom-right"] {
                     let lanes: Vec<_> = (0..3)
-                        .map(|slot| session_work_area(work, slot, dpi, position))
+                        .map(|slot| session_work_area(work, slot, dpi, position, 3))
                         .collect();
                     for (slot, lane) in lanes.iter().enumerate() {
                         let panel = overlay_bounds(
@@ -2363,6 +2489,33 @@ mod tests {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn up_to_ten_dense_tabs_fit_without_overlap_and_expand_to_readable_panels() {
+        for dpi in [96, 144, 192] {
+            for height in [480, 900, 1440] {
+                let work = Rect { left: -1920, top: -200, right: 0, bottom: height - 200 };
+                for count in 4..=10 {
+                    for position in ["top-right", "bottom-right"] {
+                        let mut tabs: Vec<Rect> = Vec::new();
+                        for slot in 0..count {
+                            let (area, tab) = configured_session_area(work, slot, dpi, position, count);
+                            let panel = overlay_bounds(area, scale_dip(440, dpi),
+                                scale_dip(226, dpi).min(area.bottom - area.top - scale_dip(40, dpi)),
+                                scale_dip(20, dpi), position);
+                            assert!(panel.bottom - panel.top >= scale_dip(120, dpi));
+                            let rect = dock_layout_custom(panel, area, 1.0, dpi, None, tab).window;
+                            assert!(rect.top >= work.top && rect.bottom <= work.bottom);
+                            assert!(tabs.iter().all(|other| rect.bottom <= other.top || rect.top >= other.bottom),
+                                "tabs overlap at {count} tabs, height {height}, DPI {dpi}");
+                            assert_eq!(arrival_layout_custom(panel, area, 1.0, dpi, tab).window, rect);
+                            tabs.push(rect);
                         }
                     }
                 }
@@ -3013,6 +3166,8 @@ mod tests {
                     opacity: 82,
                     position: "bottom-right".into(),
                     close: elapsed >= 1200,
+                    max_tabs: 3,
+                    shortcuts: Default::default(),
                     busy: false,
                     attention: false,
                     dock_request: 0,
@@ -3317,6 +3472,8 @@ mod tests {
                     close: tick > 2
                         && started.elapsed()
                             > Duration::from_millis(unsafe { GetDoubleClickTime() } as u64 + 2000),
+                    max_tabs: 3,
+                    shortcuts: Default::default(),
                     busy: true,
                     attention: true,
                     dock_request: 0,
@@ -3424,6 +3581,7 @@ mod tests {
                 pending_target: None,
                 collapsed: false,
                 hover_open: None,
+                keyboard_preview: None,
                 tab_pressed: false,
                 close_pressed: false,
                 activity: 0,
@@ -3437,6 +3595,7 @@ mod tests {
                 panel_dirty: true,
                 panel_size: (1, 1),
                 shortcut_code: None,
+            shortcut_prefix: Some("Copilot".into()),
                 shortcut_token: 0,
                 restoring: false,
             compositor: None,
@@ -3523,6 +3682,7 @@ mod tests {
             pending_target: None,
             collapsed: false,
             hover_open: None,
+            keyboard_preview: None,
             tab_pressed: false,
             close_pressed: false,
             activity: 0,
@@ -3536,6 +3696,7 @@ mod tests {
             panel_dirty: true,
             panel_size: (1, 1),
             shortcut_code: None,
+            shortcut_prefix: Some("Copilot".into()),
             shortcut_token: 0,
             restoring: false,
             compositor: None,

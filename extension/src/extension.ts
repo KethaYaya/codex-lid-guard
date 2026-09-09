@@ -5,6 +5,7 @@ import { watch, type FSWatcher } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
 import { handleSessionUri, openSessionSidebar } from "./sessionSidebar";
+import { overlayShortcutProblem } from "./overlaySettings";
 import { createSessionBridge, sessionBelongsToWorkspace } from "./sessionBridge";
 import {
   quotePowerShellLiteral,
@@ -844,8 +845,23 @@ function setError(statusBar: vscode.StatusBarItem, message: string): void {
   statusBar.show();
 }
 
+let lastShortcutProblem: string | undefined;
+
 async function syncSettings(): Promise<void> {
   const config = configuration();
+  const shortcuts = {
+    enabled: config.get<boolean>("overlayShortcutsEnabled", true),
+    prefix: config.get<string>("overlayShortcutPrefix", "Copilot"),
+    cycleKey: config.get<string>("overlayCycleKey", "Tab"),
+    openKey: config.get<string>("overlayOpenKey", "Enter"),
+    closeKey: config.get<string>("overlayCloseKey", "Escape")
+  };
+  const problem = overlayShortcutProblem(shortcuts);
+  if (problem && problem !== lastShortcutProblem) {
+    void vscode.window.showWarningMessage(`Lid Guard overlay shortcuts are disabled: ${problem}`);
+  }
+  lastShortcutProblem = problem;
+  if (problem) { shortcuts.enabled = false; }
   await writeHelperSettings(
     helperSettingsPath(),
     config.get<boolean>("alertSounds", true),
@@ -855,7 +871,9 @@ async function syncSettings(): Promise<void> {
     config.get<boolean>("enabled", true) && config.get<boolean>("messageOverlay", false),
     config.get<number>("overlayOpacity", 82),
     config.get<number>("overlayDurationSeconds", 90),
-    config.get<string>("overlayPosition", "bottom-right")
+    config.get<string>("overlayPosition", "bottom-right"),
+    config.get<number>("overlayMaxTabs", 3),
+    shortcuts
   );
 }
 

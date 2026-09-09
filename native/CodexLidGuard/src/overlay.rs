@@ -15,7 +15,7 @@ use overlay_feed_worker::FeedWorker;
 
 const READ_LIMIT: u64 = 256 * 1024;
 const LINE_LIMIT: usize = 1024 * 1024;
-pub const SESSION_LIMIT: usize = 3;
+pub const SESSION_LIMIT: usize = 10;
 
 #[derive(Clone)]
 pub struct Session {
@@ -50,6 +50,8 @@ pub struct Frame {
     pub window: Option<u64>,
     pub opacity: u8,
     pub position: String,
+    pub max_tabs: usize,
+    pub shortcuts: crate::shortcut_config::ShortcutConfig,
     pub close: bool,
     pub busy: bool,
     pub attention: bool,
@@ -68,6 +70,8 @@ impl Frame {
             window: None,
             opacity: 82,
             position: "bottom-right".into(),
+            max_tabs: 3,
+            shortcuts: Default::default(),
             close: false,
             busy: false,
             attention: false,
@@ -138,7 +142,7 @@ impl FocusTransitions {
 }
 
 impl Feed {
-    fn recent_sessions(&self) -> HashSet<String> {
+    fn recent_sessions(&self, limit: usize) -> HashSet<String> {
         let mut recent: Vec<_> = self
             .sessions
             .iter()
@@ -152,7 +156,7 @@ impl Feed {
         });
         recent
             .into_iter()
-            .take(SESSION_LIMIT)
+            .take(limit.clamp(1, SESSION_LIMIT))
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -232,7 +236,7 @@ impl Feed {
         }
         // Retain finished sessions briefly to drain the final write even if the
         // terminal lifecycle record wins the race with the overlay timer.
-        let recent = self.recent_sessions();
+        let recent = self.recent_sessions(settings.overlay_max_tabs);
         self.sessions.retain(|id, session| {
             recent.contains(id)
                 || session.completion.is_some()
@@ -489,7 +493,7 @@ impl Feed {
     fn trim_previews(&mut self, settings: &GuardSettings, now: Instant) {
         let mut ordinary = 0;
         let mut kept_busy = std::collections::HashSet::new();
-        let recent = self.recent_sessions();
+        let recent = self.recent_sessions(settings.overlay_max_tabs);
         let mut kept_recent = HashSet::new();
         // Walk newest first; retain one busy or unread card per session in addition to the cache.
         self.previews.make_contiguous().reverse();
@@ -549,7 +553,7 @@ impl Feed {
                 .cmp(&a.1.session.activity)
                 .then_with(|| a.0.cmp(b.0))
         });
-        eligible.truncate(SESSION_LIMIT);
+        eligible.truncate(settings.overlay_max_tabs.clamp(1, SESSION_LIMIT));
         eligible
             .into_iter()
             .map(|(id, tracked, window, preview)| {
@@ -570,6 +574,8 @@ impl Feed {
                     attention: tracked.completion.is_some(),
                     opacity: settings.overlay_opacity,
                     position: settings.overlay_position.clone(),
+                    max_tabs: settings.overlay_max_tabs.clamp(1, SESSION_LIMIT),
+                    shortcuts: crate::shortcut_config::ShortcutConfig::from_settings(&settings.overlay_shortcuts),
                     close: false,
                     dock_request: self.focus.request(window),
                     hidden_in_focus: false,
@@ -653,7 +659,7 @@ pub fn preview() -> io::Result<()> {
     let settings = GuardSettings::load();
     let mut threads = Vec::new();
     let shortcuts = win::OverlayShortcuts::start()?;
-    for slot in 0..SESSION_LIMIT {
+    for slot in 0..settings.overlay_max_tabs.min(3) {
         let settings = settings.clone();
         let shortcuts = shortcuts.publisher(slot);
         threads.push(std::thread::spawn(move || {
@@ -679,6 +685,8 @@ pub fn preview() -> io::Result<()> {
                     window: None,
                     opacity: settings.overlay_opacity,
                     position: settings.overlay_position.clone(),
+                    max_tabs: settings.overlay_max_tabs.min(3),
+                    shortcuts: crate::shortcut_config::ShortcutConfig::from_settings(&settings.overlay_shortcuts),
                     close: elapsed >= Duration::from_secs(35),
                     busy: !completed,
                     attention: completed,
@@ -1214,6 +1222,32 @@ mod tests {
             feed.sessions["chat-2"].completion.is_some(),
             "evicting a tab is not acknowledging its chat"
         );
+    }
+
+    #[test]
+    fn configured_tab_limit_keeps_newest_chats_and_changes_without_restarting_feed() {
+        let now = Instant::now();
+        let mut feed = Feed::default();
+        for activity in 1..=12 {
+            let id = format!("chat-{activity}");
+            let mut session = tracked(&id, 10, now);
+            session.session.activity = activity;
+            feed.sessions.insert(id.clone(), session);
+            feed.previews.push_back(Preview { session: id, received: now,
+                card: Card { id: activity, label: "Chat".into(), text: "Message".into(),
+                    final_message: false, attention: false, target: None } });
+        }
+        for limit in [3, 10, 1, 5] {
+            let settings = GuardSettings { overlay_max_tabs: limit, ..Default::default() };
+            let frames = feed.visible_frames(&settings, |_| true, &HashSet::new());
+            assert_eq!(frames.len(), limit);
+            for (index, frame) in frames.iter().enumerate() {
+                assert_eq!(frame.session_id, Some(format!("chat-{}", 12 - index)));
+                assert_eq!(frame.max_tabs, limit);
+                assert_eq!(frame.cards[0].target.as_ref().unwrap().session_id, frame.session_id.as_ref().unwrap().as_str());
+            }
+            assert_eq!(feed.recent_sessions(limit).len(), limit);
+        }
     }
 
     #[test]

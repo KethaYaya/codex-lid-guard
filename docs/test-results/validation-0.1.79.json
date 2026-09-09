@@ -1,0 +1,43 @@
+{
+  "version": "0.1.79",
+  "change": "Replace the downscaled dark extension logo in the tray with a bright cyan shield and clear laptop silhouette, authored as a small vector icon and exported at native icon sizes.",
+  "artwork": "native/CodexLidGuard/Assets/Tray/lid-guard.svg",
+  "renderer": "scripts/render-tray-icon.ps1",
+  "sizes": [
+    16,
+    20,
+    24,
+    28,
+    32,
+    40,
+    48,
+    64
+  ],
+  "visualCheck": {
+    "passed": true,
+    "preview": "docs/test-results/tray-icon-0.1.79.png",
+    "scope": "Inspected all eight native-size exports on dark and light backgrounds."
+  },
+  "displayScaleCheck": {
+    "taskbarDpi": 144,
+    "previousIconPixels": 16,
+    "newIconPixels": 24,
+    "scope": "Read Explorer's actual taskbar DPI and compared legacy system metrics with DPI-specific small-icon metrics."
+  },
+  "trayIntegration": {
+    "passed": true,
+    "test": "win::tray::tests::tray_dispatches_quit_and_removes_its_owned_window_on_drop",
+    "scope": "Windows decodes every icon size for 100-400% scaling. A separate owned tray icon registers with Explorer, dispatches Quit to a test callback and cleans up. The running helper is not quit by the test."
+  },
+  "clippyAllTargetsWarningsDenied": "passed",
+  "diffCheck": "passed",
+  "apiReferences": [
+    "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow",
+    "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsystemmetricsfordpi"
+  ],
+  "package": "passed",
+  "installedVersion": "0.1.79",
+  "installedFilesVerified": 23,
+  "helperSha256": "83c96195ebc258bac23fc36da3874bd4285830010f9b026e83a7184b5b0d696c",
+  "activation": "The detached updater waits for active turns to finish before activating the installed helper."
+}

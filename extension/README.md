@@ -13,7 +13,7 @@ Keep local Codex tasks running with your Windows laptop lid closed, and follow y
 | Work with the lid closed | Automatic protection for local turns, including long tasks and automatic continuations. |
 | Multiple sessions | Protection stays active until the final running turn stops, across chats and VS Code windows. |
 | Restore normal sleep | Your previous battery and plugged-in lid actions are saved and restored exactly. |
-| Desktop message previews | Up to three independent, translucent overlays on the originating editor's display. |
+| Desktop message previews | A configurable number of translucent overlays (1-10, default 3) on the originating editor's display. |
 | Quick chat switching | Hover to peek, cycle with Copilot shortcuts, or double-click to open the exact chat in a maximized VS Code window. |
 | Per-chat progress | Moving amber dots for busy tabs; a repeating yellow background fade for completed tabs. |
 | Session menu | A status-bar shield opens running and recent chats, with unread completions highlighted. |
@@ -38,13 +38,13 @@ The VSIX includes a self-contained native helper. Recipients do not need Node.js
 
 ## Message overlays
 
-### Follow up to three chats
+### Choose how many chats to follow
 
-Each of the three most recently active eligible chats gets its own tab and latest assistant update. Titles use **project folder — chat title**, refresh after renaming, and show **Untitled chat** until a title is available. Tabs use short, distinct letter codes for keyboard access.
+The most recently active eligible chats get their own tabs and latest assistant updates, up to your configured limit (three by default). Set **Codex Lid Guard: Overlay Max Tabs** in VS Code Settings to a value from 1 to 10. Titles use **project folder — chat title**, refresh after renaming, and show **Untitled chat** until a title is available. Tabs use short, distinct letter codes for keyboard access.
 
 A tab appears when its chat is in the background: another app covers VS Code, the editor is minimized, another VS Code window is focused, or a different chat is selected. It hides when that exact chat is visible in its focused VS Code window. Returning to one chat leaves the other chats' tabs available.
 
-When VS Code loses focus or minimizes, the message shrinks into its edge tab. New messages update the tucked preview without expanding it. Each chat keeps its own state, with separate lanes so panels do not overlap or shift one another. A fourth eligible chat replaces the least recently active visible chat.
+When VS Code loses focus or minimizes, the message shrinks into its edge tab. New messages update the tucked preview without expanding it. Each chat keeps its own state. Higher tab limits pack tabs more closely while keeping expanded previews readable; expanded previews can overlap. When the limit is reached, a newer eligible chat replaces the least recently active visible chat.
 
 ![Expanded demo overlay showing the latest assistant update, close button, and keyboard shortcut footer.](images/screenshots/overlay-expanded.png)
 
@@ -69,7 +69,7 @@ Right-side panels slide flush with the display edge. Minimize and restore transi
 
 | State | What you see |
 | --- | --- |
-| Working | Moving amber dots on that chat's minimized tab. |
+| Working | Moving amber dots on the minimized tab and in the expanded preview header. |
 | Completed, tab folded | The whole tab background fades between charcoal and yellow (`#FFD000`). Initials stay steady; there is no completion tick. |
 | Completed, preview expanded | Small pulsing green dots in the header and beside the completed message title. |
 | Animations disabled in Windows | Steady status colors instead of pulsing or moving indicators. |
@@ -84,7 +84,7 @@ Right-side panels slide flush with the display edge. Minimize and restore transi
 
 Completion indicators stay on until you open that chat or view it manually in its focused VS Code window. Hovering, expanding a preview, or opening a different chat does not clear them. A new turn clears the previous completion. Cancellation is not shown as successful completion.
 
-Unread completions remain available until viewed, subject to the three-tab limit. Closing a notification hides it until the next turn without acknowledging its completion. The latest previews for the three most recent chats stay cached; older previews use the configured retention time, paused while tucked away.
+Unread completions remain available until viewed, subject to the configured tab limit. Closing a notification hides it until the next turn without acknowledging its completion. The latest previews up to the configured tab limit stay cached; older previews use the configured retention time, paused while tucked away.
 
 Long messages are shortened in the overlay. Open the chat for the full reply. Updates appear after Codex writes them locally, rather than token by token. Chats without an identified editor window do not get overlays.
 
@@ -92,16 +92,17 @@ Long messages are shortened in the overlay. Open the chat for the full reply. Up
 
 A shield icon in the Windows notification area shows that the helper is running. Click or right-click it and choose **Quit Lid Guard (close all tabs)** to exit the helper, close every overlay tab, cancel pending sleep, and restore the original power settings. The helper stays stopped, including during background extension checks, until you run **Codex Lid Guard: Enable** or click **Lid Guard stopped** in the VS Code status bar.
 
-Retained tabs stay in memory while the helper runs; quitting the helper or restarting Windows clears them. Closing VS Code alone leaves them available, subject to the three-tab limit. Keeping the helper running does not itself keep Windows awake.
+Retained tabs stay in memory while the helper runs; quitting the helper or restarting Windows clears them. Closing VS Code alone leaves them available, subject to the configured tab limit. Keeping the helper running does not itself keep Windows awake.
 
 ## Keyboard shortcuts
 
-These overlay shortcuts work while tabs are visible, even when you are using another app. **Copilot** means the physical Copilot key sending its standard **Win + Shift + F23** sequence.
+These overlay shortcuts work while tabs are visible, even when you are using another app. The table below shows the defaults. **Copilot** means the physical Copilot key sending its standard **Win + Shift + F23** sequence.
 
 | Shortcut | Action |
 | --- | --- |
 | Hold **Copilot**, tap **Tab** | Expand the next visible chat and fold the previous preview. Tap again to continue; cycling wraps after the last tab. |
 | Repeat **Copilot + Tab** | Continue cycling from the previously selected chat. |
+| **Tab** alone, after releasing Copilot | Immediately fold the expanded keyboard-selected preview into its tab. |
 | **Enter**, after selecting a tab with the shortcut | Open that chat and maximize its VS Code window. |
 | **Copilot + first tab letter** | Expand that specific chat. For `DR`, press **Copilot + D**. |
 | Add the **second tab letter** | Open the selected chat. For `DR`, press **R** after **Copilot + D**. **Enter** also works. |
@@ -110,9 +111,11 @@ These overlay shortcuts work while tabs are visible, even when you are using ano
 
 For example, hold **Copilot**, tap **Tab** until the desired message appears, then press **Enter**. Or use **Copilot + D**, then **R**, for a tab labeled `DR`. Typing **D + R** by themselves does not open a chat.
 
-Some keyboards emit the Copilot sequence as a quick tap even while the physical key is held. On those keyboards, enter each next step within **1.5 seconds**. The shortcut expires when that interval passes or focus changes; Enter, Esc, and Tab then keep their normal behavior in the current app. With no visible tabs, Copilot keeps its normal behavior.
+Some keyboards emit the Copilot sequence as a quick tap even while the physical key is held. On those keyboards, enter each next step within **1.5 seconds**. The shortcut expires when that interval passes or focus changes; Enter and Esc then keep their normal behavior in the current app. Tab alone can still fold the selected preview while it remains expanded. After folding, switching apps, or ordinary typing, Tab keeps its normal behavior. With no visible tabs, Copilot keeps its normal behavior.
 
-Keyboard-opened previews stay expanded like click-opened previews. Codes remain stable while a tab is visible, and the expanded footer shows that tab's letter shortcut. These global overlay shortcuts are handled by the native helper, not VS Code's Keyboard Shortcuts editor.
+Change **Overlay Shortcut Prefix**, **Overlay Cycle Key**, **Overlay Open Key**, and **Overlay Close Key** in VS Code Settings. For example, set the prefix to `Ctrl+Alt+Space`, cycle to `Down`, open to `Right`, and close to `Delete`. Press the prefix, then the cycle key to choose a tab, then the open key. You can also keep using the displayed tab letters after your chosen prefix. Turn off **Overlay Shortcuts Enabled** to disable global overlay shortcuts. Changes apply immediately and cancel any pending shortcut. Invalid or duplicate bindings disable shortcuts and show a settings warning.
+
+Previews selected with **Copilot + Tab** fold back into their tabs **three seconds after you release Copilot**. Holding Copilot keeps the preview open; another Copilot + Tab restarts the delay. After releasing Copilot, press Tab alone to fold the preview immediately. On keyboards that send Copilot as a quick tap, the delay starts with the cycle step. Press Copilot again before Tab to cycle to another chat; Tab alone folds the current preview. Letter-selected and click-opened previews stay expanded. Codes remain stable while a tab is visible, and the expanded footer shows that tab's letter shortcut. Configure these global overlay shortcuts in the extension settings; they are handled by the native helper and are separate from VS Code's Keyboard Shortcuts editor.
 
 ## Status bar and session menu
 
@@ -170,7 +173,13 @@ Open VS Code Settings and search for **Codex Lid Guard**. These are all availabl
 | `codexLidGuard.messageOverlay` | `false` | Show desktop message previews for background chats. |
 | `codexLidGuard.overlayOpacity` | `82` | Opacity percentage, from `30` to `100`. Lower is more transparent. |
 | `codexLidGuard.overlayPosition` | `bottom-right` | Preview corner: `bottom-right`, `bottom-left`, `top-right`, or `top-left`, on the originating editor's display. |
-| `codexLidGuard.overlayDurationSeconds` | `90` | Retention for older previews, from `10` to `600` seconds. The latest three chats and unread completions remain available. |
+| `codexLidGuard.overlayMaxTabs` | `3` | Maximum number of overlay tabs, from `1` to `10`. Applies immediately. |
+| `codexLidGuard.overlayShortcutsEnabled` | `true` | Enable global keyboard shortcuts while overlay tabs are visible. |
+| `codexLidGuard.overlayShortcutPrefix` | `Copilot` | Prefix before a tab letter or cycle key, for example `Ctrl+Alt+Space`. Custom prefixes need Ctrl, Alt or Win plus one key. |
+| `codexLidGuard.overlayCycleKey` | `Tab` | Cycle to the next tab after the prefix. |
+| `codexLidGuard.overlayOpenKey` | `Enter` | Open the selected chat. Its second tab letter also works. |
+| `codexLidGuard.overlayCloseKey` | `Escape` | Dismiss the selected tab, or cancel when none is selected. |
+| `codexLidGuard.overlayDurationSeconds` | `90` | Retention for older previews, from `10` to `600` seconds. The latest chats up to your tab limit and unread completions remain available. |
 | `codexLidGuard.alertSounds` | `true` | Enable completion and request sounds. |
 | `codexLidGuard.alertSoundsOnlyWhenUnfocused` | `true` | Keep automatic alerts quiet while viewing the relevant chat. |
 | `codexLidGuard.optionalHooks` | `false` | Install optional request-alert hooks; requires a one-time Codex review. |
@@ -202,7 +211,7 @@ Before changing power settings, the guardian writes a recovery record to `%LOCAL
 | Symptom | Check |
 | --- | --- |
 | No overlay appears | Enable **Toggle Message Overlay**, then wait for a new assistant update and switch away from that chat. The focused chat intentionally hides its own tab. Use **Preview Message Overlay** to check rendering. |
-| A tab disappeared | You may have viewed its chat, closed the notification, or brought a newer chat into the three-tab limit. A closed notification returns on that chat's next turn. |
+| A tab disappeared | You may have viewed its chat, closed the notification, or brought a newer chat into the configured tab limit. A closed notification returns on that chat's next turn. |
 | Copilot opens Windows Settings or another app | Overlay shortcuts require a visible tab and the standard **Win + Shift + F23** key sequence. A Windows or keyboard-utility remap that replaces that sequence will prevent detection. Without visible tabs, the key keeps its normal Windows action. |
 | Enter or Esc does nothing to the preview | Select a tab using Copilot first, then press Enter or Esc within the active shortcut. On keyboards that emit a quick Copilot tap, the interval is 1.5 seconds. |
 | Double-click opens the window but not the right chat | After installing `0.1.73`, reload existing VS Code windows once to activate direct session navigation and workspace tracking. Navigation failures appear in the **Codex Lid Guard Navigation** output channel. |
