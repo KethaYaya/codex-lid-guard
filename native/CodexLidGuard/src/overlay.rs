@@ -309,15 +309,18 @@ impl Feed {
                             preview.card.final_message = false;
                         }
                     }
-                    Update::Completed => {
+                    Update::Completed(message) => {
                         tracked.busy = false;
+                        // The terminal record carries the final display text too,
+                        // even if a large output burst skipped its earlier record.
+                        let text = message.map(|message| message.text).unwrap_or_else(||
+                            "Session complete. Open the chat to view the result.".into());
                         // Keep one completion card until this specific chat is viewed.
                         if let Some(preview) =
                             self.previews.iter_mut().rev().find(|p| &p.session == id)
                         {
                             if !preview.card.final_message {
-                                preview.card.text =
-                                    "Session complete. Open the chat to view the result.".into();
+                                preview.card.text = text;
                             }
                             preview.card.final_message = true;
                             tracked.completion = Some((preview.card.id, now));
@@ -330,8 +333,7 @@ impl Feed {
                                 card: Card {
                                     id: self.next_id,
                                     label: tracked.label.clone(),
-                                    text: "Session complete. Open the chat to view the result."
-                                        .into(),
+                                    text,
                                     final_message: true,
                                     attention: false,
                                     target: None,
@@ -805,7 +807,7 @@ impl MessageCursor {
 enum Update {
     Message(AssistantMessage),
     Started,
-    Completed,
+    Completed(Option<AssistantMessage>),
     Aborted,
 }
 
@@ -816,9 +818,11 @@ fn parse_update(line: &[u8]) -> Option<Update> {
     }
     match event.payload {
         Payload::Started => Some(Update::Started),
-        Payload::Completed => Some(Update::Completed),
+        Payload::Completed { last_agent_message } => Some(Update::Completed(
+            last_agent_message.as_deref().and_then(|text| display_message(text, Some("final_answer"))),
+        )),
         Payload::Aborted => Some(Update::Aborted),
-        _ => parse_message(line).map(Update::Message),
+        payload => message_from_payload(payload).map(Update::Message),
     }
 }
 
@@ -841,7 +845,9 @@ enum Payload {
     #[serde(rename = "task_started")]
     Started,
     #[serde(rename = "task_complete")]
-    Completed,
+    Completed {
+        last_agent_message: Option<String>,
+    },
     #[serde(rename = "turn_aborted")]
     Aborted,
     #[serde(rename = "agent_message")]
@@ -849,20 +855,61 @@ enum Payload {
         message: String,
         phase: Option<String>,
     },
+    #[serde(rename = "item_completed")]
+    ItemCompleted {
+        item: CompletedItem,
+    },
     #[serde(other)]
     Other,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum CompletedItem {
+    AgentMessage {
+        content: Vec<AgentContent>,
+        phase: Option<String>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum AgentContent {
+    Text { text: String },
+    #[serde(other)]
+    Other,
+}
+
+#[cfg(test)]
 fn parse_message(line: &[u8]) -> Option<AssistantMessage> {
     let event: Event = serde_json::from_slice(line).ok()?;
-    // agent_message is the display event. response_item mirrors it and must
-    // never create a duplicate. Reasoning, tools and user prompts are ignored.
-    let Payload::AgentMessage { message, phase } = event.payload else {
+    if event.kind != "event_msg" {
         return None;
-    };
-    if event.kind != "event_msg"
-        || !matches!(phase.as_deref(), None | Some("commentary" | "final_answer"))
-    {
+    }
+    message_from_payload(event.payload)
+}
+
+fn message_from_payload(payload: Payload) -> Option<AssistantMessage> {
+    // Codex writes either legacy agent_message or item_completed/AgentMessage
+    // display events. response_item mirrors are deliberately not read, avoiding
+    // duplicate previews and keeping reasoning, tools and user prompts excluded.
+    match payload {
+        Payload::AgentMessage { message, phase } => display_message(&message, phase.as_deref()),
+        Payload::ItemCompleted { item: CompletedItem::AgentMessage { content, phase } } => {
+            let text = content.into_iter().filter_map(|part| match part {
+                AgentContent::Text { text } => Some(text),
+                AgentContent::Other => None,
+            }).collect::<Vec<_>>().join("\n");
+            display_message(&text, phase.as_deref())
+        }
+        _ => None,
+    }
+}
+
+fn display_message(message: &str, phase: Option<&str>) -> Option<AssistantMessage> {
+    if !matches!(phase, None | Some("commentary" | "final_answer")) {
         return None;
     }
     let mut text: String = message
@@ -879,7 +926,7 @@ fn parse_message(line: &[u8]) -> Option<AssistantMessage> {
     }
     Some(AssistantMessage {
         text,
-        final_message: phase.as_deref() == Some("final_answer"),
+        final_message: phase == Some("final_answer"),
     })
 }
 
@@ -1786,6 +1833,142 @@ mod tests {
                 .is_empty(),
             "closed editor windows have no overlay"
         );
+    }
+
+    #[test]
+    fn completed_agent_items_provide_commentary_and_final_display_text() {
+        for phase in [None, Some("commentary"), Some("final_answer")] {
+            let line = serde_json::to_vec(&serde_json::json!({
+                "timestamp": "2026-09-14T14:00:00.000Z", "ordinal": 42,
+                "type": "event_msg", "payload": {
+                    "type": "item_completed", "thread_id": "one", "turn_id": "turn-1",
+                    "item": { "type": "AgentMessage", "id": "message-1", "phase": phase,
+                        "content": [{"type": "Text", "text": "First paragraph."},
+                            {"type": "Image", "text": "not display text"},
+                            {"type": "Text", "text": "Second paragraph."}] },
+                    "started_at_ms": 1, "completed_at_ms": 2
+                }
+            })).unwrap();
+            assert_eq!(parse_update(&line), Some(Update::Message(AssistantMessage {
+                text: "First paragraph.\nSecond paragraph.".into(),
+                final_message: phase == Some("final_answer"),
+            })));
+        }
+    }
+
+    #[test]
+    fn completed_items_exclude_reasoning_prompts_tools_and_unknown_phases() {
+        for item in [
+            serde_json::json!({"type":"UserMessage","content":[{"type":"Text","text":"private prompt"}]}),
+            serde_json::json!({"type":"Reasoning","summary_text":["private reasoning"],"raw_content":["secret"]}),
+            serde_json::json!({"type":"CommandExecution","stdout":"private output"}),
+            serde_json::json!({"type":"FileChange","changes":{"private":"diff"}}),
+            serde_json::json!({"type":"AgentMessage","phase":"analysis","content":[{"type":"Text","text":"private reasoning"}]}),
+            serde_json::json!({"type":"AgentMessage","phase":"unknown","content":[{"type":"Text","text":"unrecognized"}]}),
+            serde_json::json!({"type":"AgentMessage","content":[{"type":"Text","text":"  \n\t"}]}),
+            serde_json::json!({"type":"AgentMessage","content":[{"type":"Image","text":"not display text"}]}),
+        ] {
+            let line = serde_json::to_vec(&serde_json::json!({"type":"event_msg",
+                "payload":{"type":"item_completed","item":item}})).unwrap();
+            assert_eq!(parse_update(&line), None);
+        }
+        // A similarly shaped event outside the display-event envelope is not trusted.
+        let line = br#"{"type":"response_item","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"mirror"}]}}}"#;
+        assert_eq!(parse_update(line), None);
+    }
+
+    #[test]
+    fn completed_items_replace_working_placeholders_and_keep_results_without_mirrors() {
+        let now = Instant::now();
+        let path = std::env::temp_dir().join(format!("overlay-item-completed-{}.jsonl", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        let mut session = tracked("one", 1, now);
+        session.cursor = Some(MessageCursor::new(path.clone()).unwrap());
+        let active = vec![session.session.clone()];
+        let mut feed = Feed::default();
+        feed.sessions.insert("one".into(), session);
+        let settings = GuardSettings::default();
+        feed.test_poll(active.clone(), &settings, now, false);
+        assert!(feed.test_frame(&settings, |_| true).busy);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for (phase, text) in [("commentary", "Checking the project."), ("final_answer", "The changes are ready.")] {
+            let line = serde_json::to_string(&serde_json::json!({"type":"event_msg",
+                "payload":{"type":"item_completed","item":{"type":"AgentMessage",
+                    "phase":phase,"content":[{"type":"Text","text":text}]}}})).unwrap();
+            // New events can also be split across file writes.
+            let split = line.len() / 2;
+            file.write_all(&line.as_bytes()[..split]).unwrap();
+            let previous_id = feed.next_id;
+            feed.test_poll(active.clone(), &settings, now, false);
+            assert_eq!(feed.next_id, previous_id);
+            write_event(&mut file, &line[split..]).unwrap();
+            feed.test_poll(active.clone(), &settings, now, false);
+            let frame = feed.test_frame(&settings, |_| true);
+            assert_eq!(frame.cards[0].text, text);
+            assert!(frame.busy, "a final display message alone does not end a turn");
+            let message_id = frame.cards[0].id;
+            let mirror = serde_json::to_string(&serde_json::json!({"type":"response_item",
+                "payload":{"type":"message","role":"assistant","phase":phase,
+                    "content":[{"type":"output_text","text":text}]}})).unwrap();
+            write_event(&mut file, &mirror).unwrap();
+            feed.test_poll(active.clone(), &settings, now, false);
+            assert_eq!(feed.test_frame(&settings, |_| true).cards[0].id, message_id);
+        }
+        let final_id = feed.test_frame(&settings, |_| true).cards[0].id;
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"The changes are ready."}}"#).unwrap();
+        feed.test_poll(active, &settings, now, false);
+        let frame = feed.test_frame(&settings, |_| true);
+        assert_eq!(frame.cards.len(), 1);
+        assert_eq!(frame.cards[0].id, final_id);
+        assert_eq!(frame.cards[0].text, "The changes are ready.");
+        assert!(frame.attention);
+        assert!(!frame.busy);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminal_text_recovers_a_final_message_skipped_by_a_large_output_burst() {
+        let now = Instant::now();
+        let path = std::env::temp_dir().join(format!("overlay-terminal-text-{}.jsonl", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        let mut session = tracked("one", 1, now);
+        session.cursor = Some(MessageCursor::new(path.clone()).unwrap());
+        let active = vec![session.session.clone()];
+        let mut feed = Feed::default();
+        feed.sessions.insert("one".into(), session);
+        let settings = GuardSettings::default();
+        feed.test_poll(active, &settings, now, false);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":"Recovered final result."}]}}}"#).unwrap();
+        write_event(&mut file, &"x".repeat(READ_LIMIT as usize * 2)).unwrap();
+        write_event(&mut file, r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Recovered final result."}}"#).unwrap();
+        // The lifecycle tracker can stop tracking before the overlay drains the file.
+        feed.test_poll(vec![], &settings, now, false);
+        let frame = feed.test_frame(&settings, |_| true);
+        assert_eq!(frame.cards[0].text, "Recovered final result.");
+        assert!(frame.cards[0].final_message);
+        assert!(frame.attention);
+        assert!(!frame.busy);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminal_text_is_optional_sanitized_and_bounded() {
+        for payload in [
+            serde_json::json!({"type":"task_complete"}),
+            serde_json::json!({"type":"task_complete","last_agent_message":null}),
+            serde_json::json!({"type":"task_complete","last_agent_message":" \n\t "}),
+        ] {
+            let line = serde_json::to_vec(&serde_json::json!({"type":"event_msg","payload":payload})).unwrap();
+            assert_eq!(parse_update(&line), Some(Update::Completed(None)));
+        }
+        let line = serde_json::to_vec(&serde_json::json!({"type":"event_msg",
+            "payload":{"type":"task_complete","last_agent_message":format!("\u{0}{}", "é".repeat(1500))}})).unwrap();
+        let Some(Update::Completed(Some(message))) = parse_update(&line) else { panic!("missing final text"); };
+        assert_eq!(message.text, format!("{}…", "é".repeat(1400)));
+        assert!(message.final_message);
     }
 
     #[test]

@@ -818,20 +818,18 @@ fn run_worker(
                         begin_turn(task, &mut server, first_prompt.take().unwrap())?;
                     }
                 }
-                "turn/start" => {
-                    if task.snapshot().busy {
-                        let turn_id = result["turn"]["id"]
-                            .as_str()
-                            .ok_or_else(|| io::Error::other("Codex did not return a turn ID."))?;
-                        task.update(|view| {
-                            view.turn_id = Some(turn_id.into());
-                        });
-                        if interrupted {
-                            server.call(
-                                "turn/interrupt",
-                                json!({"threadId":task.snapshot().thread_id,"turnId":turn_id}),
-                            )?;
-                        }
+                "turn/start" if task.snapshot().busy => {
+                    let turn_id = result["turn"]["id"]
+                        .as_str()
+                        .ok_or_else(|| io::Error::other("Codex did not return a turn ID."))?;
+                    task.update(|view| {
+                        view.turn_id = Some(turn_id.into());
+                    });
+                    if interrupted {
+                        server.call(
+                            "turn/interrupt",
+                            json!({"threadId":task.snapshot().thread_id,"turnId":turn_id}),
+                        )?;
                     }
                 }
                 _ => {}

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Show actual assistant updates and final replies from newer Codex sessions that use `item_completed` / `AgentMessage` records. Previously these chats could stay on the generic working and completion messages.
+- Recover final reply text from the task completion record when a large output burst skips the earlier message. Keep legacy messages supported, ignore duplicate response records, and exclude prompts, reasoning, and tool output from previews.
+
 ## 0.2.0
 
 - Start independent background Codex sessions from a trusted local VS Code project. The native helper owns the app-server worker so tasks and follow-ups remain available after VS Code closes.

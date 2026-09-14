@@ -1,0 +1,61 @@
+{
+  "version": "0.2.1",
+  "change": "Read newer Codex item_completed/AgentMessage display events and recover final text from task_complete.last_agent_message.",
+  "nativeTests": {
+    "passed": 176,
+    "failed": 0,
+    "ignored": 16
+  },
+  "extensionTests": {
+    "passed": 40,
+    "failed": 0
+  },
+  "backgroundTestsAfterLintCleanup": {
+    "passed": 7,
+    "failed": 0,
+    "ignored": 2
+  },
+  "newRegressionCoverage": [
+    "New-format commentary and final replies reach the overlay.",
+    "Split writes preserve messages; response-item mirrors do not create duplicate cards.",
+    "Prompts, reasoning, tool output, unknown phases, and non-text content are excluded.",
+    "A completion record recovers the final reply after a large output burst skips its earlier display record.",
+    "Legacy events still work; completion text remains optional, sanitized, and bounded."
+  ],
+  "localTranscriptReplay": {
+    "scope": "Read-only replay through the current Rust parser extracted into a temporary verifier. No conversation text included in this report.",
+    "legacySession": {
+      "displayMessages": 12,
+      "matchingStoredReplies": 12,
+      "finalReplies": 3,
+      "completionTextRecords": 3
+    },
+    "newerSession": {
+      "displayMessages": 26,
+      "matchingStoredReplies": 26,
+      "finalReplies": 6,
+      "completionTextRecords": 6
+    },
+    "newerCompletedSession": {
+      "displayMessages": 56,
+      "matchingStoredReplies": 55,
+      "displayOnlyMessages": 1,
+      "finalReplies": 18,
+      "completionTextRecords": 17
+    }
+  },
+  "clippyAllTargetsWarningsDenied": "passed",
+  "lintCleanup": "Moved the existing background turn/start busy condition into a match guard without changing behavior.",
+  "package": "passed",
+  "installedVersion": "0.2.1",
+  "installedFilesVerified": 24,
+  "helperSha256": "63bde09e8d34f1b1a461cef9e2f50ea36b8e8118f4a5fcd977bd409031ac80e3",
+  "activation": {
+    "state": "waiting-for-idle",
+    "targetVersion": "0.2.1",
+    "runningVersion": "0.2.0",
+    "activeTurnsAtVerification": 1,
+    "backgroundTasks": 0
+  },
+  "validationScope": "Parser/feed regression tests and local transcript replay. Native desktop interaction tests and signed-in Codex smoke tests were not run for this parsing change."
+}
