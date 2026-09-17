@@ -29,6 +29,8 @@ export async function createSessionBridge(options: {
   workspaceFile?: () => string | undefined;
   focused: () => boolean;
   open: (sessionId: string) => Promise<void>;
+  send?: (sessionId: string, text: string, cwd: string, busy: boolean) => Promise<void>;
+  prepareNewChat?: () => Promise<string>;
   reportError: (error: unknown) => void;
 }) {
   const pipe = `\\\\.\\pipe\\CodexLidGuard.Navigation.${randomUUID()}`;
@@ -36,7 +38,7 @@ export async function createSessionBridge(options: {
   let disposed = false;
   let window: number | undefined;
   let registration = Promise.resolve();
-  const server = createServer((socket) => {
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => socket.destroy());
@@ -45,19 +47,52 @@ export async function createSessionBridge(options: {
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
       data += chunk;
-      if (Buffer.byteLength(data) > 4096) { socket.destroy(); return; }
+      if (Buffer.byteLength(data) > 64 * 1024) { socket.destroy(); return; }
       if (!data.includes("\n")) { return; }
       socket.removeAllListeners("data");
       let sessionId: string | undefined;
+      let reply: { sessionId: string; text: string; cwd: string; busy: boolean } | undefined;
+      let newChat = false;
       try {
         const request = JSON.parse(data.slice(0, data.indexOf("\n")));
-        if (!disposed && window !== undefined && options.focused()
-            && typeof request.sessionId === "string" && codexSessionRoute(request.sessionId)
+        if (!disposed && window !== undefined
             && typeof request.cwd === "string"
             && sessionBelongsToWorkspace(request.cwd, options.roots())) {
-          sessionId = request.sessionId.toLowerCase();
+          if (request.action === "send" && options.send
+              && typeof request.sessionId === "string" && codexSessionRoute(request.sessionId)
+              && typeof request.text === "string" && request.text.trim() && request.text.length <= 8192
+              && typeof request.busy === "boolean") {
+            reply = { sessionId: request.sessionId.toLowerCase(), text: request.text, cwd: request.cwd, busy: request.busy };
+          } else if (request.action === "prepare-new-chat" && options.prepareNewChat) {
+            newChat = true;
+          } else if (request.action === undefined && options.focused()
+              && typeof request.sessionId === "string" && codexSessionRoute(request.sessionId)) {
+            sessionId = request.sessionId.toLowerCase();
+          }
         }
       } catch { /* Invalid local requests never navigate. */ }
+      if (newChat) {
+        socket.setTimeout(10000, () => socket.destroy());
+        void options.prepareNewChat!().then(
+          (codexPath) => socket.end(`${JSON.stringify({ accepted: true, codexPath })}\n`),
+          (error) => {
+            options.reportError(error);
+            socket.end(`${JSON.stringify({ accepted: false, error: error instanceof Error ? error.message : "Could not start a new chat." })}\n`);
+          }
+        );
+        return;
+      }
+      if (reply) {
+        socket.setTimeout(100000, () => socket.destroy());
+        void options.send!(reply.sessionId, reply.text, reply.cwd, reply.busy).then(
+          () => socket.end(`${JSON.stringify({ accepted: true })}\n`),
+          (error) => {
+            options.reportError(error);
+            socket.end(`${JSON.stringify({ accepted: false, error: error instanceof Error ? error.message : "Could not send the message." })}\n`);
+          }
+        );
+        return;
+      }
       // This acknowledges delivery only. The guardian still waits for Codex's
       // own view event before clearing the overlay's completion indicator.
       socket.end(`${JSON.stringify({ accepted: sessionId !== undefined })}\n`);

@@ -31,7 +31,7 @@ fn clear_response(session:&str) {
     if let Some(requests)=INPUT_REQUESTS.lock().unwrap().as_mut(){requests.remove(session);}
 }
 
-fn waiting_for_response(session:&str)->bool {
+pub(crate) fn waiting_for_response(session:&str)->bool {
     INPUT_REQUESTS.lock().unwrap().as_ref().is_some_and(|requests|requests.contains(session))
 }
 
@@ -294,15 +294,19 @@ impl Feed {
             self.next_title_refresh = Some(now + Duration::from_secs(2));
         }
         for (id, tracked) in &mut self.sessions {
-            if tracked.cursor.is_none() && now >= tracked.next_lookup {
+            if now >= tracked.next_lookup {
                 tracked.next_lookup = now + Duration::from_secs(2);
                 let (path, cwd) = codex_lifecycle::session_metadata(id);
                 if tracked.session.cwd.is_none() {
                     tracked.session.cwd = cwd;
                 }
                 if let Some(path) = path {
-                    tracked.cursor = MessageCursor::new(PathBuf::from(path)).ok();
-                    tracked.fallback_title = codex_lifecycle::session_name(id);
+                    if let Some(cursor) = &mut tracked.cursor {
+                        let _ = cursor.follow(PathBuf::from(path));
+                    } else {
+                        tracked.cursor = MessageCursor::new(PathBuf::from(path)).ok();
+                        tracked.fallback_title = codex_lifecycle::session_name(id);
+                    }
                 }
             }
             tracked.label = session_label(
@@ -752,6 +756,16 @@ struct MessageCursor {
 }
 
 impl MessageCursor {
+    fn follow(&mut self, path: PathBuf) -> io::Result<()> {
+        if path != self.path {
+            // A resumed session can switch files before we next poll. Read its
+            // existing updates too; starting at EOF would miss a quick reply.
+            File::open(&path)?;
+            *self = Self { path, offset: 0, pending: vec![], discard_line: false };
+        }
+        Ok(())
+    }
+
     fn new(path: PathBuf) -> io::Result<Self> {
         // Start at EOF: enabling previews never replays old conversations.
         let offset = std::fs::metadata(&path)?.len();
@@ -1860,6 +1874,33 @@ mod tests {
                 .is_empty(),
             "closed editor windows have no overlay"
         );
+    }
+
+    #[test]
+    fn preview_cursor_follows_a_new_rollout_without_skipping_existing_updates() {
+        let directory = std::env::temp_dir().join(format!("overlay-rotation-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let old = directory.join("old.jsonl");
+        let next = directory.join("next.jsonl");
+        std::fs::write(&old, event("Old history must not replay on enable")).unwrap();
+        let mut cursor = MessageCursor::new(old.clone()).unwrap();
+        assert!(cursor.read_updates().unwrap().is_empty());
+        assert!(cursor.follow(next.clone()).is_err());
+        std::fs::write(&next, event("New file reply")).unwrap();
+        cursor.follow(next.clone()).unwrap();
+        assert_eq!(cursor.read_updates().unwrap(), [Update::Message(AssistantMessage {
+            text: "New file reply".into(), final_message: false,
+        })]);
+        cursor.follow(next.clone()).unwrap();
+        assert!(cursor.read_updates().unwrap().is_empty());
+        let mut file = std::fs::OpenOptions::new().append(true).open(&next).unwrap();
+        file.write_all(&event("Live update")).unwrap();
+        assert_eq!(cursor.read_updates().unwrap(), [Update::Message(AssistantMessage {
+            text: "Live update".into(), final_message: false,
+        })]);
+        drop(file);
+        for path in [old, next] { std::fs::remove_file(path).unwrap(); }
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

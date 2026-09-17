@@ -500,7 +500,7 @@ unsafe extern "system" fn procedure(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Instant;
 
@@ -527,7 +527,7 @@ mod tests {
         ) -> i32;
     }
 
-    unsafe fn capture(window: Hwnd, destination: &std::path::Path) {
+    pub(crate) unsafe fn capture(window: Hwnd, destination: &std::path::Path) {
         unsafe {
             let mut rect: Rect = zeroed();
             GetWindowRect(window, &mut rect);

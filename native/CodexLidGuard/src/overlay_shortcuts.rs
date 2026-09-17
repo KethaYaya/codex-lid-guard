@@ -9,11 +9,16 @@ use crate::{overlay::SESSION_LIMIT, shortcut_config::ShortcutConfig};
 #[path = "overlay_shortcut_keys.rs"]
 mod keys;
 use keys::{Action, Binding, Keys, code_for_label};
+#[path = "overlay_hover_typing.rs"]
+mod hover_typing;
+pub(super) use hover_typing::{TypingTarget, WM_HOVER_TEXT};
 
 pub(super) const WM_OVERLAY_SHORTCUT: u32 = 0x8004;
 const WM_REFRESH: u32 = 0x8005;
 #[cfg(test)]
 const WM_TEST_KEY: u32 = 0x8006;
+#[cfg(test)]
+const WM_TEST_HOVER_KEY: u32 = 0x8015;
 const OWN_INPUT: usize = 0x434c4753;
 
 #[repr(C)]
@@ -80,9 +85,12 @@ struct HookState {
     keys: Keys,
     bindings: [Option<Binding>; SESSION_LIMIT],
     hints_visible: bool,
+    typing: [Option<TypingTarget>; SESSION_LIMIT],
+    typed_down: [bool; 256],
 }
 thread_local! {
-    static HOOK_STATE: RefCell<HookState> = RefCell::new(HookState { keys: Keys::default(), bindings: [None; SESSION_LIMIT], hints_visible: false });
+    static HOOK_STATE: RefCell<HookState> = RefCell::new(HookState { keys: Keys::default(), bindings: [None; SESSION_LIMIT], hints_visible: false,
+        typing: [None; SESSION_LIMIT], typed_down: [false; 256] });
 }
 
 fn publish_hints(state: &mut HookState, bindings_changed: bool) {
@@ -118,6 +126,42 @@ unsafe fn dispatch(action: Action) {
     }
 }
 
+unsafe fn handle_key(event: &KeyboardEvent, down: bool, foreground: usize,
+    hovered: impl FnOnce(&[Option<TypingTarget>]) -> Option<TypingTarget>,
+    translate: impl FnOnce(&[u8; 256]) -> Option<isize>) -> keys::Outcome {
+    unsafe {
+        HOOK_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let bindings = state.bindings;
+            let now = Instant::now();
+            let typing_allowed = state.keys.allows_typing(now, foreground);
+            let held_elsewhere = state.keys.held(event.key)
+                && event.key < 256 && !state.typed_down[event.key as usize];
+            let mut outcome = state.keys.event(
+                event.key,
+                down,
+                now,
+                foreground,
+                &bindings,
+            );
+            if event.key < 256 {
+                if !down {
+                    outcome.consume |= std::mem::take(&mut state.typed_down[event.key as usize]);
+                } else if !outcome.consume && !held_elsewhere && typing_allowed && state.keys.allows_typing(now, foreground)
+                    && event.flags & 0x12 == 0 && hover_typing::printable(event.key)
+                    && let Some(target) = hovered(&state.typing)
+                    && let Some(text) = translate(&state.keys.translation_state(GetKeyState(0x14) & 1 != 0))
+                    && PostMessageW(target.surface as Hwnd, WM_HOVER_TEXT, target.token, text) != 0 {
+                    state.typed_down[event.key as usize] = true;
+                    outcome.consume = true;
+                }
+            }
+            publish_hints(&mut state, false);
+            outcome
+        })
+    }
+}
+
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
     unsafe {
         if code != 0 || lparam == 0 {
@@ -131,19 +175,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: Wparam, lparam: Lpara
         if !down && !matches!(wparam, 0x0101 | 0x0105) {
             return CallNextHookEx(null_mut(), code, wparam, lparam);
         }
-        let outcome = HOOK_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            let bindings = state.bindings;
-            let outcome = state.keys.event(
-                event.key,
-                down,
-                Instant::now(),
-                GetForegroundWindow() as usize,
-                &bindings,
-            );
-            publish_hints(&mut state, false);
-            outcome
-        });
+        let foreground = GetForegroundWindow() as usize;
+        let outcome = handle_key(event, down, foreground,
+            |targets| hover_typing::hovered(targets, foreground),
+            |state| hover_typing::text_for(event, state, foreground));
         if outcome.mask_windows_key {
             // Prefix modifiers already passed through. Mark Win/Alt as used so
             // their release cannot open Start or a menu. No text is injected.
@@ -193,6 +228,7 @@ struct Shared {
     config: Mutex<ShortcutConfig>,
     thread: AtomicU32,
     next_token: AtomicUsize,
+    typing: Mutex<[Option<TypingTarget>; SESSION_LIMIT]>,
 }
 struct Owner {
     shared: Arc<Shared>,
@@ -228,6 +264,7 @@ impl OverlayShortcuts {
             config: Mutex::new(ShortcutConfig::default()),
             thread: AtomicU32::new(0),
             next_token: AtomicUsize::new(1),
+            typing: Mutex::new([None; SESSION_LIMIT]),
         });
         let worker = shared.clone();
         let (ready, started) = mpsc::sync_channel(1);
@@ -254,12 +291,14 @@ impl OverlayShortcuts {
                         let bindings_changed = state.bindings != bindings;
                         state.bindings = bindings;
                         state.keys.set_expanded(expanded);
+                        state.typing = *worker.typing.lock().unwrap();
                         if bindings.iter().all(Option::is_none) {
                             state.keys.cancel();
                         }
                         publish_hints(&mut state, bindings_changed);
                     });
-                    if install_hook && bindings.iter().any(Option::is_some) && hook.is_null() {
+                    if install_hook && (bindings.iter().any(Option::is_some)
+                        || worker.typing.lock().unwrap().iter().any(Option::is_some)) && hook.is_null() {
                         HOOK_STATE.with(|state| {
                             state
                                 .borrow_mut()
@@ -276,7 +315,7 @@ impl OverlayShortcuts {
                         }
                     }
                     // Keep the hook until all swallowed key-ups have passed through;
-                    // with no bindings its fast path leaves every key untouched.
+                    // with no shortcuts/composers it leaves every key untouched.
                 }
                 #[cfg(test)]
                 if message.message == WM_TEST_KEY && !install_hook {
@@ -297,6 +336,15 @@ impl OverlayShortcuts {
                     if let Some(action) = outcome.action {
                         dispatch(action);
                     }
+                }
+                #[cfg(test)]
+                if message.message == WM_TEST_HOVER_KEY && !install_hook {
+                    let key = message.wparam as u32;
+                    let event = KeyboardEvent { key, scan: 0, flags: 0, time: 0, extra: 0 };
+                    let outcome = handle_key(&event, message.lparam & 1 != 0, 99,
+                        |targets| targets.iter().flatten().next().copied().filter(|_| message.lparam & 2 != 0),
+                        |_| Some((key as u8).to_ascii_lowercase() as isize));
+                    if let Some(action) = outcome.action { dispatch(action); }
                 }
             }
             if !hook.is_null() {
@@ -350,7 +398,30 @@ impl OverlayShortcuts {
     }
 }
 
+#[cfg(test)]
+impl OverlayShortcuts {
+    #[cfg(test)]
+    pub(super) fn test_typing(&self, slot: usize) -> Option<TypingTarget> {
+        self.owner.shared.typing.lock().unwrap()[slot]
+    }
+    #[cfg(test)]
+    pub(super) fn test_hover_key(&self, key: u32, down: bool, hovered: bool) {
+        unsafe {
+            assert_ne!(PostThreadMessageW(self.owner.shared.thread.load(Ordering::Relaxed),
+                WM_TEST_HOVER_KEY, key as usize, isize::from(down) | (isize::from(hovered) << 1)), 0);
+        }
+    }
+}
+
 impl ShortcutPublisher {
+    pub(super) fn publish_typing(&self, target: Option<TypingTarget>) {
+        let shared = &self.owner.shared;
+        let mut targets = shared.typing.lock().unwrap();
+        if targets[self.slot] == target { return; }
+        targets[self.slot] = target;
+        drop(targets);
+        unsafe { PostThreadMessageW(shared.thread.load(Ordering::Relaxed), WM_REFRESH, 0, 0); }
+    }
     pub(super) fn configure(&mut self, config: &ShortcutConfig) {
         if &self.config != config {
             self.clear();
@@ -444,6 +515,7 @@ impl ShortcutPublisher {
 
 impl Drop for ShortcutPublisher {
     fn drop(&mut self) {
+        self.publish_typing(None);
         self.clear();
     }
 }
@@ -451,6 +523,42 @@ impl Drop for ShortcutPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_handoff_balances_keys_and_never_decodes_unrelated_input() {
+        thread::spawn(|| unsafe {
+            let surface = CreateWindowExW(0, wide("STATIC").as_ptr(), wide("Typing handoff test").as_ptr(),
+                0x80000000, 0, 0, 1, 1, null_mut(), null_mut(), GetModuleHandleW(null()), null());
+            assert!(!surface.is_null());
+            let target = TypingTarget { overlay: surface as usize, surface: surface as usize, token: 7 };
+            let event = KeyboardEvent { key: b'H' as u32, scan: 0, flags: 0, time: 0, extra: 0 };
+            let no_text = |_: &[u8; 256]| -> Option<isize> { panic!("unrelated input must not be decoded") };
+            assert!(!handle_key(&event, true, 99, |_| None, no_text).consume);
+            assert!(!handle_key(&event, true, 99, |_| Some(target), no_text).consume,
+                "holding a key in another app and hovering must not redirect repeats");
+            assert!(!handle_key(&event, false, 99, |_| None, no_text).consume);
+            assert!(handle_key(&event, true, 99, |_| Some(target), |_| Some(b'h' as isize)).consume);
+            assert!(handle_key(&event, true, 99, |_| Some(target), |_| Some(b'h' as isize)).consume);
+            assert!(handle_key(&event, false, 99, |_| None, no_text).consume,
+                "key-up stays balanced even if the pointer leaves");
+            assert!(!handle_key(&event, false, 99, |_| None, no_text).consume);
+            let mut message: Message = zeroed();
+            for _ in 0..2 {
+                assert_ne!(PeekMessageW(&mut message, surface, WM_HOVER_TEXT, WM_HOVER_TEXT, 1), 0);
+                assert_eq!((message.wparam, message.lparam), (7, b'h' as isize));
+            }
+            let injected = KeyboardEvent { flags: 0x10, ..event };
+            assert!(!handle_key(&injected, true, 99, |_| Some(target), no_text).consume);
+            handle_key(&injected, false, 99, |_| None, no_text);
+            let modifier = KeyboardEvent { key: 0xa2, ..event };
+            handle_key(&modifier, true, 99, |_| Some(target), no_text);
+            assert!(!handle_key(&event, true, 99, |_| Some(target), no_text).consume);
+            handle_key(&event, false, 99, |_| None, no_text);
+            handle_key(&modifier, false, 99, |_| None, no_text);
+            assert_eq!(PeekMessageW(&mut message, surface, WM_HOVER_TEXT, WM_HOVER_TEXT, 1), 0);
+            DestroyWindow(surface);
+        }).join().unwrap();
+    }
 
     #[test]
     fn bindings_keep_unique_prefixes_and_invalidate_old_targets() {

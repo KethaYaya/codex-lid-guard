@@ -43,11 +43,14 @@ pub(crate) fn task_for_test() -> (Arc<Task>, mpsc::Receiver<Action>) {
             opening: AtomicBool::new(false),
             done: AtomicBool::new(false),
             protected: AtomicBool::new(false),
+            codex_path: String::new(),
+            project: None,
             view: Mutex::new(View {
                 title: "Fixture background task".into(),
                 cwd: std::env::temp_dir().to_string_lossy().into(),
                 status: "Starting".into(),
                 history: String::new(),
+                messages: Vec::new(),
                 latest: "Working…".into(),
                 busy: true,
                 ready: false,
@@ -63,6 +66,33 @@ pub(crate) fn task_for_test() -> (Arc<Task>, mpsc::Receiver<Action>) {
         }),
         receiver,
     )
+}
+
+pub(crate) fn start_overlay_fixture(cwd: &Path) -> String {
+    initialize(|_| GuardResponse { ok: true, ..Default::default() });
+    let id = format!("lidguard-background-{}-source", std::process::id());
+    start_session(Start { codex_path: fixture().to_string_lossy().into(), cwd: cwd.to_string_lossy().into(), prompt: String::new() },
+        id, true, None).unwrap()
+}
+
+#[test]
+fn structured_messages_keep_streamed_replies_left_of_interleaved_followups() {
+    let (task, _) = task_for_test();
+    let mut view = task.snapshot();
+    view.push_message(Role::User, "Start".into());
+    view.latest = "First part".into(); view.assistant_message("reply-1");
+    view.push_message(Role::User, "A follow-up".into());
+    view.latest = "First part, now finished".into(); view.assistant_message("reply-1");
+    assert_eq!(view.messages.len(), 3);
+    assert_eq!(view.messages[1].role, Role::Assistant);
+    assert_eq!(view.messages[1].text, "First part, now finished");
+    assert_eq!(view.messages[2], ChatMessage::new(Role::User, "A follow-up"));
+    view.latest = "A new answer".into(); view.assistant_message("reply-2");
+    assert_eq!(view.messages.len(), 4);
+    view.push_message(Role::User, "🌍".repeat(TEXT_LIMIT));
+    assert_eq!(view.messages.len(), 1);
+    assert!(view.messages[0].text.len() <= TEXT_LIMIT);
+    assert!(view.messages[0].text.ends_with('🌍'));
 }
 
 struct Running {
@@ -151,12 +181,34 @@ impl Drop for Running {
 }
 
 #[test]
+fn empty_overlay_thread_waits_for_first_message_and_releases_startup_protection() {
+    let running = Running::start(fixture(), "");
+    running.until(|view| view.ready && !view.busy);
+    assert!(running.task.snapshot().messages.is_empty());
+    assert!(running.task.snapshot().turn_id.is_none());
+    assert_eq!(running.task.snapshot().status, "Ready");
+    assert_eq!(running.guards.load(Ordering::SeqCst), 0);
+    assert_eq!(running.task.window.load(Ordering::Acquire), 0);
+    let (acknowledge, sent) = mpsc::channel();
+    running.task.send(Action::Reply("wait-fixture first message".into(), acknowledge));
+    assert!(sent.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+    running.until(|view| view.busy && view.turn_id.is_some());
+    assert_eq!(running.task.snapshot().messages[0], ChatMessage::new(Role::User, "wait-fixture first message"));
+    assert_eq!(running.guards.load(Ordering::SeqCst), 1);
+    running.task.send(Action::Interrupt);
+    running.until(|view| !view.busy);
+}
+
+#[test]
 fn background_outlives_its_caller_handles_approval_and_accepts_followup() {
     let mut running = Running::start(fixture(), "fixture task");
     // The creator can disappear; the daemon's worker remains the owner.
     let caller = running.task.clone();
     drop(caller);
     running.until(|view| !view.pending.is_empty());
+    let (blocked, rejected) = mpsc::channel();
+    running.task.send(Action::Reply("Must not answer an approval".into(), blocked));
+    assert!(rejected.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
     assert_eq!(running.guards.load(Ordering::SeqCst), 1);
     assert!(
         running.task.snapshot().busy,
@@ -181,7 +233,9 @@ fn background_outlives_its_caller_handles_approval_and_accepts_followup() {
         crate::win::is_process_running(child_pid),
         "The idle session stays available for follow-ups"
     );
-    running.task.send(Action::Send("Continue fixture".into()));
+    let (sent, accepted) = mpsc::channel();
+    running.task.send(Action::Reply("Continue fixture".into(), sent));
+    assert_eq!(accepted.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(()));
     running.until(|view| !view.busy && view.latest == "Follow-up finished.");
     assert!(
         running
@@ -212,6 +266,10 @@ fn deny_and_interrupt_release_protection_without_ending_the_session() {
     assert_eq!(running.guards.load(Ordering::SeqCst), 0);
     running.task.send(Action::Send("wait-fixture".into()));
     running.until(|view| view.turn_id.is_some());
+    let (sent, accepted) = mpsc::channel();
+    running.task.send(Action::Reply("Steering fixture".into(), sent));
+    assert_eq!(accepted.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(()));
+    assert!(running.task.snapshot().history.contains("You: Steering fixture"));
     running.task.send(Action::Interrupt);
     running.until(|view| !view.busy);
     assert!(running.task.snapshot().pending.is_empty());

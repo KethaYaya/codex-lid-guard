@@ -10,6 +10,7 @@ pub(super) mod tab_state;
 pub(super) const TAB_WIDTH: i32 = tab_state::NOTICE_WIDTH;
 pub(super) const TAB_HEIGHT: i32 = 42;
 pub(super) const PANEL_WIDTH: i32 = 344;
+pub(super) const MESSAGE_WIDTH: i32 = 560;
 const HEADER: i32 = 28;
 const ROW: i32 = 28;
 const PREVIEW: i32 = 76;
@@ -18,9 +19,13 @@ const PREVIEW: i32 = 76;
 pub(super) enum Action {
     Select(String),
     Open(CardTarget),
+    Send,
+    NewChat,
     Fold,
     Scroll(i32),
     ScrollThumb,
+    HistoryScroll(i32),
+    HistoryThumb,
     Dismiss(CardTarget, u64),
 }
 
@@ -40,6 +45,11 @@ pub(super) struct GroupUi {
     wheel_remainder: i32,
     drag_grab: i32,
     pub height: i32,
+    pub chat: Option<chat_panel::Conversation>,
+    pub progression: expand_state::Progression,
+    pub message_anchor: Option<Rect>,
+    width: i32,
+    footer_top: i32,
     list: Rect,
     preview_top: i32,
     scrollbar: Option<(Rect, Rect)>,
@@ -68,6 +78,11 @@ impl GroupUi {
             wheel_remainder: 0,
             drag_grab: 0,
             height: 0,
+            chat: None,
+            progression: expand_state::Progression::default(),
+            message_anchor: None,
+            width: 0,
+            footer_top: 0,
             list: unsafe { zeroed() },
             preview_top: 0,
             scrollbar: None,
@@ -76,6 +91,7 @@ impl GroupUi {
     }
 
     pub fn sync(&mut self, mut group: ProjectGroup) {
+        let previous_selection = self.selected.clone();
         self.tab.observe(&group, Instant::now());
         for session in &group.sessions {
             if !self.order.contains(&session.id) {
@@ -118,6 +134,10 @@ impl GroupUi {
             self.selected = group.sessions.first().map(|s| s.id.clone());
             self.reveal_selection = true;
         }
+        if self.selected != previous_selection && self.chat.is_some() {
+            self.progression.clear_typing();
+            self.chat = Some(chat_panel::Conversation::default());
+        }
         self.dirty |= self.group != group;
         self.group = group;
     }
@@ -128,6 +148,28 @@ impl GroupUi {
             .and_then(|id| self.group.sessions.iter().find(|s| &s.id == id))
     }
 
+    pub fn input_rect(&self, dpi: u32) -> Rect {
+        let d = |n| scale_dip(n, dpi);
+        Rect { left: d(12), top: self.footer_top, right: self.width - d(188), bottom: self.footer_top + d(26) }
+    }
+
+    fn send_rect(&self, dpi: u32) -> Rect {
+        let d = |n| scale_dip(n, dpi);
+        Rect { left: self.width - d(184), right: self.width - d(158), ..self.input_rect(dpi) }
+    }
+
+    fn new_chat_rect(&self, dpi: u32) -> Rect {
+        let d = |n| scale_dip(n, dpi);
+        Rect { left: self.width - d(64), top: d(4), right: self.width - d(40), bottom: d(26) }
+    }
+
+    fn open_rect(&self, dpi: u32) -> Rect {
+        Rect { left: self.width - scale_dip(152, dpi), right: self.width - scale_dip(72, dpi), ..self.input_rect(dpi) }
+    }
+    fn dismiss_rect(&self, dpi: u32) -> Rect {
+        Rect { left: self.width - scale_dip(68, dpi), right: self.width - scale_dip(12, dpi), ..self.input_rect(dpi) }
+    }
+
     #[cfg(test)]
     pub fn tab_height(&self) -> i32 {
         TAB_HEIGHT
@@ -135,6 +177,21 @@ impl GroupUi {
 
     fn header_height(&self) -> i32 {
         HEADER + if self.group.disambiguate { 20 } else { 0 }
+    }
+
+    pub fn message_bounds(&mut self, work: Rect, dpi: u32, position: &str) -> Rect {
+        let margin = scale_dip(20, dpi);
+        let available = (work.bottom - work.top - margin * 2).max(1);
+        let width = scale_dip(MESSAGE_WIDTH, dpi).min((work.right - work.left - margin * 2).max(1));
+        if let Some(chat) = &mut self.chat { chat.wrap_at(None); }
+        self.layout(width, available, dpi);
+        let height = self.chat.as_ref().map_or(available, |chat|
+            (chat.bounds.top + self.height - chat.bounds.bottom + chat.content_height().max(scale_dip(64, dpi))).min(available));
+        self.layout(width, height, dpi);
+        let anchor = self.message_anchor.unwrap_or(work);
+        let top = if position.starts_with("top") { anchor.top } else { anchor.bottom - height }
+            .clamp(work.top + margin, work.bottom - margin - height);
+        Rect { left: work.right - width, right: work.right, top, bottom: top + height }
     }
 
     pub fn layout(&mut self, width: i32, available: i32, dpi: u32) {
@@ -167,7 +224,9 @@ impl GroupUi {
             bottom: d(self.header_height()) + d(ROW) * count as i32,
         };
         self.preview_top = self.list.bottom + 1;
-        self.height = self.preview_top + d(PREVIEW + 4);
+        self.width = width;
+        self.height = if self.chat.is_some() { available } else { self.preview_top + d(PREVIEW + 4) };
+        self.footer_top = self.height - d(34);
         self.hits.clear();
         self.hits.push((
             Rect {
@@ -201,22 +260,14 @@ impl GroupUi {
             && let Some(target) = session.card.target.clone()
         {
             let activity = session.activity;
+            self.hits.push((self.new_chat_rect(dpi), Action::NewChat));
+            self.hits.push((self.send_rect(dpi), Action::Send));
             self.hits.push((
-                Rect {
-                    left: d(12),
-                    top: self.preview_top + d(46),
-                    right: d(128),
-                    bottom: self.preview_top + d(72),
-                },
+                self.open_rect(dpi),
                 Action::Open(target.clone()),
             ));
             self.hits.push((
-                Rect {
-                    left: d(130),
-                    top: self.preview_top + d(46),
-                    right: d(196),
-                    bottom: self.preview_top + d(72),
-                },
+                self.dismiss_rect(dpi),
                 Action::Dismiss(target, activity),
             ));
         }
@@ -265,6 +316,14 @@ impl GroupUi {
                 Action::Scroll(count as i32),
             ));
         }
+        if let Some(chat) = &mut self.chat {
+            chat.layout(Rect { left: d(18), top: self.preview_top + d(8), right: width - d(14), bottom: self.footer_top - d(28) }, dpi);
+            if let Some((track, thumb)) = chat.scrollbar() {
+                self.hits.push((Rect { left: width - d(28), ..thumb }, Action::HistoryThumb));
+                self.hits.push((Rect { left: width - d(28), bottom: thumb.top, ..track }, Action::HistoryScroll(-(chat.bounds.bottom - chat.bounds.top))));
+                self.hits.push((Rect { left: width - d(28), top: thumb.bottom, ..track }, Action::HistoryScroll(chat.bounds.bottom - chat.bounds.top)));
+            }
+        }
         self.dirty = false;
     }
 
@@ -276,7 +335,9 @@ impl GroupUi {
     }
 
     pub fn select(&mut self, id: String) {
+        if self.selected.as_ref() != Some(&id) { self.progression.clear_typing(); }
         self.remembered = None;
+        if self.selected.as_ref() != Some(&id) && self.chat.is_some() { self.chat = Some(chat_panel::Conversation::default()); }
         self.selected = Some(id);
         self.reveal_selection = true;
         self.dirty = true;
@@ -292,6 +353,7 @@ impl GroupUi {
     }
 
     pub fn wheel(&mut self, x: i32, y: i32, delta: i32) -> bool {
+        if self.chat.as_mut().is_some_and(|chat| chat.wheel(x, y, delta)) { self.dirty = true; return true; }
         if x < self.list.left || x >= self.list.right || y < self.list.top || y >= self.list.bottom
         {
             return false;
@@ -330,6 +392,11 @@ impl GroupUi {
                 (5, Action::Open(_)) => true,
                 (7, Action::Dismiss(..)) => true,
                 (8, Action::Fold) => true,
+                (9, Action::Send) => true,
+                (15, Action::Select(id)) => id == "0",
+                (19, Action::NewChat) => true,
+                (23, Action::Select(id)) => id.ends_with("-source"),
+                (24, Action::Select(id)) => !id.ends_with("-source") && self.selected.as_ref() != Some(id),
                 _ => false,
             })
             .map(|(r, _)| ((r.left + r.right) / 2, (r.top + r.bottom) / 2))
@@ -376,12 +443,12 @@ fn status_color(session: &GroupSession) -> u32 {
         color_ref(174, 187, 200)
     }
 }
-unsafe fn text(dc: Handle, value: &str, rect: Rect, color: u32, flags: u32) {
+pub(super) unsafe fn text(dc: Handle, value: &str, rect: Rect, color: u32, flags: u32) {
     unsafe {
         draw_text(dc, value, &mut rect.clone(), color, flags);
     }
 }
-unsafe fn font(size: i32, weight: i32, dpi: u32) -> Handle {
+pub(super) unsafe fn font(size: i32, weight: i32, dpi: u32) -> Handle {
     unsafe {
         CreateFontW(
             -scale_dip(size, dpi),
@@ -493,7 +560,8 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             &mut measured,
             DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
         );
-        let title_right = (d(18) + measured.right).min(rect.right - d(118));
+        let working = ui.group.sessions.iter().any(|session| session.busy && !session.needs_input);
+        let title_right = (d(18) + measured.right).min(rect.right - d(if working { 183 } else { 146 }));
         text(
             dc,
             &ui.group.name,
@@ -521,11 +589,11 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             Rect {
                 left: title_right + d(8),
                 top: d(6),
-                right: rect.right - d(40),
+                right: rect.right - d(if working { 106 } else { 68 }),
                 bottom: d(28),
             },
             subtle,
-            DT_SINGLELINE | DT_VCENTER,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
         text(
             dc,
@@ -539,6 +607,20 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             muted,
             DT_SINGLELINE | DT_VCENTER | 1,
         );
+        if ui.selected_session().is_some_and(|session| session.card.target.is_some()) {
+            let button = ui.new_chat_rect(dpi);
+            let pen = CreatePen(0, d(1).max(1), muted);
+            let previous = SelectObject(dc, pen);
+            let x = (button.left + button.right) / 2;
+            let y = (button.top + button.bottom) / 2;
+            MoveToEx(dc, x - d(7), y - d(6), null_mut()); LineTo(dc, x + d(7), y - d(6));
+            LineTo(dc, x + d(7), y + d(5)); LineTo(dc, x - d(2), y + d(5));
+            LineTo(dc, x - d(6), y + d(8)); LineTo(dc, x - d(6), y + d(5));
+            LineTo(dc, x - d(7), y + d(5)); LineTo(dc, x - d(7), y - d(6));
+            MoveToEx(dc, x - d(3), y - d(1), null_mut()); LineTo(dc, x + d(4), y - d(1));
+            MoveToEx(dc, x, y - d(4), null_mut()); LineTo(dc, x, y + d(3));
+            SelectObject(dc, previous); DeleteObject(pen);
+        }
         if ui.group.disambiguate {
             text(
                 dc,
@@ -649,75 +731,38 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
         if let Some(session) = ui.selected_session() {
             let y = ui.preview_top;
             SelectObject(dc, regular);
-            let preview = session
-                .card
-                .text
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            text(
-                dc,
-                &preview,
-                Rect {
-                    left: d(18),
-                    top: y + d(6),
-                    right: rect.right - d(18),
-                    bottom: y + d(42),
-                },
-                muted,
-                DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL,
-            );
-            SelectObject(dc, action_font);
-            let action = if session.needs_input {
-                "Reply in chat \u{2197}"
-            } else if session.card.final_message {
-                "Read result \u{2197}"
+            let notice = state.composer.as_ref().and_then(|composer| composer.status(&session.id));
+            let preview = notice.map(str::to_owned).unwrap_or_else(|| session.card.text.split_whitespace().collect::<Vec<_>>().join(" "));
+            if let Some(chat) = &ui.chat {
+                chat.paint(dc);
+                SelectObject(dc, small);
+                let status = state.composer.as_ref().map_or("", |composer| composer.history_status());
+                text(dc, status, Rect { left: d(18), top: ui.footer_top - d(22), right: rect.right - d(18), bottom: ui.footer_top - d(4) },
+                    subtle, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER | 1);
             } else {
-                "Open chat \u{2197}"
-            };
-            glass::plate(dc, Rect {
-                left: d(12), top: y + d(47),
-                right: d(128), bottom: y + d(72),
-            }, dpi);
-            text(
-                dc,
-                action,
-                Rect {
-                    left: d(18),
-                    top: y + d(46),
-                    right: d(128),
-                    bottom: y + d(72),
-                },
-                foreground,
-                DT_SINGLELINE | DT_VCENTER,
-            );
-            SelectObject(dc, small);
-            text(
-                dc,
-                "Dismiss",
-                Rect {
-                    left: d(136),
-                    top: y + d(46),
-                    right: d(196),
-                    bottom: y + d(72),
-                },
-                subtle,
-                DT_SINGLELINE | DT_VCENTER,
-            );
-            if state.shortcut_hints || state.keyboard_preview.is_some() {
-                text(
-                    dc,
-                    &ui.key_hint.replace(" \u{b7} ", "\n"),
-                    Rect {
-                        left: d(204),
-                        top: y + d(46),
-                        right: rect.right - d(18),
-                        bottom: y + d(74),
-                    },
-                    subtle,
-                    DT_WORDBREAK | DT_END_ELLIPSIS | 2,
-                );
+                text(dc, &preview, Rect { left: d(18), top: y + d(6), right: rect.right - d(18), bottom: y + d(42) },
+                    muted, DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL);
             }
+            SelectObject(dc, action_font);
+            glass::plate(dc, ui.open_rect(dpi), dpi);
+            text(dc, "Open chat", ui.open_rect(dpi),
+                foreground, DT_SINGLELINE | DT_VCENTER | 1);
+            SelectObject(dc, small);
+            text(dc, "Dismiss", ui.dismiss_rect(dpi),
+                subtle, DT_SINGLELINE | DT_VCENTER | 1);
+            glass::plate(dc, ui.input_rect(dpi), dpi);
+            text(dc, "Message\u{2026}", Rect { left: d(18), ..ui.input_rect(dpi) }, subtle, DT_SINGLELINE | DT_VCENTER);
+            let button = ui.send_rect(dpi);
+            glass::plate(dc, button, dpi);
+            let sending = state.composer.as_ref().is_some_and(|composer| composer.sending());
+            let color = if sending || session.card.target.is_none() { subtle } else { foreground };
+            let pen = CreatePen(0, d(2).max(1), color);
+            let old_pen = SelectObject(dc, pen);
+            let cx = (button.left + button.right) / 2;
+            let cy = (button.top + button.bottom) / 2;
+            MoveToEx(dc, cx, cy + d(6), null_mut()); LineTo(dc, cx, cy - d(6));
+            MoveToEx(dc, cx - d(5), cy - d(1), null_mut()); LineTo(dc, cx, cy - d(6)); LineTo(dc, cx + d(5), cy - d(1));
+            SelectObject(dc, old_pen); DeleteObject(pen);
         }
         glass::rim(dc, rect, d(9));
         SelectObject(dc, old);
@@ -725,6 +770,21 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             if !handle.is_null() {
                 DeleteObject(handle);
             }
+        }
+    }
+}
+
+// Painted over the cached panel: activity ticks never lay out or repaint chat text.
+pub(super) unsafe fn paint_working(dc: Handle, ui: &GroupUi, dpi: u32, elapsed: Duration, animate: bool) {
+    if !ui.group.sessions.iter().any(|session| session.busy && !session.needs_input) { return; }
+    unsafe {
+        let d = |n| scale_dip(n, dpi);
+        let radius = d(3).max(2);
+        for dot in 0..3 {
+            let x = ui.width - d(92 - dot as i32 * 9);
+            let y = d(17);
+            let color = blend_color(color_ref(52, 74, 99), color_ref(163, 209, 255), busy_strength(elapsed, dot, animate));
+            fill_rounded_rectangle(dc, &Rect { left: x-radius, top: y-radius, right: x+radius, bottom: y+radius }, color, radius*2);
         }
     }
 }
@@ -873,6 +933,72 @@ mod tests {
         assert_eq!(ui.selected.as_deref(), Some("3"));
         assert_eq!(ui.group.sessions[0].id, "0");
     }
+
+    #[test]
+    fn message_preview_fits_the_reply_and_caps_long_replies_at_the_work_area() {
+        use crate::chat_history::{Message, Role};
+        for dpi in [96, 120, 144, 192] {
+            for position in ["top-right", "bottom-right"] {
+                let d = |n| scale_dip(n, dpi);
+                let work = Rect { left: -d(1280), top: -d(40), right: 0, bottom: d(760) };
+                let mut ui = GroupUi::new(group());
+                ui.chat = Some(chat_panel::Conversation::default());
+                ui.message_anchor = Some(Rect { left: -d(PANEL_WIDTH), top: d(200), right: 0, bottom: d(410) });
+                ui.chat.as_mut().unwrap().update_latest(Message::new(Role::Assistant,
+                    "A reply that needs space.\n\n1. Read the full message.\n2. Keep the controls visible.\n\nThe last paragraph also fits."));
+                let fitted = ui.message_bounds(work, dpi, position);
+                let chat = ui.chat.as_ref().unwrap();
+                assert!(chat.content_height() <= chat.bounds.bottom - chat.bounds.top);
+                assert!(chat.scrollbar().is_none());
+                assert_eq!(fitted.right, work.right);
+                assert_eq!(fitted.right - fitted.left, d(MESSAGE_WIDTH));
+                assert!(fitted.top >= work.top && fitted.bottom <= work.bottom);
+                assert_eq!(fitted, ui.message_bounds(work, dpi, position), "fitting must have a stable anchor");
+                ui.chat.as_mut().unwrap().update_latest(Message::new(Role::Assistant, "A long reply paragraph.\n\n".repeat(100)));
+                let capped = ui.message_bounds(work, dpi, position);
+                assert_eq!(capped.bottom - capped.top, work.bottom - work.top - d(40));
+                assert!(ui.chat.as_ref().unwrap().scrollbar().is_some());
+                assert!(ui.input_rect(dpi).bottom <= ui.height);
+            }
+        }
+    }
+
+    #[test]
+    fn new_chat_icon_is_reachable_in_both_sizes_without_overlapping_other_actions() {
+        for dpi in [96, 120, 144, 192] {
+            for width in [PANEL_WIDTH, MESSAGE_WIDTH, 780] {
+                let mut ui = GroupUi::new(group());
+                if width != PANEL_WIDTH { ui.chat = Some(chat_panel::Conversation::default()); }
+                ui.layout(scale_dip(width, dpi), scale_dip(680, dpi), dpi);
+                let point = ui.test_point(19).unwrap();
+                assert_eq!(ui.hit(point.0, point.1), Some(Action::NewChat));
+                let icon = ui.new_chat_rect(dpi);
+                for (rect, action) in &ui.hits {
+                    if *action == Action::NewChat { continue; }
+                    assert!(rect.right <= icon.left || rect.left >= icon.right || rect.bottom <= icon.top || rect.top >= icon.bottom);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reply_input_send_and_chat_actions_do_not_overlap_at_each_dpi() {
+        for dpi in [96, 120, 144, 192] {
+            let mut ui = GroupUi::new(group());
+            ui.layout(scale_dip(PANEL_WIDTH, dpi), scale_dip(470, dpi), dpi);
+            let input = ui.input_rect(dpi);
+            let (x, y) = ui.test_point(9).unwrap();
+            assert_eq!(ui.hit(x, y), Some(Action::Send));
+            for (rect, _) in &ui.hits {
+                assert!(rect.right <= input.left || rect.left >= input.right
+                    || rect.bottom <= input.top || rect.top >= input.bottom);
+            }
+            let open = ui.test_point(5).unwrap();
+            let dismiss = ui.test_point(7).unwrap();
+            assert!(input.right < x && x < open.0 && open.0 < dismiss.0);
+        }
+    }
+
     #[test]
     fn initially_focused_project_selects_a_task_once_when_it_becomes_visible() {
         let mut hidden = group();
@@ -996,6 +1122,42 @@ mod tests {
     }
 
     #[test]
+    fn native_working_dots_animate_in_both_sizes_and_respect_reduced_motion() {
+        #[link(name = "gdi32")]
+        unsafe extern "system" { fn GetPixel(dc: Handle, x: i32, y: i32) -> u32; }
+        unsafe {
+            let reference = GetDC(null_mut());
+            for dpi in [96, 144] {
+                for width in [PANEL_WIDTH, 780] {
+                    let d = |n| scale_dip(n, dpi);
+                    let mut ui = GroupUi::new(group());
+                    ui.layout(d(width), d(680), dpi);
+                    let mut buffer = PaintBuffer::default();
+                    let dc = buffer.get(reference, d(width), d(680));
+                    let bounds = Rect { left: 0, top: 0, right: d(width), bottom: d(680) };
+                    let background = color_ref(30, 40, 50);
+                    fill_rectangle(dc, &bounds, background);
+                    let dot = || GetPixel(dc, d(width-92), d(17));
+                    paint_working(dc, &ui, dpi, Duration::ZERO, true);
+                    let first = dot();
+                    paint_working(dc, &ui, dpi, Duration::from_millis(400), true);
+                    assert_ne!(dot(), first);
+                    assert_eq!(GetPixel(dc, d(20), d(100)), background, "dots never repaint conversation pixels");
+                    paint_working(dc, &ui, dpi, Duration::ZERO, false);
+                    let steady = dot();
+                    paint_working(dc, &ui, dpi, Duration::from_millis(400), false);
+                    assert_eq!(dot(), steady);
+                    for session in &mut ui.group.sessions { session.busy = false; }
+                    fill_rectangle(dc, &bounds, background);
+                    paint_working(dc, &ui, dpi, Duration::ZERO, true);
+                    assert_eq!(dot(), background, "completed work stops the indicator");
+                }
+            }
+            ReleaseDC(null_mut(), reference);
+        }
+    }
+
+    #[test]
     fn native_grouped_render_and_hit_targets() {
         unsafe {
             let reference = GetDC(null_mut());
@@ -1039,6 +1201,7 @@ mod tests {
                 ui.select("0".into());
                 ui.layout(scale_dip(PANEL_WIDTH, dpi), scale_dip(480, dpi), dpi);
                 let state = OverlayState {
+                    composer: None,
                     group: Some(ui),
                     group_action: None,
                     cards: vec![],

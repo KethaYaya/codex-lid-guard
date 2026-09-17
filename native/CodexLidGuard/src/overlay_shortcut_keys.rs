@@ -68,6 +68,24 @@ impl Default for Keys {
 }
 
 impl Keys {
+    pub(super) fn held(&self, key: u32) -> bool { key < 256 && self.down[key as usize] }
+    // Check before processing the event: an unrecognized letter cancels a
+    // shortcut chord, but must not also start a message on that same keypress.
+    pub(super) fn allows_typing(&self, now: Instant, foreground: usize) -> bool {
+        ![0x11, 0x12, 0x5b, 0x5c, 0xa2, 0xa3, 0xa4, 0xa5,
+            crate::shortcut_config::COPILOT].iter().any(|key| self.down[*key as usize])
+            && !self.prefix_held()
+            && !self.chord.as_ref().is_some_and(|chord| chord.foreground == foreground
+                && (now <= chord.deadline || self.down[self.config.trigger as usize]))
+    }
+
+    pub(super) fn translation_state(&self, caps: bool) -> [u8; 256] {
+        let mut state = self.down.map(|down| if down { 0x80 } else { 0 });
+        state[0x10] = state[0x10] | state[0xa0] | state[0xa1];
+        state[0x14] = u8::from(caps);
+        state
+    }
+
     pub(super) fn prefix_held(&self) -> bool {
         let modifiers = [(WIN, [0x5b, 0x5c, 0x5b]), (SHIFT, [0xa0, 0xa1, 0x10]),
             (CTRL, [0xa2, 0xa3, 0x11]), (ALT, [0xa4, 0xa5, 0x12])]
@@ -300,6 +318,31 @@ pub(super) fn code_for_label(label: &str, occupied: &[u8]) -> [u8; 2] {
 mod tests {
     use super::*;
     use crate::shortcut_config::ShortcutSettings;
+
+    #[test]
+    fn hover_typing_excludes_copilot_chords_modifiers_and_their_cancelling_key() {
+        let now = Instant::now();
+        let mut keys = Keys::default();
+        assert!(keys.allows_typing(now, 99));
+        keys.event(0xa0, true, now, 99, &bindings());
+        assert!(keys.allows_typing(now, 99), "Shift allows uppercase text");
+        assert_eq!(keys.translation_state(true)[0x10], 0x80);
+        assert_eq!(keys.translation_state(true)[0x14], 1);
+        arm(&mut keys, now, &bindings());
+        assert!(!keys.allows_typing(now, 99));
+        for key in [COPILOT, 0xa0, 0x5b] { keys.event(key, false, now, 99, &bindings()); }
+        assert!(!keys.allows_typing(now, 99), "a tapped Copilot prefix still owns the next key");
+        keys.event(b'X' as u32, true, now, 99, &bindings());
+        assert!(keys.allows_typing(now, 99));
+        for key in [0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c, COPILOT] {
+            keys.event(key, true, now, 99, &bindings());
+            assert!(!keys.allows_typing(now, 99), "modifier {key:x} must not focus the chat");
+            keys.event(key, false, now, 99, &bindings());
+        }
+        arm(&mut keys, now, &bindings());
+        for key in [COPILOT, 0xa0, 0x5b] { keys.event(key, false, now, 99, &bindings()); }
+        assert!(keys.allows_typing(now + Duration::from_secs(2), 99));
+    }
 
     #[test]
     fn custom_keys_cycle_all_ten_tabs_and_open_or_close_only_the_selection() {

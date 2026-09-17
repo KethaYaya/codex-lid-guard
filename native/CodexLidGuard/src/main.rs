@@ -9,6 +9,7 @@ mod codex_lifecycle;
 mod codex_log;
 mod codex_session_index;
 mod codex_transcript;
+mod chat_history;
 mod daemon;
 mod logging;
 mod helper_pause;

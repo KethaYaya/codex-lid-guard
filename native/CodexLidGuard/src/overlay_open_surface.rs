@@ -67,6 +67,7 @@ unsafe extern "system" {
     ) -> Handle;
     fn FillRgn(dc: Handle, region: Handle, brush: Handle) -> Bool;
     fn GdiFlush() -> Bool;
+    fn SelectClipRgn(dc: Handle, region: Handle) -> i32;
 }
 #[link(name = "msimg32")]
 unsafe extern "system" {
@@ -271,6 +272,96 @@ impl OpenSurface {
 
 // Present each visible slice at its native pixel size. In particular, this never
 // scales a narrow previous window image to the newly exposed client width.
+pub(super) struct GrowSurface {
+    source: Surface,
+    output: Surface,
+    header: i32,
+    footer: i32,
+    dpi: u32,
+}
+
+impl GrowSurface {
+    pub(super) unsafe fn capture(cached: Handle, width: i32, height: i32, header: i32, footer: i32, dpi: u32) -> io::Result<Self> {
+        unsafe {
+            let source = Surface::new(width, height)?;
+            let output = Surface::new(width, height)?;
+            if BitBlt(source.dc, 0, 0, width, height, cached, 0, 0, 0x00cc0020) == 0 {
+                return Err(error("Cache growing overlay"));
+            }
+            Ok(Self { source, output, header, footer, dpi })
+        }
+    }
+
+    pub(super) fn cached_dc(&self) -> Handle { self.output.dc }
+
+    pub(super) unsafe fn include_input(&mut self, rect: Rect, paint: impl FnOnce(Handle)) -> io::Result<()> {
+        unsafe {
+            let width = rect.right-rect.left;
+            let height = rect.bottom-rect.top;
+            let mut input = Surface::new(width, height)?;
+            fill_rectangle(input.dc, &Rect { left: 0, top: 0, right: width, bottom: height }, color_ref(28, 37, 51));
+            paint(input.dc);
+            GdiFlush();
+            for pixel in input.pixels() { *pixel |= 0xff00_0000; }
+            let radius = scale_dip(8, self.dpi);
+            let clip = CreateRoundRectRgn(rect.left, rect.top, rect.right+1, rect.bottom+1, radius, radius);
+            if clip.is_null() { return Err(error("Cache rounded reply input")); }
+            let saved = SaveDC(self.source.dc);
+            SelectClipRgn(self.source.dc, clip);
+            let copied = BitBlt(self.source.dc, rect.left, rect.top, width, height, input.dc, 0, 0, 0x00cc0020);
+            RestoreDC(self.source.dc, saved);
+            DeleteObject(clip);
+            if copied == 0 { return Err(error("Copy cached reply input")); }
+            Ok(())
+        }
+    }
+
+    unsafe fn compose(&mut self, width: i32, height: i32) -> io::Result<()> {
+        unsafe {
+            if width <= 0 || height <= 0 || width > self.source.width || height > self.source.height {
+                return Err(io::Error::other("Growth frame exceeds its cached layout"));
+            }
+            let header = self.header.min(height);
+            let footer = self.footer.min(height-header);
+            // Copy cached pixels, rather than reflowing/repainting glass and text.
+            // Left text stays anchored; status, scrollbars and buttons stay on the right.
+            for (y, sy, band_height, right) in [
+                (0, 0, header, scale_dip(160, self.dpi)),
+                (header, self.header, height-header-footer, scale_dip(18, self.dpi)),
+                (height-footer, self.source.height-footer, footer, scale_dip(200, self.dpi)),
+            ] {
+                let right = right.min(width);
+                for (x, sx, band_width) in [(0, 0, width-right), (width-right, self.source.width-right, right)] {
+                    if band_height > 0 && band_width > 0
+                        && BitBlt(self.output.dc, x, y, band_width, band_height, self.source.dc, sx, sy, 0x00cc0020) == 0 {
+                        return Err(error("Copy growing overlay section"));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) unsafe fn present(&mut self, window: Hwnd, bounds: Rect, alpha: u8) -> io::Result<()> {
+        unsafe {
+            #[cfg(test)]
+            let profile = Instant::now();
+            let width = bounds.right-bounds.left;
+            let height = bounds.bottom-bounds.top;
+            self.compose(width, height)?;
+            if UpdateLayeredWindow(window, null_mut(), &Point { x: bounds.left, y: bounds.top }, &Size { width, height },
+                self.output.dc, &Point { x: 0, y: 0 }, 0, &Blend::alpha(alpha), 2) == 0 {
+                return Err(error("Present growing overlay"));
+            }
+            #[cfg(test)]
+            if std::env::var_os("LIDGUARD_PROFILE").is_some() {
+                eprintln!("cached growth {width}x{height}: {}us", profile.elapsed().as_micros());
+            }
+            Ok(())
+        }
+    }
+}
+
 pub(super) struct FrameSurface {
     image: Surface,
     mask: Surface,
@@ -278,6 +369,14 @@ pub(super) struct FrameSurface {
     coverage: Option<(Surface, Surface)>,
 }
 impl FrameSurface {
+    pub(super) unsafe fn reserve(&mut self, width: i32, height: i32) -> io::Result<()> {
+        unsafe {
+            if width > self.image.width || height > self.image.height {
+                *self = Self::new(width.max(self.image.width), height.max(self.image.height))?;
+            }
+            Ok(())
+        }
+    }
     pub(super) fn cached_dc(&self) -> Handle {
         self.image.dc
     }
@@ -328,12 +427,19 @@ impl FrameSurface {
         material: Option<([Handle; 2], u8)>,
     ) -> io::Result<()> {
         unsafe {
+            self.cache_material(cached, layout, dpi, material)?;
+            self.present_cached(window, layout, alpha)
+        }
+    }
+
+    pub(super) unsafe fn cache_material(
+        &mut self, cached: Handle, layout: DockLayout, dpi: u32, material: Option<([Handle; 2], u8)>,
+    ) -> io::Result<()> {
+        unsafe {
             let bounds = layout.window;
             let width = bounds.right - bounds.left;
             let height = bounds.bottom - bounds.top;
-            if width > self.image.width || height > self.image.height {
-                *self = Self::new(width.max(self.image.width), height.max(self.image.height))?;
-            }
+            self.reserve(width, height)?;
             if self.shape != Some((layout, dpi)) {
                 GdiFlush();
                 self.mask.pixels().fill(0);
@@ -393,6 +499,15 @@ impl FrameSurface {
                     };
                 }
             }
+            Ok(())
+        }
+    }
+
+    pub(super) unsafe fn present_cached(&self, window: Hwnd, layout: DockLayout, alpha: u8) -> io::Result<()> {
+        unsafe {
+            let bounds = layout.window;
+            let width = bounds.right-bounds.left;
+            let height = bounds.bottom-bounds.top;
             if UpdateLayeredWindow(
                 window,
                 null_mut(),
@@ -449,6 +564,45 @@ pub(super) unsafe fn reset_layered_mode(window: Hwnd) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growth_keeps_native_pixels_alpha_and_edge_controls_without_allocating_frames() {
+        unsafe {
+            for dpi in [96, 144, 192] {
+                let d = |value| scale_dip(value, dpi);
+                let (width, height) = (d(780), d(680));
+                let mut cached = Surface::new(width, height).unwrap();
+                for (i, pixel) in cached.pixels().iter_mut().enumerate() {
+                    *pixel = (i as u32).wrapping_mul(7919);
+                }
+                let mut growth = GrowSurface::capture(cached.dc, width, height, d(94), d(62), dpi).unwrap();
+                let buffers = (growth.output.dc, growth.output.bitmap);
+                for (w, h) in [(d(344), d(166)), (d(520), d(400)), (width, height)] {
+                    growth.compose(w, h).unwrap();
+                    GdiFlush();
+                    let pixels = growth.output.pixels();
+                    let source = cached.pixels();
+                    // Distinct points on text, right controls, and both lower corners
+                    // must retain their original color and alpha at native scale.
+                    for (x, y, sx, sy) in [
+                        (0, 0, 0, 0),
+                        (w-1, 0, width-1, 0),
+                        (d(10), d(95), d(10), d(95)),
+                        (w-1, d(95), width-1, d(95)),
+                        (0, h-1, 0, height-1),
+                        (w-1, h-1, width-1, height-1),
+                        (w-d(184), h-d(20), width-d(184), height-d(20)),
+                    ] {
+                        assert_eq!(pixels[(y*width+x) as usize], source[(sy*width+sx) as usize]);
+                    }
+                    if (w, h) == (width, height) {
+                        assert_eq!(pixels, source, "final frame must exactly match the live full-size image");
+                    }
+                    assert_eq!(buffers, (growth.output.dc, growth.output.bitmap));
+                }
+            }
+        }
+    }
 
     #[test]
     fn glass_keeps_solid_labels_and_shortcuts_opaque_while_reducing_background() {

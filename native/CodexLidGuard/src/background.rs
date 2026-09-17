@@ -1,6 +1,7 @@
 //! Codex app-server sessions owned by the native daemon, independent of any editor.
 //! Prompts, output and approval details stay in memory (Codex owns its normal history).
 use crate::model::{GuardRequest, GuardResponse, GuardSettings};
+use crate::chat_history::{Message as ChatMessage, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -49,6 +50,7 @@ pub struct View {
     pub cwd: String,
     pub status: String,
     pub history: String,
+    pub messages: Vec<ChatMessage>,
     pub latest: String,
     pub busy: bool,
     pub ready: bool,
@@ -62,6 +64,37 @@ pub struct View {
     pub dock_request: u64,
 }
 
+impl View {
+    fn push_message(&mut self, role: Role, text: String) {
+        self.messages.push(ChatMessage::new(role, text));
+        self.trim_messages();
+    }
+
+    fn assistant_message(&mut self, id: &str) {
+        if let Some(message) = self.messages.iter_mut().find(|message| message.id.as_deref() == Some(id)) {
+            message.text.clone_from(&self.latest);
+        } else {
+            self.messages.push(ChatMessage { role: Role::Assistant, text: self.latest.clone(), id: Some(id.into()), images: 0 });
+        }
+        self.trim_messages();
+    }
+
+    fn trim_messages(&mut self) {
+        let mut size: usize = self.messages.iter().map(|message| message.text.len()).sum();
+        let mut remove = 0;
+        while size > TEXT_LIMIT && remove + 1 < self.messages.len() {
+            size -= self.messages[remove].text.len();
+            remove += 1;
+        }
+        self.messages.drain(..remove);
+        if let Some(last) = self.messages.last_mut() && last.text.len() > TEXT_LIMIT {
+            let mut start = last.text.len() - TEXT_LIMIT;
+            while !last.text.is_char_boundary(start) { start += 1; }
+            last.text.drain(..start);
+        }
+    }
+}
+
 pub struct Task {
     pub id: String,
     pub view: Mutex<View>,
@@ -70,11 +103,14 @@ pub struct Task {
     commands: mpsc::Sender<Action>,
     done: AtomicBool,
     protected: AtomicBool,
+    codex_path: String,
+    project: Option<crate::session_navigation::Project>,
 }
 
 #[derive(Debug)]
 pub enum Action {
     Send(String),
+    Reply(String, mpsc::Sender<Result<(), String>>),
     Interrupt,
     Answer { id: Value, result: Value },
     Shutdown,
@@ -107,7 +143,27 @@ pub fn owns_thread(id: &str) -> bool {
 }
 
 pub fn start(input: Start, id: String) -> io::Result<String> {
-    validate_start(&input)?;
+    start_session(input, id, false, None)
+}
+
+/// Create a fresh, idle thread without opening a separate task window or sending a prompt.
+pub fn new_chat(target: &crate::overlay::CardTarget) -> Result<String, String> {
+    let (codex_path, cwd, project) = if is_task(&target.session_id) {
+        let task = MANAGER.get().and_then(|manager| manager.tasks.lock().ok()?.get(&target.session_id).cloned())
+            .ok_or("This chat has ended. Open the project in VS Code to start another.")?;
+        (task.codex_path.clone(), task.snapshot().cwd, task.project.clone())
+    } else {
+        let runtime = crate::session_navigation::new_chat_runtime(target)?;
+        let project = target.project.clone().ok_or("The chat's project is no longer available.")?;
+        (runtime, project.cwd.clone(), Some(project))
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let id = format!("{PREFIX}{}-{stamp}-{}", std::process::id(), crate::overlay::next_activity());
+    start_session(Start { codex_path, cwd, prompt: String::new() }, id, true, project).map_err(|error| error.to_string())
+}
+
+fn start_session(input: Start, id: String, overlay: bool, project: Option<crate::session_navigation::Project>) -> io::Result<String> {
+    validate_start(&input, overlay)?;
     let manager = MANAGER
         .get()
         .ok_or_else(|| io::Error::other("Background worker is unavailable."))?;
@@ -134,14 +190,14 @@ pub fn start(input: Start, id: String) -> io::Result<String> {
     }
     let sequence = crate::overlay::next_activity();
     let (commands, receiver) = mpsc::channel();
-    let title: String = input
+    let title: String = if input.prompt.trim().is_empty() { "New chat".into() } else { input
         .prompt
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
         .take(72)
-        .collect();
+        .collect() };
     let task = Arc::new(Task {
         id: id.clone(),
         commands,
@@ -149,11 +205,14 @@ pub fn start(input: Start, id: String) -> io::Result<String> {
         opening: AtomicBool::new(false),
         done: AtomicBool::new(false),
         protected: AtomicBool::new(false),
+        codex_path: input.codex_path.clone(),
+        project,
         view: Mutex::new(View {
             title,
             cwd: input.cwd.clone(),
             status: "Starting Codex…".into(),
             history: String::new(),
+            messages: Vec::new(),
             latest: "Starting Codex…".into(),
             busy: true,
             ready: false,
@@ -181,6 +240,7 @@ pub fn start(input: Start, id: String) -> io::Result<String> {
                     view.status = format!("Codex stopped: {error}");
                     view.latest = view.status.clone();
                     append(&mut view.history, &format!("\n\n{}", view.status));
+                    view.push_message(Role::Notice, view.status.clone());
                 });
             }
             // Child/job has been reaped before releasing protection, including error paths.
@@ -199,11 +259,11 @@ pub fn start(input: Start, id: String) -> io::Result<String> {
         return Err(error);
     }
     drop(tasks);
-    show(&id);
+    if !overlay { show(&id); }
     Ok(id)
 }
 
-fn validate_start(input: &Start) -> io::Result<()> {
+fn validate_start(input: &Start, allow_empty: bool) -> io::Result<()> {
     if !Path::new(&input.codex_path).is_absolute()
         || !Path::new(&input.codex_path).is_file()
         || !Path::new(&input.codex_path)
@@ -217,7 +277,7 @@ fn validate_start(input: &Start) -> io::Result<()> {
     if !Path::new(&input.cwd).is_absolute() || !Path::new(&input.cwd).is_dir() {
         return Err(io::Error::other("Choose an existing local project folder."));
     }
-    if input.prompt.trim().is_empty() || input.prompt.len() > TEXT_LIMIT {
+    if (!allow_empty && input.prompt.trim().is_empty()) || input.prompt.len() > TEXT_LIMIT {
         return Err(io::Error::other("Enter a task of at most 128 KB."));
     }
     Ok(())
@@ -274,6 +334,28 @@ pub fn show(id: &str) -> bool {
         }
     }
     true
+}
+
+pub fn send_reply(id: &str, text: String) -> Result<(), String> {
+    let task = MANAGER.get().and_then(|manager| manager.tasks.lock().ok()?.get(id).cloned())
+        .ok_or("This background chat has ended.")?;
+    // A fast first Enter can arrive while the new thread is initializing.
+    // Wait on this submission's worker, keeping the overlay responsive and the
+    // normal pending-send protection in place; never send an empty starter turn.
+    let deadline = Instant::now() + Duration::from_secs(65);
+    while !task.snapshot().ready {
+        if task.snapshot().ended || task.done.load(Ordering::Acquire) { return Err("This chat could not start. Create a new chat and try again.".into()); }
+        if Instant::now() >= deadline { return Err("The chat is still starting. Your draft is available to retry.".into()); }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let (sent, result) = mpsc::channel();
+    if !task.send(Action::Reply(text, sent)) { return Err("This background chat has ended.".into()); }
+    result.recv_timeout(Duration::from_secs(65))
+        .unwrap_or_else(|_| Err("Send not confirmed. Check the chat before retrying.".into()))
+}
+
+pub fn chat_snapshot(id: &str) -> Option<View> {
+    MANAGER.get()?.tasks.lock().ok()?.get(id).map(|task| task.snapshot())
 }
 
 pub fn show_tasks() {
@@ -374,7 +456,7 @@ pub fn frames(settings: &GuardSettings) -> Vec<crate::overlay::Frame> {
             let attention = !view.pending.is_empty() || !view.busy;
             Some(Frame {
                 group: None,
-                project_path: Some(view.cwd.clone()),
+                project_path: Some(task.project.as_ref().map_or_else(|| view.cwd.clone(), |project| project.path.clone())),
                 needs_input: !view.pending.is_empty(),
                 session_id: Some(task.id.clone()),
                 activity: view.activity,
@@ -387,7 +469,7 @@ pub fn frames(settings: &GuardSettings) -> Vec<crate::overlay::Frame> {
                     } else {
                         view.latest.chars().take(2400).collect()
                     },
-                    final_message: !view.busy,
+                    final_message: !view.busy && !view.messages.is_empty(),
                     attention,
                     target: Some(CardTarget {
                         window,
@@ -562,10 +644,11 @@ fn run_worker(
     acquire(task, guard)?;
     let mut server = Server::launch(&input.codex_path, &input.cwd)?;
     server.call("initialize", json!({"clientInfo":{"name":"codex_lid_guard","title":"Codex Lid Guard","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
-    let mut first_prompt = Some(input.prompt);
+    let mut first_prompt = (!input.prompt.trim().is_empty()).then_some(input.prompt);
     let mut interrupted = false;
     let mut item_details = HashMap::<String, Value>::new();
     let mut agent_item = String::new();
+    let mut reply_requests = HashMap::<u64, (mpsc::Sender<Result<(), String>>, Option<String>)>::new();
     loop {
         // Descendants can inherit a pipe handle after the server exits. EOF alone
         // is not a reliable death signal; checking the owned process also reaps that tree.
@@ -577,6 +660,30 @@ fn run_worker(
         for action in commands.try_iter() {
             match action {
                 Action::Shutdown => return Ok(()),
+                Action::Reply(prompt, acknowledge) => {
+                    let view = task.snapshot();
+                    if !view.ready || view.ended || !view.pending.is_empty() || prompt.trim().is_empty() || prompt.encode_utf16().count() > 8192 {
+                        let _ = acknowledge.send(Err("Open the chat to resolve its pending request first.".into()));
+                        continue;
+                    }
+                    let steering_text = view.busy.then(|| prompt.clone());
+                    let result = if view.busy {
+                        if let Some(turn_id) = view.turn_id {
+                            server.call("turn/steer", json!({"threadId":view.thread_id,"expectedTurnId":turn_id,
+                                "input":[{"type":"text","text":prompt}]}))
+                        } else {
+                            let _ = acknowledge.send(Err("The task is starting. Try again in a moment.".into()));
+                            continue;
+                        }
+                    } else {
+                        acquire(task, guard)?;
+                        interrupted = false; agent_item.clear(); item_details.clear();
+                        begin_turn(task, &mut server, prompt)
+                    };
+                    if result.is_err() { let _ = acknowledge.send(Err("Send not confirmed. Check the chat before retrying.".into())); }
+                    else { reply_requests.insert(server.next_id, (acknowledge, steering_text)); }
+                    result?;
+                }
                 Action::Send(prompt) => {
                     let view = task.snapshot();
                     if view.ready
@@ -671,7 +778,11 @@ fn run_worker(
                         ..Default::default()
                     });
                 } else {
-                    task.update(|view| { append(&mut view.history, &format!("\n\nLid Guard: Codex requested an interaction this window cannot display completely ({method}). No permission was granted.")); });
+                    task.update(|view| {
+                        let notice = format!("Lid Guard: Codex requested an interaction this window cannot display completely ({method}). No permission was granted.");
+                        append(&mut view.history, &format!("\n\n{notice}"));
+                        view.push_message(Role::Notice, notice);
+                    });
                     server.write(json!({"id":id,"error":{"code":-32601,"message":"This interaction is not supported by Lid Guard. No permission was granted."}}))?;
                 }
                 continue;
@@ -707,6 +818,7 @@ fn run_worker(
                         }
                         append(&mut view.latest, delta);
                         append(&mut view.history, delta);
+                        view.assistant_message(item);
                     });
                 }
                 "item/started" | "item/completed" => {
@@ -725,6 +837,7 @@ fn run_worker(
                                     }
                                     view.latest.clear();
                                     append(&mut view.latest, text);
+                                    view.assistant_message(id);
                                 });
                                 agent_item = id.into();
                             }
@@ -764,6 +877,7 @@ fn run_worker(
                         if let Some(error) = params["turn"]["error"]["message"].as_str() {
                             view.latest = error.into();
                             append(&mut view.history, &format!("\n\nError: {error}"));
+                            view.push_message(Role::Notice, format!("Error: {error}"));
                         }
                     });
                     release(task, guard);
@@ -783,6 +897,21 @@ fn run_worker(
         } else if let Some(id) = message["id"].as_u64()
             && let Some((method, _)) = server.pending.remove(&id)
         {
+            if let Some((acknowledge, steering_text)) = reply_requests.remove(&id) {
+                if message.get("error").is_some() {
+                    let _ = acknowledge.send(Err("Codex could not accept the message. Your draft is still available.".into()));
+                    if method == "turn/start" {
+                        task.update(|view| { view.busy = false; view.turn_id = None; view.status = "Message rejected".into(); });
+                        release(task, guard);
+                    }
+                    continue;
+                }
+                if let Some(text) = steering_text { task.update(|view| {
+                    append(&mut view.history, &format!("\n\nYou: {text}"));
+                    view.push_message(Role::User, text);
+                }); }
+                let _ = acknowledge.send(Ok(()));
+            }
             if let Some(error) = message.get("error") {
                 return Err(io::Error::other(
                     error["message"]
@@ -818,8 +947,11 @@ fn run_worker(
                             view.status = "Stopped before starting".into();
                         });
                         release(task, guard);
+                    } else if let Some(prompt) = first_prompt.take() {
+                        begin_turn(task, &mut server, prompt)?;
                     } else {
-                        begin_turn(task, &mut server, first_prompt.take().unwrap())?;
+                        task.update(|view| { view.busy = false; view.status = "Ready".into(); view.latest = "Send a message to start this chat.".into(); });
+                        release(task, guard);
                     }
                 }
                 "turn/start" if task.snapshot().busy => {
@@ -844,6 +976,7 @@ fn run_worker(
 
 fn begin_turn(task: &Task, server: &mut Server, prompt: String) -> io::Result<()> {
     task.update(|view| {
+        if view.messages.is_empty() { view.title = prompt.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(72).collect(); }
         view.busy = true;
         view.turn_id = None;
         view.pending.clear();
@@ -853,6 +986,7 @@ fn begin_turn(task: &Task, server: &mut Server, prompt: String) -> io::Result<()
         view.latest = "Working…".into();
         view.status = "Working…".into();
         append(&mut view.history, &format!("\n\nYou: {prompt}"));
+        view.push_message(Role::User, prompt.clone());
     });
     server.call(
         "turn/start",

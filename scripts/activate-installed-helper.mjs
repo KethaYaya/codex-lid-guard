@@ -14,7 +14,9 @@ const exec = promisify(execFile);
 const directory = path.join(process.env.LOCALAPPDATA, "CodexLidGuard");
 const manifest = JSON.parse(await readFile(path.resolve(path.dirname(helper), "../../package.json"), "utf8"));
 const version = manifest.version;
-const deadline = Date.now() + 30 * 60_000;
+// Long-running turns can outlive a short installation session. Keep the update
+// queued through them while still respecting a subsequent explicit tray quit.
+const deadline = Date.now() + 24 * 60 * 60_000;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const atLeast = (value, required) => {
   const actual = String(value).split(".").map(Number);
@@ -78,12 +80,14 @@ while (Date.now() < deadline) {
         process.exit(0);
       }
     }
-    const state = `${status.daemonVersion}:${status.activeTurns}`;
+    const state = `${status.daemonVersion}:${status.activeTurns}:${status.backgroundTasks ?? 0}:${Boolean(status.sleepPending)}`;
     if (state !== previous) {
-      await record("waiting-for-idle", { runningVersion: status.daemonVersion, activeTurns: status.activeTurns });
+      await record("waiting-for-idle", { runningVersion: status.daemonVersion, activeTurns: status.activeTurns,
+        backgroundTasks: status.backgroundTasks ?? 0, sleepPending: Boolean(status.sleepPending) });
       previous = state;
     }
   } catch (error) {
+    previous = undefined; // Clear a transient connection error on the next healthy status.
     await record("waiting-for-helper", { error: error.message });
   }
   await wait(1000);

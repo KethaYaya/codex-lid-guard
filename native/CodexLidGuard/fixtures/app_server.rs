@@ -89,6 +89,8 @@ fn main() {
                 );
                 complete("completed");
             }
+        } else if line.contains("\"method\":\"turn/steer\"") {
+            reply(id, "{\"turnId\":\"test-turn\"}");
         } else if line.contains("\"method\":\"turn/interrupt\"") {
             reply(id, "{}");
             complete("interrupted");

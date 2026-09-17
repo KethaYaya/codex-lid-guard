@@ -135,3 +135,13 @@ pub(super) unsafe fn plate(dc: Handle, rect: Rect, dpi: u32) {
         rim(dc, rect, radius);
     }
 }
+
+pub(in super::super) unsafe fn message(dc: Handle, rect: Rect, dpi: u32) {
+    unsafe {
+        let color = color_ref(47, 95, 158);
+        fill_rounded_rectangle(dc, &rect, color, scale_dip(14, dpi));
+        // The small lower-right corner anchors the compact user bubble.
+        let corner = scale_dip(14, dpi).min((rect.right - rect.left) / 2);
+        fill_rounded_rectangle(dc, &Rect { left: rect.right - corner, top: rect.bottom - corner, ..rect }, color, scale_dip(4, dpi));
+    }
+}

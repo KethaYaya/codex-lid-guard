@@ -18,11 +18,20 @@ mod group_stack;
 #[path = "overlay_backdrop.rs"]
 mod overlay_backdrop;
 use group_window::{GroupUi, Action as GroupAction};
+#[path = "overlay_reply_input.rs"]
+mod reply_input;
+#[path = "overlay_chat_panel.rs"]
+mod chat_panel;
+#[path = "overlay_new_chat.rs"]
+mod new_chat;
+#[path = "overlay_expand_state.rs"]
+mod expand_state;
+use expand_state::Stage;
 #[cfg(test)]
 use overlay_dock::dock_layout;
 #[path = "overlay_open_surface.rs"]
 mod overlay_open_surface;
-use overlay_open_surface::{FrameSurface, OpenSurface, reset_layered_mode};
+use overlay_open_surface::{FrameSurface, GrowSurface, OpenSurface, reset_layered_mode};
 #[path = "overlay_frame_timer.rs"]
 mod overlay_frame_timer;
 use overlay_frame_timer::FrameTimer;
@@ -56,6 +65,10 @@ const WM_APP_CLOSE_OVERLAY: u32 = 0x800c;
 const WM_APP_COLLAPSE_OVERLAY: u32 = 0x800d;
 const WM_APP_GROUP_ACTION: u32 = 0x800e;
 const WM_APP_STACK_LAYOUT: u32 = 0x800f;
+const WM_APP_SEND_REPLY: u32 = 0x8010;
+const WM_APP_REPLY_EDITED: u32 = 0x8011;
+const WM_APP_REPLY_FOCUS: u32 = 0x8012;
+const WM_APP_CLOSE_CHAT: u32 = 0x8013;
 static EXPANDED_PROJECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const WM_TIMER: u32 = 0x0113;
 const WM_MOUSEACTIVATE: u32 = 0x0021;
@@ -206,6 +219,7 @@ unsafe extern "system" {
 }
 
 struct OverlayState {
+    composer: Option<reply_input::Composer>,
     group: Option<GroupUi>,
     group_action: Option<GroupAction>,
     cards: Vec<Card>,
@@ -287,6 +301,12 @@ unsafe fn cancel_keyboard_preview(window: Hwnd, state: &mut OverlayState) {
 struct OpenedOverlay {
     target: CardTarget,
     dock_request: u64,
+}
+
+struct ChatFold {
+    motion: chat_panel::Expansion,
+    target: DockLayout,
+    surface: OpenSurface,
 }
 
 impl OpenedOverlay {
@@ -608,6 +628,7 @@ fn run_overlay_inner(
             return Err(error("Create overlay window"));
         }
         let mut state = Box::new(OverlayState {
+            composer: None,
             group: None,
             group_action: None,
             cards: vec![],
@@ -671,6 +692,7 @@ fn run_overlay_inner(
             let mut refresh = true;
             let mut frame_timer = FrameTimer::new()?;
             let mut activity_timer = false;
+            let mut progression_timer = false;
             let started = Instant::now();
             let mut clock = MotionClock::new(started);
             let mut motion = Motion::new(started);
@@ -686,12 +708,80 @@ fn run_overlay_inner(
             let mut dismissed_overlay: Option<(String, u64)> = None;
             let mut dismissed_members = std::collections::HashMap::<String,u64>::new();
             let mut opening: Option<Opening> = None;
+            let mut chat_expansion: Option<chat_panel::Expansion> = None;
+            let mut grow_surface: Option<GrowSurface> = None;
+            let mut growth_frame_due = true;
+            let mut chat_fold: Option<ChatFold> = None;
+            let mut new_request: Option<new_chat::Request> = None;
+            let mut new_selection: Option<(String, String)> = None;
+            let mut focus_new: Option<String> = None;
             let mut transitions = Transitions::new(GetForegroundWindow() as usize as u64);
             let mut last_transition = None;
             let mut awaiting_dock_request = None;
             let mut hidden_in_focus = false;
+            #[cfg(test)]
+            let mut previous_growth_frame: Option<Instant> = None;
             loop {
                 let real = Instant::now();
+                #[cfg(test)]
+                let mut growth_profile = [0u128; 3];
+                #[cfg(test)]
+                let mut growth_frame_drawn = false;
+                let mut chat_moving = false;
+                let mut growth_finished = false;
+                if !chat_expanded(&state) {
+                    chat_expansion = None;
+                    if grow_surface.take().is_some() { state.restoring = false; }
+                    if chat_fold.take().is_some() { state.restoring = false; }
+                }
+                if let Some(composer) = &mut state.composer
+                    && let Some(target) = composer.target()
+                    && let Some(session) = state.group.as_ref().and_then(|ui| ui.group.sessions.iter()
+                        .find(|session| session.id == target.session_id)) {
+                    composer.observe(session.busy, session.needs_input);
+                }
+                if state.composer.as_mut().is_some_and(|composer| composer.poll()) {
+                    state.panel_dirty = true;
+                    refresh = true;
+                }
+                if let Some(result) = new_request.as_ref().and_then(new_chat::Request::poll) {
+                    let request = new_request.take().unwrap();
+                    match result {
+                        Ok(id) => {
+                            if let Some(composer) = &mut state.composer { composer.notice(&request.source.session_id, ""); }
+                            new_selection = Some((request.group, id));
+                            if let Some(updates) = &updates { updates.refresh(); }
+                        }
+                        Err(error) => {
+                            if let Some(composer) = &mut state.composer { composer.notice(&request.source.session_id, &error); }
+                        }
+                    }
+                    state.panel_dirty = true; refresh = true;
+                }
+                if state.composer.as_ref().is_some_and(|composer| composer.focused() || composer.expanded()) {
+                    cancel_hover(window, &mut state);
+                    cancel_keyboard_preview(window, &mut state);
+                }
+                if let Some(ui) = &mut state.group {
+                    if state.collapsed && ui.chat.is_none() { ui.progression.reset(); }
+                    else if visible { ui.progression.open(real); }
+                    if state.composer.as_ref().is_none_or(|composer| !composer.has_text()) {
+                        ui.progression.clear_typing();
+                    }
+                }
+                if visible && !state.collapsed && !state.restoring && opening.is_none() && chat_fold.is_none()
+                    && chat_expansion.is_none() && state.composer.as_ref().is_some_and(|composer| composer.target().is_some()) {
+                    let next = state.group.as_ref().and_then(|ui| {
+                        let input = ui.input_rect(state.dpi.max(96));
+                        let overflow = ui.progression.stage == Stage::Message && state.composer.as_ref()
+                            .is_some_and(|composer| composer.overflows(input.right - input.left));
+                        ui.progression.next(real, overflow)
+                    });
+                    if let Some(stage) = next {
+                        begin_chat_stage(&mut state, stage, &mut chat_expansion);
+                        refresh = true;
+                    }
+                }
                 let now = clock.advance(real, state.clicks.frozen() || state.tab_pressed || state.close_pressed || opening.is_some());
                 if let Some(open) = &mut opening {
                     if open.result.is_none() { open.result = open.request.poll(); }
@@ -738,8 +828,9 @@ fn run_overlay_inner(
                     state.clicks = ClickTracker::default();
                     refresh = true;
                 }
-                if refresh && !closing && opening.is_none() && !state.group.as_ref()
-                    .is_some_and(|ui| ui.pressed.as_ref().is_some_and(|action| *action != GroupAction::ScrollThumb)) {
+                if refresh && !closing && opening.is_none() && chat_fold.is_none()
+                    && chat_expansion.as_ref().is_none_or(|growth| growth.pending()) && !state.group.as_ref()
+                    .is_some_and(|ui| ui.pressed.as_ref().is_some_and(|action| !matches!(action, GroupAction::ScrollThumb | GroupAction::HistoryThumb))) {
                     let mut frame = next_frame(state.collapsed);
                     let grouped = frame.group.is_some();
                     if let Some(group) = &mut frame.group {
@@ -829,6 +920,14 @@ fn run_overlay_inner(
                             crate::shortcut_config::display_key(frame.shortcuts.open),
                             crate::shortcut_config::display_key(frame.shortcuts.close));
                     } else { state.group = None; }
+                    if let Some((group, id)) = &new_selection && let Some(ui) = &mut state.group
+                        && &ui.group.key == group && ui.group.sessions.iter().any(|session| &session.id == id) {
+                        ui.select(id.clone());
+                        if !state.collapsed && chat_fold.is_none() { focus_new = Some(id.clone()); }
+                        new_selection = None;
+                        state.panel_dirty = true;
+                    }
+                    update_chat_content(&mut state);
                     let prefix = frame.shortcuts.enabled.then(|| frame.shortcuts.prefix.clone());
                     if state.shortcut_prefix != prefix {
                         state.shortcut_prefix = prefix;
@@ -865,7 +964,7 @@ fn run_overlay_inner(
                         awaiting_dock_request = frame.window.map(|origin| (origin, frame.dock_request));
                     }
                     dock_request = frame.dock_request;
-                    if auto_dock {
+                    if auto_dock && !chat_expanded(&state) {
                         let already_tucked = state.collapsed && dock.sample(now).0 == 1.0 && arrival.is_none();
                         cancel_hover(window, &mut state);
                         cancel_keyboard_preview(window, &mut state);
@@ -937,7 +1036,9 @@ fn run_overlay_inner(
                             state.dpi = dpi;
                         }
                         let margin = scale_dip(20, dpi);
-                        let next_width = scale_dip(if state.group.is_some() { group_window::PANEL_WIDTH } else { 440 }, dpi)
+                        let next_width = scale_dip(state.group.as_ref().map_or(440, |ui| match ui.progression.stage {
+                            Stage::Full => 780, Stage::Message => group_window::MESSAGE_WIDTH, Stage::Compact => group_window::PANEL_WIDTH,
+                        }), dpi)
                             .min((info.work.right - info.work.left - margin * 2).max(1));
                         let area = if state.group.is_some() {
                             (info.work, None)
@@ -997,7 +1098,12 @@ fn run_overlay_inner(
                             SelectObject(dc, old_font);
                             ReleaseDC(window, dc);
                             if let Some(ui) = &mut state.group {
-                                ui.layout(width,work.bottom-work.top-margin*2,dpi);
+                                if ui.progression.stage == Stage::Message { ui.message_bounds(work, dpi, &position); }
+                                else {
+                                    let available = if ui.chat.is_some() { scale_dip(680, dpi).min(work.bottom-work.top-margin*2) }
+                                        else { work.bottom-work.top-margin*2 };
+                                    ui.layout(width, available, dpi);
+                                }
                                 state.heights = vec![0;state.cards.len()];
                                 state.heights[0] = (ui.height-scale_dip(64,dpi)).max(1);
                             }
@@ -1019,7 +1125,10 @@ fn run_overlay_inner(
                 // drawer's space before any expansion frame can cover a sibling.
                 if let Some(ui) = &state.group {
                     arrival = None;
-                    if !state.cards.is_empty() {
+                    if ui.chat.is_some() && chat_fold.is_none() {
+                        group_stack::remove(window);
+                        stack_motion = group_stack::PlacementMotion::default();
+                    } else if ui.chat.is_none() && !state.cards.is_empty() {
                         group_stack::update(window, group_stack::Geometry {
                             slot: slot.unwrap_or(0), work, dpi: state.dpi.max(96),
                             top: position.starts_with("top"), width, height: ui.height,
@@ -1034,16 +1143,17 @@ fn run_overlay_inner(
                     arrival = None;
                 }
                 let (stack_placement, stack_moving) = state.group.as_ref()
+                    .filter(|ui| ui.chat.is_none())
                     .and_then(|_| group_stack::placement(window))
                     .map(|target| {
                         let (placement, moving) = stack_motion.sample(target, now,
                             animate && visible && dock.sample(now).0 >= 1.0);
                         (Some(placement), moving)
                     }).unwrap_or((None, false));
-                let waiting_for_space = state.group.is_some() && !state.collapsed
+                let waiting_for_space = state.group.is_some() && !chat_expanded(&state) && !state.collapsed
                     && (stack_moving || !group_stack::ready(window));
                 if !waiting_for_space {
-                    dock.target(state.collapsed, now, animate);
+                    dock.target(state.collapsed, now, animate && !chat_expanded(&state));
                 }
                 let (docked, docking) = dock.sample(now);
                 if !state.collapsed && !docking {
@@ -1094,6 +1204,7 @@ fn run_overlay_inner(
                     tab_moving = moving;
                 }
                 if state.rows.is_empty() {
+                    collapse_chat(&mut state);
                     if let Some(backdrop) = &mut backdrop { backdrop.hide(); }
                     cancel_hover(window, &mut state);
                     cancel_keyboard_preview(window, &mut state);
@@ -1134,6 +1245,38 @@ fn run_overlay_inner(
                             PostMessageW(window, WM_FRAME_READY, 0, 0);
                         }
                     }
+                } else if let Some(fold) = &mut chat_fold {
+                    if let Some(placement) = group_stack::placement(window) {
+                        fold.target = overlay_dock::dock_layout_sized(placement.panel, placement.work, 1.0,
+                            state.dpi.max(96), None, Some(placement.tab), overlay_tab_width(&state));
+                    }
+                    let (bounds, active) = fold.motion.sample(fold.target.window, Instant::now(), animate);
+                    chat_moving = active;
+                    let result = fold.surface.present(window, bounds, 255);
+                    if let Some(surface) = &mut backdrop {
+                        let layout = DockLayout { window: bounds,
+                            panel: Some(Rect { left: 0, top: 0, right: bounds.right-bounds.left, bottom: bounds.bottom-bounds.top }),
+                            tab: None, flush_right: false };
+                        if let Err(error) = surface.present(window, layout, state.dpi.max(96)) {
+                            logging::write(format!("Could not animate chat backdrop: {error}")); surface.hide();
+                        }
+                    }
+                    if !active || result.is_err() {
+                        if let Err(error) = result { logging::write(format!("Could not animate chat fold: {error}")); }
+                        chat_fold = None;
+                        collapse_chat(&mut state);
+                        state.restoring = false;
+                        state.collapsed = true;
+                        state.panel_dirty = true;
+                        previous_bounds = None;
+                        dock.target(true, now, false);
+                        refresh = true;
+                        continue;
+                    }
+                } else if grow_surface.is_some() && !growth_frame_due {
+                    // Input/history notifications remain responsive, but must not
+                    // insert extra resizes between the animation's frame deadlines.
+                    chat_moving = true;
                 } else if waiting_for_space && docked < 1.0 {
                     // Growing content waits for siblings just like an explicit
                     // expansion. Keep the previous frame until its space is clear.
@@ -1154,7 +1297,40 @@ fn run_overlay_inner(
                     let slide = ((1.0 - panel) * scale_dip(12, dpi) as f32).round() as i32
                         * if position.starts_with("top") { -1 } else { 1 };
                     if state.group.is_none() { bounds.top += slide; bounds.bottom += slide; }
-                    let layout = if let Some(progress) = arrival_progress {
+                    let layout = if chat_expanded(&state) {
+                        let target = if state.group.as_ref().unwrap().progression.stage == Stage::Message {
+                            state.group.as_mut().unwrap().message_bounds(work, dpi, &position)
+                        } else { chat_panel::centered(work, dpi) };
+                        if chat_expansion.is_none() && let Some(layout) = state.layout && layout.window != target {
+                            chat_expansion = Some(chat_panel::Expansion::growing(layout.window));
+                        }
+                        let bounds = if let Some(expansion) = &mut chat_expansion {
+                            if expansion.pending() && animate {
+                                state.restoring = true;
+                                grow_surface = Some(prepare_chat_growth(window, &mut state, target)?);
+                            }
+                            let (bounds, active) = expansion.sample(target, Instant::now(), animate);
+                            // Cubic easing can round to the final pixels before its clock ends.
+                            // Restore live controls as soon as the visible growth is complete.
+                            let active = active && bounds != target;
+                            chat_moving = active;
+                            if !active { chat_expansion = None; growth_finished = true; }
+                            bounds
+                        } else { target };
+                        let chat_width = bounds.right - bounds.left;
+                        let chat_height = bounds.bottom - bounds.top;
+                        if let Some(ui) = &mut state.group {
+                            if let Some(chat) = &mut ui.chat {
+                                chat.wrap_at(chat_moving.then_some(target.right-target.left-scale_dip(48,dpi)));
+                            }
+                            ui.layout(chat_width, chat_height, dpi);
+                        }
+                        if state.panel_size != (chat_width, chat_height) {
+                            state.panel_size = (chat_width, chat_height); state.panel_dirty = true;
+                        }
+                        DockLayout { window: bounds,
+                            panel: Some(Rect { left: 0, top: 0, right: chat_width, bottom: chat_height }), tab: None, flush_right: false }
+                    } else if let Some(progress) = arrival_progress {
                         if state.group.is_some() { overlay_dock::arrival_layout_sized(bounds,work,progress,dpi,dense_tab,overlay_tab_width(&state)) }
                         else { arrival_layout_custom(bounds, work, progress, dpi, dense_tab) }
                     } else {
@@ -1189,15 +1365,24 @@ fn run_overlay_inner(
                         SetWindowRgn(window, null_mut(), 0);
                     }
                     if state.compositor.is_some() {
+                        #[cfg(test)]
+                        { growth_profile[0] = real.elapsed().as_micros(); }
                         // Keep this presentation mode after the slide settles. Switching
                         // back to a resized WM_PAINT surface added a second visible step.
                         state.render_alpha = alpha;
                         if compositor_started || repaint || shape_changed
                             || previous_opacity != Some(alpha) || previous_bounds != Some(bounds) {
-                            let dc = GetDC(window);
-                            let result = paint_composited_frame(window, dc, &mut state);
-                            ReleaseDC(window, dc);
-                            result?;
+                            if let Some(surface) = &mut grow_surface {
+                                surface.present(window, bounds, alpha)?;
+                                growth_frame_due = false;
+                                #[cfg(test)]
+                                { growth_frame_drawn = true; }
+                            } else {
+                                let dc = GetDC(window);
+                                let result = paint_composited_frame(window, dc, &mut state);
+                                ReleaseDC(window, dc);
+                                result?;
+                            }
                         }
                         previous_opacity = Some(alpha);
                         previous_bounds = Some(bounds);
@@ -1242,6 +1427,8 @@ fn run_overlay_inner(
                         }
                     }
                     let backdrop_failed = if let Some(surface) = &mut backdrop {
+                        #[cfg(test)]
+                        { growth_profile[1] = real.elapsed().as_micros(); }
                         if state.group.is_some() && alpha > 0 && opacity < 100 {
                             if let Err(cause) = surface.present(window,layout,dpi) {
                                 logging::write(format!("Overlay blur stopped; keeping glass tint: {cause}"));
@@ -1254,8 +1441,50 @@ fn run_overlay_inner(
                         group_stack::painted(window, placement, state.collapsed && !docking && docked >= 1.0);
                     }
                 }
+                let input = if visible && !state.collapsed && !docking && !stack_moving && opening.is_none() && chat_fold.is_none() && arrival.is_none() {
+                    state.group.as_ref().and_then(|ui| {
+                        let target = ui.selected_session()?.card.target.clone()?;
+                        let layout = state.layout?;
+                        let panel = layout.panel?;
+                        let rect = ui.input_rect(state.dpi.max(96));
+                        Some((Rect { left: layout.window.left + panel.left + rect.left,
+                            top: layout.window.top + panel.top + rect.top,
+                            right: layout.window.left + panel.left + rect.right,
+                            bottom: layout.window.top + panel.top + rect.bottom }, target))
+                    })
+                } else { None };
+                #[cfg(test)]
+                { growth_profile[2] = real.elapsed().as_micros(); }
+                if growth_finished && let Some(composer) = &mut state.composer { composer.finish_growth(); }
+                if let Some((rect, target)) = input {
+                    if state.composer.is_none() { state.composer = Some(reply_input::Composer::new(window)?); }
+                    let focus = focus_new.as_deref() == Some(target.session_id.as_str());
+                    let composer = state.composer.as_mut().unwrap();
+                    composer.sync(rect, state.dpi.max(96), target)?;
+                    if focus { focus_new = None; composer.focus(); }
+                } else if let Some(composer) = &mut state.composer { composer.hide(); }
+                if let Some(shortcuts) = &shortcuts {
+                    shortcuts.publish_typing(state.composer.as_ref().and_then(|composer| composer.typing_target()));
+                }
+                #[cfg(test)]
+                if growth_frame_drawn && std::env::var_os("LIDGUARD_PROFILE").is_some() {
+                    let end = real.elapsed().as_micros();
+                    eprintln!("growth loop: gap_us={} setup_us={} surface_us={} backdrop_us={} input_us={} total_us={}",
+                        previous_growth_frame.map_or(0, |previous| real.saturating_duration_since(previous).as_micros()),
+                        growth_profile[0], growth_profile[1].saturating_sub(growth_profile[0]), growth_profile[2].saturating_sub(growth_profile[1]),
+                        end-growth_profile[2], end);
+                    previous_growth_frame = Some(real);
+                } else if grow_surface.is_none() { previous_growth_frame = None; }
+                if growth_finished {
+                    grow_surface = None;
+                    state.restoring = false;
+                    state.panel_dirty = true;
+                    previous_bounds = None;
+                    refresh = true;
+                    continue;
+                }
                 // Fast ticks only draw animation; transcript/settings polling stays at 250 ms.
-                let needs_timer = opening.as_ref().map_or(moving || docking || stack_moving || tab_moving || arrival.is_some(),
+                let needs_timer = opening.as_ref().map_or(chat_moving || moving || docking || stack_moving || tab_moving || arrival.is_some(),
                     |open| open.motion.sample(real).2)
                     && !state.clicks.frozen()
                     && !state.tab_pressed;
@@ -1263,7 +1492,7 @@ fn run_overlay_inner(
                 let needs_activity = needs_activity_timer(
                     visible,
                     animate && !needs_timer && opening.is_none() && state.group.as_ref().is_none_or(|ui|
-                        state.collapsed && !docking && matches!(ui.tab.kind, group_window::tab_state::Kind::Calm | group_window::tab_state::Kind::Hint)),
+                        !docking && (!state.collapsed || matches!(ui.tab.kind, group_window::tab_state::Kind::Calm | group_window::tab_state::Kind::Hint))),
                     state.attention && state.group.is_none(),
                     state.busy,
                 );
@@ -1277,8 +1506,18 @@ fn run_overlay_inner(
                     }
                     activity_timer = needs_activity;
                 }
+                let needs_progression = visible && !state.collapsed && opening.is_none() && chat_fold.is_none()
+                    && state.composer.as_ref().is_some_and(|composer| composer.target().is_some())
+                    && state.group.as_ref().is_some_and(|ui| ui.progression.timing());
+                if needs_progression != progression_timer {
+                    if needs_progression {
+                        if SetTimer(window, 7, 50, null()) == 0 { return Err(error("Start overlay expansion timer")); }
+                    } else { KillTimer(window, 7); }
+                    progression_timer = needs_progression;
+                }
                 loop {
                     let Some(mut message) = frame_timer.message()? else {
+                        growth_frame_due = true;
                         refresh = false;
                         break;
                     };
@@ -1286,6 +1525,8 @@ fn run_overlay_inner(
                         // WM_QUIT
                         return Ok(());
                     }
+                    if chat_fold.is_some() && matches!(message.message, WM_APP_REPLY_FOCUS | WM_APP_CLOSE_CHAT
+                        | WM_APP_COLLAPSE_OVERLAY | WM_APP_EXPAND_OVERLAY | WM_APP_SEND_REPLY | WM_OVERLAY_SHORTCUT) { continue; }
                     if opening.is_some() && matches!(message.message,
                         WM_OVERLAY_SHORTCUT | WM_APP_OPEN_OVERLAY_CARD | WM_APP_EXPAND_OVERLAY | WM_APP_CLOSE_OVERLAY | WM_APP_COLLAPSE_OVERLAY) {
                         continue;
@@ -1319,6 +1560,44 @@ fn run_overlay_inner(
                         refresh = false;
                         break;
                     }
+                    if matches!(message.message, WM_APP_REPLY_EDITED | WM_APP_REPLY_FOCUS) {
+                        if message.message == WM_APP_REPLY_EDITED && let Some(composer) = &mut state.composer {
+                            composer.edited();
+                            if let Some(ui) = &mut state.group { ui.progression.edit(Instant::now(), composer.has_text()); }
+                        }
+                        if message.message == WM_APP_REPLY_FOCUS && !state.restoring
+                            && state.group.as_ref().is_some_and(|ui| ui.progression.stage == Stage::Compact) {
+                            begin_chat_stage(&mut state, Stage::Message, &mut chat_expansion);
+                        }
+                        cancel_hover(window, &mut state);
+                        cancel_keyboard_preview(window, &mut state);
+                        state.panel_dirty = true; refresh = true; break;
+                    }
+                    if message.message == WM_APP_SEND_REPLY {
+                        // Until the newly created session has been bound, the edit
+                        // still belongs to the previous chat. Never send there by accident.
+                        if new_request.is_some() || new_selection.is_some() {
+                            if let Some(composer) = &mut state.composer && let Some(target) = composer.target().cloned() {
+                                composer.notice(&target.session_id, "New chat is starting. Wait for its empty message box before sending.");
+                            }
+                            state.panel_dirty = true; refresh = false; break;
+                        }
+                        if state.composer.as_ref().is_some_and(|composer| composer.expanded()) {
+                            state.composer.as_mut().unwrap().send_expanded();
+                        } else if !state.collapsed && opening.is_none()
+                            && let Some(session) = state.group.as_ref().and_then(|ui| ui.selected_session())
+                            && let Some(target) = session.card.target.clone()
+                            && let Some(composer) = &mut state.composer {
+                            composer.send(target, session.busy, session.needs_input);
+                        }
+                        if state.composer.as_ref().is_some_and(|composer| !composer.has_text())
+                            && let Some(ui) = &mut state.group { ui.progression.clear_typing(); }
+                        state.panel_dirty = true; refresh = false; break;
+                    }
+                    if message.message == WM_APP_CLOSE_CHAT {
+                        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+                        state.panel_dirty = true; refresh = false; break;
+                    }
                     if message.message == WM_FRAME_READY {
                         refresh = true;
                         break;
@@ -1328,10 +1607,30 @@ fn run_overlay_inner(
                         match state.group_action.take() {
                             Some(GroupAction::Select(id)) => { if let Some(ui)=&mut state.group { ui.select(id); } }
                             Some(GroupAction::Scroll(delta)) => { if let Some(ui)=&mut state.group { ui.scroll(delta); } }
-                            Some(GroupAction::ScrollThumb) => {}
+                            Some(GroupAction::ScrollThumb | GroupAction::HistoryThumb) => {}
+                            Some(GroupAction::HistoryScroll(delta)) => {
+                                if let Some(ui) = &mut state.group && let Some(chat) = &mut ui.chat { chat.scroll(delta); ui.dirty = true; }
+                            }
                             Some(GroupAction::Fold) => { PostMessageW(window,WM_APP_COLLAPSE_OVERLAY,0,0); }
-                            Some(GroupAction::Open(target)) => { state.pending_target=Some(target);PostMessageW(window,WM_APP_OPEN_OVERLAY_CARD,0,0); }
+                            Some(GroupAction::Open(target)) => { collapse_chat(&mut state); state.pending_target=Some(target);PostMessageW(window,WM_APP_OPEN_OVERLAY_CARD,0,0); }
+                            Some(GroupAction::Send) => { PostMessageW(window,WM_APP_SEND_REPLY,0,0); }
+                            Some(GroupAction::NewChat) => {
+                                if new_request.is_none() && new_selection.is_none()
+                                    && let Some(ui) = &state.group
+                                    && let Some(target) = ui.selected_session().and_then(|session| session.card.target.clone()) {
+                                    let notice = if ui.group.sessions.len() >= crate::overlay::SESSION_LIMIT {
+                                        "Dismiss a session from this project before adding another (maximum 10).".to_owned()
+                                    } else {
+                                        match new_chat::Request::start(target.clone(), ui.group.key.clone(), window) {
+                                            Ok(request) => { new_request = Some(request); "Starting a new chat\u{2026}".into() }
+                                            Err(_) => "Could not start a new chat. Try again.".into(),
+                                        }
+                                    };
+                                    if let Some(composer) = &mut state.composer { composer.notice(&target.session_id, &notice); }
+                                }
+                            }
                             Some(GroupAction::Dismiss(target,activity)) => {
+                                collapse_chat(&mut state);
                                 dismissed_members.insert(target.session_id.clone(),activity);
                                 if let Some(updates)=&updates {updates.dismiss(target,activity);}
                             }
@@ -1431,18 +1730,17 @@ fn run_overlay_inner(
                                         Some((hover.anchor.top + hover.anchor.bottom) / 2);
                                     cancel_hover(window, &mut state);
                                     cancel_keyboard_preview(window, &mut state);
-                                    state.collapsed = true;
-                                    refresh = true;
-                                    break;
+                                    PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
                                 }
                             }
                             // Cursor checks never poll transcripts, repaint, or resize the window.
                             continue;
                         }
                         if message.wparam == 4 {
+                            if grow_surface.is_some() { continue; }
                             // Paint only: no feed reads, text measurements, motion or window resizing.
                             if activity_timer && state.group.is_some() {
-                                // Only the tiny tab is animated; keep the drawer's cached text.
+                                // Reuse cached drawer/history pixels; animate only its dots or tab beads.
                                 let dc = GetDC(window);
                                 let result = if state.compositor.is_some() { paint_composited_frame(window, dc, &mut state) }
                                     else { InvalidateRect(window, null(), 0); UpdateWindow(window); Ok(()) };
@@ -1469,6 +1767,7 @@ fn run_overlay_inner(
                         break;
                     }
                     if message.message == WM_APP_OPEN_OVERLAY_CARD {
+                        collapse_chat(&mut state);
                         // Preserve the exact last painted pixels before launching activation.
                         // The worker signals when it is about to restore the real window.
                         if let Some(target) = state.pending_target.take() && let Some(layout) = state.layout {
@@ -1480,7 +1779,9 @@ fn run_overlay_inner(
                             let system_animated = SystemParametersInfoW(0x0048, animation[0],
                                 animation.as_mut_ptr().cast(), 0) == 0 || animation[1] != 0;
                             let mut surface = if animate && system_animated {
-                                match OpenSurface::capture(state.compositor.as_ref().map_or(state.buffer.dc, FrameSurface::cached_dc), layout, state.dpi.max(96), to, state.compositor.is_some()) {
+                                let cached = grow_surface.as_ref().map(GrowSurface::cached_dc)
+                                    .unwrap_or_else(|| state.compositor.as_ref().map_or(state.buffer.dc, FrameSurface::cached_dc));
+                                match OpenSurface::capture(cached, layout, state.dpi.max(96), to, state.compositor.is_some()) {
                                     Ok(surface) => Some(surface),
                                     Err(cause) => { logging::write(format!("Could not prepare editor restore animation: {cause}")); None }
                                 }
@@ -1492,6 +1793,8 @@ fn run_overlay_inner(
                             state.tab_pressed = false;
                             ReleaseCapture();
                             arrival = None;
+                            grow_surface = None;
+                            chat_expansion = None;
                             state.compositor = None;
                             state.restoring = true;
                             if let Some(backdrop) = &mut backdrop { backdrop.hide(); }
@@ -1523,6 +1826,27 @@ fn run_overlay_inner(
                         break;
                     }
                     if message.message == WM_APP_COLLAPSE_OVERLAY {
+                        let was_chat = chat_expanded(&state);
+                        if was_chat && animate && let Some(layout) = state.layout {
+                            cancel_hover(window, &mut state);
+                            cancel_keyboard_preview(window, &mut state);
+                            chat_expansion = None;
+                            if let Some(composer) = &mut state.composer { composer.hide(); }
+                            let cached = grow_surface.as_ref().map(GrowSurface::cached_dc);
+                            let fold = start_chat_fold(window, &state, layout, slot.unwrap_or(0), work, &position, cached);
+                            grow_surface = None;
+                            state.restoring = false;
+                            match fold {
+                                Ok(fold) => {
+                                    chat_fold = Some(fold); state.restoring = true;
+                                    state.clicks = ClickTracker::default(); state.tab_pressed = false;
+                                    state.close_pressed = false; ReleaseCapture();
+                                    refresh = false; break;
+                                }
+                                Err(error) => logging::write(format!("Could not start chat fold: {error}")),
+                            }
+                        }
+                        collapse_chat(&mut state);
                         if dock_center.is_none() {
                             dock_center = state.layout.map(|layout| {
                                 let anchor = layout.tab.or(layout.panel).unwrap();
@@ -1541,12 +1865,15 @@ fn run_overlay_inner(
                         state.clicks = ClickTracker::default();
                         KillTimer(window, 3);
                         arrival = None;
-                        refresh = false;
+                        refresh = was_chat;
                         break;
                     }
                     if message.message == WM_APP_EXPAND_OVERLAY {
                         if message.wparam == 1 && !state.collapsed {
                             continue;
+                        }
+                        if let Some(ui) = &mut state.group {
+                            ui.tab.preview_opened(&ui.group);
                         }
                         if state.group.is_some() {
                             let previous=EXPANDED_PROJECT.swap(window as usize,std::sync::atomic::Ordering::Relaxed);
@@ -1587,6 +1914,7 @@ fn run_overlay_inner(
             }
             Ok(())
         })();
+        state.composer.take();
         if let Some(updates) = &updates { updates.detach(); }
         ShowWindow(window, 0);
         group_stack::remove(window);
@@ -1597,6 +1925,7 @@ fn run_overlay_inner(
         KillTimer(window, 4);
         KillTimer(window, 5);
         KillTimer(window, 6);
+        KillTimer(window, 7);
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         DestroyWindow(window);
         if !state.font.is_null() {
@@ -1823,6 +2152,115 @@ fn tab_caption(cards: &[Card]) -> String {
     }
 }
 
+fn chat_expanded(state: &OverlayState) -> bool { state.group.as_ref().is_some_and(|ui| ui.chat.is_some()) }
+
+fn update_chat_content(state: &mut OverlayState) {
+    use crate::chat_history::{Message, Role};
+    let Some(ui) = &mut state.group else { return; };
+    let messages = state.composer.as_ref().filter(|composer| composer.target().is_some_and(|target|
+        ui.selected.as_ref() == Some(&target.session_id))).and_then(|composer| composer.history_messages());
+    let latest = if ui.progression.stage == Stage::Message {
+        messages.and_then(|messages| messages.iter().rev().find(|message| message.role == Role::Assistant)
+            .or_else(|| messages.last())).cloned()
+            .or_else(|| ui.selected_session().map(|session| Message::new(Role::Assistant, &session.card.text)))
+    } else { None };
+    if let Some(chat) = &mut ui.chat {
+        if let Some(latest) = latest { ui.dirty |= chat.update_latest(latest); }
+        else if let Some(messages) = messages { ui.dirty |= chat.update(messages); }
+    }
+}
+
+fn begin_chat_stage(state: &mut OverlayState, stage: Stage, expansion: &mut Option<chat_panel::Expansion>) {
+    let Some(session) = state.group.as_ref().and_then(|ui| ui.selected_session()) else { return; };
+    let Some(composer) = &mut state.composer else { return; };
+    if composer.target().is_none_or(|target| target.session_id != session.id) { return; }
+    let result = if stage == Stage::Full { composer.expand(session.busy, session.needs_input) }
+        else { composer.preview(session.busy, session.needs_input) };
+    if let Err(error) = result { logging::write(format!("Could not expand chat: {error}")); return; }
+    let ui = state.group.as_mut().unwrap();
+    if stage == Stage::Message { ui.message_anchor = state.layout.map(|layout| layout.window); }
+    ui.progression.stage = stage;
+    ui.chat = Some(chat_panel::Conversation::default());
+    ui.dirty = true;
+    *expansion = state.layout.map(|layout| chat_panel::Expansion::growing(layout.window));
+    update_chat_content(state);
+    state.panel_dirty = true;
+    state.collapsed = false;
+}
+
+unsafe fn reserve_chat_buffers(window: Hwnd, state: &mut OverlayState, target: Rect) -> io::Result<()> {
+    unsafe {
+        let width = target.right-target.left;
+        let height = target.bottom-target.top;
+        let dc = GetDC(window);
+        for buffer in [&mut state.buffer, &mut state.panel_buffer].into_iter()
+            .chain(state.material.frames.iter_mut()).chain(state.material.panels.iter_mut()) {
+            buffer.get(dc, width, height);
+        }
+        ReleaseDC(window, dc);
+        if let Some(surface) = &mut state.compositor { surface.reserve(width, height)?; }
+        Ok(())
+    }
+}
+
+unsafe fn prepare_chat_growth(window: Hwnd, state: &mut OverlayState, target: Rect) -> io::Result<GrowSurface> {
+    unsafe {
+        reserve_chat_buffers(window, state, target)?;
+        let width = target.right-target.left;
+        let height = target.bottom-target.top;
+        let dpi = state.dpi.max(96);
+        let ui = state.group.as_mut().unwrap();
+        ui.chat.as_mut().unwrap().wrap_at(None);
+        ui.layout(width, height, dpi);
+        let history = ui.chat.as_ref().unwrap().bounds;
+        state.layout = Some(DockLayout { window: target,
+            panel: Some(Rect { left: 0, top: 0, right: width, bottom: height }), tab: None, flush_right: false });
+        state.panel_size = (width, height);
+        state.panel_dirty = true;
+        if state.compositor.is_none() {
+            state.compositor = Some(FrameSurface::new(width, height)?);
+            reset_layered_mode(window);
+            SetWindowRgn(window, null_mut(), 0);
+        }
+        // Render once offscreen before starting the animation clock.
+        let dc = GetDC(window);
+        let result = cache_composited_frame(dc, state);
+        ReleaseDC(window, dc);
+        result?;
+        let mut surface = GrowSurface::capture(state.compositor.as_ref().unwrap().cached_dc(), width, height,
+            history.top, height-history.bottom, dpi)?;
+        if let Some(composer) = &mut state.composer {
+            surface.include_input(state.group.as_ref().unwrap().input_rect(dpi), |dc| composer.paint_snapshot(dc))?;
+            composer.begin_growth()?;
+        }
+        Ok(surface)
+    }
+}
+
+unsafe fn start_chat_fold(window: Hwnd, state: &OverlayState, layout: DockLayout, slot: usize, work: Rect, position: &str, cached: Option<Handle>) -> io::Result<ChatFold> {
+    unsafe {
+        let dpi = state.dpi.max(96);
+        let mut compact = GroupUi::new(state.group.as_ref().unwrap().group.clone());
+        let width = scale_dip(group_window::PANEL_WIDTH, dpi).min(work.right-work.left-scale_dip(40,dpi));
+        compact.layout(width, work.bottom-work.top-scale_dip(40,dpi), dpi);
+        group_stack::update(window, group_stack::Geometry { slot, work, dpi, top: position.starts_with("top"), width, height: compact.height }, false);
+        let placement = group_stack::placement(window).ok_or_else(|| error("Locate chat tab"))?;
+        let target = overlay_dock::dock_layout_sized(placement.panel, placement.work, 1.0, dpi, None, Some(placement.tab), overlay_tab_width(state));
+        let source = cached.unwrap_or_else(|| state.compositor.as_ref().map_or(state.buffer.dc, FrameSurface::cached_dc));
+        let surface = OpenSurface::capture(source,
+            layout, dpi, target.window, state.compositor.is_some())?;
+        Ok(ChatFold { motion: chat_panel::Expansion::new(layout.window), target, surface })
+    }
+}
+
+fn collapse_chat(state: &mut OverlayState) {
+    if let Some(ui) = &mut state.group {
+        ui.progression.reset(); ui.message_anchor = None;
+        if ui.chat.take().is_some() { ui.dirty = true; state.panel_dirty = true; }
+    }
+    if let Some(composer) = &mut state.composer { composer.collapse_chat(); }
+}
+
 unsafe extern "system" fn window_procedure(
     window: Hwnd,
     message: u32,
@@ -1834,6 +2272,16 @@ unsafe extern "system" fn window_procedure(
         #[cfg(test)]
         if message==0x80f0 {
             return state.as_ref().map_or(0,|state|group_tests::query(state,wparam));
+        }
+        #[cfg(test)]
+        if message == 0x80f1 {
+            if let Some(state) = (state as *mut OverlayState).as_mut()
+                && let Some(composer) = &mut state.composer {
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(lparam as *const u16, wparam));
+                composer.test_history(text);
+                PostMessageW(window, WM_FRAME_READY, 0, 0);
+            }
+            return 0;
         }
         if state.as_ref().is_some_and(|state| state.restoring)
             && matches!(message, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_SETCURSOR) {
@@ -1874,8 +2322,10 @@ unsafe extern "system" fn window_procedure(
                 let mutable_state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 if let Some(state) = mutable_state.as_mut()
                     && let Some(panel) = state.layout.and_then(|layout| layout.panel)
-                    && let Some(ui) = &mut state.group && ui.pressed == Some(GroupAction::ScrollThumb) {
-                    ui.drag_scroll((lparam >> 16) as i16 as i32 - panel.top);
+                    && let Some(ui) = &mut state.group && matches!(ui.pressed, Some(GroupAction::ScrollThumb | GroupAction::HistoryThumb)) {
+                    if ui.pressed == Some(GroupAction::HistoryThumb) {
+                        if let Some(chat) = &mut ui.chat { chat.drag((lparam >> 16) as i16 as i32 - panel.top); ui.dirty = true; }
+                    } else { ui.drag_scroll((lparam >> 16) as i16 as i32 - panel.top); }
                     state.panel_dirty = true;
                     PostMessageW(window, WM_FRAME_READY, 0, 0);
                     return 0;
@@ -1925,6 +2375,10 @@ unsafe extern "system" fn window_procedure(
                             let panel_top = state.layout.and_then(|layout| layout.panel).map_or(0, |panel| panel.top);
                             state.group.as_mut().unwrap().begin_drag((lparam >> 16) as i16 as i32 - panel_top);
                         }
+                        if action == GroupAction::HistoryThumb {
+                            let panel_top = state.layout.and_then(|layout| layout.panel).map_or(0, |panel| panel.top);
+                            if let Some(chat) = state.group.as_mut().and_then(|ui| ui.chat.as_mut()) { chat.begin_drag((lparam >> 16) as i16 as i32 - panel_top); }
+                        }
                         let ui=state.group.as_mut().unwrap();ui.pressed=Some(action);ui.double=message==WM_LBUTTONDBLCLK;
                         SetCapture(window);
                         return 0;
@@ -1966,7 +2420,7 @@ unsafe extern "system" fn window_procedure(
                         if pressed==released {
                             state.group_action=if ui.double {
                                 match pressed {Some(GroupAction::Select(id))=>ui.group.sessions.iter().find(|s|s.id==id)
-                                    .and_then(|s|s.card.target.clone()).map(GroupAction::Open),other=>other}
+                                    .and_then(|s|s.card.target.clone()).map(GroupAction::Open),Some(GroupAction::NewChat)=>None,other=>other}
                             }else{pressed};
                         }
                         ReleaseCapture();PostMessageW(window,WM_APP_GROUP_ACTION,0,0);
@@ -2087,6 +2541,11 @@ unsafe fn paint_overlay_buffer(reference: Handle, state: &mut OverlayState, rect
                 let saved = SaveDC(dc);
                 IntersectClipRect(dc, panel.left, panel.top, panel.right, panel.bottom);
                 paint_cached_panel(dc, state, panel);
+                if let Some(ui) = &state.group && panel.right-panel.left == state.panel_size.0
+                    && panel.bottom-panel.top == state.panel_size.1 {
+                    SetViewportOrgEx(dc, panel.left, panel.top, null_mut());
+                    group_window::paint_working(dc, ui, dpi, state.activity_started.elapsed(), state.animate);
+                }
                 RestoreDC(dc, saved);
             }
             if let Some(tab) = layout.tab {
@@ -2184,6 +2643,18 @@ unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi: u32, elaps
 
 unsafe fn paint_composited_frame(window: Hwnd, reference: Handle, state: &mut OverlayState) -> io::Result<()> {
     unsafe {
+        cache_composited_frame(reference, state)?;
+        if let Some(layout) = state.layout {
+            state.compositor.as_ref().unwrap().present_cached(window, layout, state.render_alpha)?;
+        }
+        Ok(())
+    }
+}
+
+unsafe fn cache_composited_frame(reference: Handle, state: &mut OverlayState) -> io::Result<()> {
+    unsafe {
+        #[cfg(test)]
+        let profile = Instant::now();
         let Some(layout) = state.layout else { return Ok(()); };
         let rect = Rect { left: 0, top: 0, right: layout.window.right - layout.window.left,
             bottom: layout.window.bottom - layout.window.top };
@@ -2200,7 +2671,14 @@ unsafe fn paint_composited_frame(window: Hwnd, reference: Handle, state: &mut Ov
             state.material.pass = 0;
             Some((samples, tint))
         } else { None };
-        state.compositor.as_mut().unwrap().present_material(window, cached, layout, state.dpi.max(96), state.render_alpha, material)
+        #[cfg(test)]
+        let painted = profile.elapsed();
+        let result = state.compositor.as_mut().unwrap().cache_material(cached, layout, state.dpi.max(96), material);
+        #[cfg(test)]
+        if chat_expanded(state) && std::env::var_os("LIDGUARD_PROFILE").is_some() {
+            eprintln!("chat frame {}x{}: paint_us={} compose_us={}", rect.right, rect.bottom, painted.as_micros(), profile.elapsed().saturating_sub(painted).as_micros());
+        }
+        result
     }
 }
 
@@ -3865,6 +4343,7 @@ mod tests {
     fn hit_testing_selects_each_card_and_excludes_header_footer_and_gaps() {
         for dpi in [96, 144, 192] {
             let mut state = OverlayState {
+                composer: None,
                 group: None,
                 group_action: None,
                 cards: (1..=2)
@@ -3982,6 +4461,7 @@ mod tests {
         motion.sync(&cards, &[100, 100], now, false);
         motion.sync(&cards[1..], &[100], now, true);
         let mut state = OverlayState {
+                composer: None,
             group: None,
             group_action: None,
             cards: cards[1..].to_vec(),

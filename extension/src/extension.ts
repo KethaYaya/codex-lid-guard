@@ -5,6 +5,7 @@ import { watch, type FSWatcher } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
 import { handleSessionUri, openSessionSidebar } from "./sessionSidebar";
+import { sendCodexReply } from "./codexReply";
 import { overlayShortcutProblem } from "./overlaySettings";
 import { createSessionBridge, sessionBelongsToWorkspace } from "./sessionBridge";
 import {
@@ -153,6 +154,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         navigationLog.info(`Codex confirmed selected session ${sessionId}`);
         // Codex's own view watcher acknowledges the loaded conversation.
+      },
+      send: async (sessionId, text, cwd, busy) => {
+        if (!vscode.workspace.isTrusted) { throw new Error("Trust this project in VS Code before sending a message."); }
+        await sendCodexReply(sessionId, text, cwd, busy);
+      },
+      prepareNewChat: async () => {
+        if (process.platform !== "win32" || vscode.env.remoteName) { throw new Error("Overlay chats require a local Windows project."); }
+        if (!vscode.workspace.isTrusted) { throw new Error("Trust this project in VS Code before starting a chat."); }
+        if (!configuration().get<boolean>("enabled", true)) { throw new Error("Enable Codex Lid Guard before starting a chat."); }
+        const extension = vscode.extensions.getExtension("openai.chatgpt");
+        if (!extension) { throw new Error("Install the Codex extension and sign in first."); }
+        const codexPath = path.join(extension.extensionPath, "bin", "windows-x86_64", "codex.exe");
+        await fs.access(codexPath);
+        return codexPath;
       },
       reportError: reportNavigationError
     });

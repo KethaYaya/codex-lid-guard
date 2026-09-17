@@ -69,11 +69,9 @@ impl FrameTimer {
                 return Ok(());
             }
             let now = Instant::now();
-            let mut next = self.next.unwrap_or(now + Self::PERIOD);
-            // Keep a regular cadence; never run a burst of catch-up frames.
-            while next <= now {
-                next += Self::PERIOD;
-            }
+            // Input or painting can finish just after an unconsumed deadline.
+            // Deliver it promptly instead of adding another 16 ms of waiting.
+            let next = self.next.unwrap_or(now + Self::PERIOD);
             self.next = Some(next);
             let due = -((next.saturating_duration_since(now).as_nanos() / 100).max(1) as i64);
             if SetWaitableTimer(self.handle, &due, 0, null(), null(), 0) == 0 {
@@ -87,6 +85,12 @@ impl FrameTimer {
     pub(super) unsafe fn message(&mut self) -> io::Result<Option<Message>> {
         unsafe {
             loop {
+                // Do not starve Escape/typing when a slow frame leaves the timer
+                // overdue. Growth notifications are coalesced by the caller.
+                let mut message: Message = zeroed();
+                if PeekMessageW(&mut message, null_mut(), 0, 0, 1) != 0 {
+                    return Ok(Some(message));
+                }
                 let active = self.next.is_some();
                 let result = MsgWaitForMultipleObjectsEx(
                     u32::from(active),
@@ -99,16 +103,18 @@ impl FrameTimer {
                     return Err(error("Wait for overlay input or frame"));
                 }
                 if active && result == 0 {
-                    self.next = self.next.map(|next| next + Self::PERIOD);
+                    self.next = self.next.map(|next| after_tick(next, Instant::now(), Self::PERIOD));
                     return Ok(None);
-                }
-                let mut message: Message = zeroed();
-                if PeekMessageW(&mut message, null_mut(), 0, 0, 1) != 0 {
-                    return Ok(Some(message));
                 }
             }
         }
     }
+}
+
+fn after_tick(deadline: Instant, now: Instant, period: Duration) -> Instant {
+    let next = deadline + period;
+    // Consume one tick only. A long stall must never replay a queue of old ticks.
+    if next <= now { now + period } else { next }
 }
 
 impl Drop for FrameTimer {
@@ -116,6 +122,51 @@ impl Drop for FrameTimer {
         unsafe {
             CancelWaitableTimer(self.handle);
             CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_input_and_an_overdue_tick_are_both_delivered_without_an_extra_period() {
+        unsafe {
+            let mut timer = FrameTimer::new().unwrap();
+            let mut message: Message = zeroed();
+            PeekMessageW(&mut message, null_mut(), 0, 0, 0); // Create this test thread's queue.
+            assert_ne!(PostMessageW(null_mut(), 0x804f, 9, 7), 0);
+            let overdue = Instant::now() - Duration::from_millis(1);
+            timer.next = Some(overdue);
+            timer.update(true).unwrap();
+            assert_eq!(timer.next, Some(overdue), "input must not push an unconsumed tick into the future");
+            let input = timer.message().unwrap().unwrap();
+            assert_eq!((input.message, input.wparam, input.lparam), (0x804f, 9, 7));
+            timer.update(true).unwrap();
+            assert_eq!(timer.next, Some(overdue));
+            assert!(timer.message().unwrap().is_none(), "the overdue tick follows queued input");
+            timer.update(false).unwrap();
+            assert!(timer.next.is_none());
+        }
+    }
+
+    #[test]
+    fn a_slightly_late_frame_preserves_the_next_tick_without_skipping_it() {
+        let start = Instant::now();
+        let period = FrameTimer::PERIOD;
+        let deadline = start + period;
+        let now = deadline + Duration::from_millis(1);
+        assert_eq!(after_tick(deadline, now, period), start + period*2);
+    }
+
+    #[test]
+    fn a_long_stall_resumes_with_one_future_tick_instead_of_a_catch_up_burst() {
+        let start = Instant::now();
+        let period = FrameTimer::PERIOD;
+        for late in [period, Duration::from_millis(80), Duration::from_secs(60*60)] {
+            let now = start + late;
+            assert_eq!(after_tick(start, now, period), now + period);
         }
     }
 }

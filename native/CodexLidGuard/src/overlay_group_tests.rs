@@ -19,6 +19,17 @@ pub(super) fn query(state: &OverlayState, kind: usize) -> isize {
         10 => state.shortcut_hints as isize,
         11 => state.animate as isize,
         12 => ui.group.sessions.iter().filter(|s| s.card.attention && s.card.final_message).count() as isize,
+        13 => state.composer.as_ref().map_or(0, |composer| composer.test_input() as isize),
+        14 => state.composer.as_ref().is_some_and(|composer| composer.test_notice()) as isize,
+        16 => state.composer.as_ref().is_some_and(|composer| composer.expanded()) as isize,
+        17 => state.composer.as_ref().map_or(0, |composer| composer.test_window() as isize),
+        18 => state.composer.as_ref().is_some_and(|composer| composer.test_animating()) as isize,
+        20 => state.composer.as_ref().is_some_and(|composer| composer.focused()) as isize,
+        21 => ui.selected_session().map_or(0, |session| session.activity as isize),
+        22 => state.restoring as isize,
+        25 => match ui.progression.stage { Stage::Compact => 0, Stage::Message => 1, Stage::Full => 2 },
+        26 => ui.chat.as_ref().map_or(0, |chat| chat.content_height() as isize),
+        27 => ui.chat.as_ref().map_or(0, |chat| (chat.bounds.bottom - chat.bounds.top) as isize),
         _ => ui
             .test_point(kind)
             .and_then(|(x, y)| {
@@ -36,16 +47,108 @@ unsafe extern "system" {
     fn SendMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
     fn GetWindow(window: Hwnd, command: u32) -> Hwnd;
     fn IsWindowVisible(window: Hwnd) -> Bool;
+    fn GetWindowTextW(window: Hwnd, text: *mut u16, count: i32) -> i32;
 }
 
+#[track_caller]
 fn wait_for(mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_for_seconds(5, &mut ready);
+}
+
+#[track_caller]
+fn wait_for_seconds(seconds: u64, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
     while !ready() {
         assert!(
             Instant::now() < deadline,
             "owned grouped overlay did not reach expected state"
         );
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+#[ignore = "creates only fixture Codex workers and an owned overlay; never calls real Codex"]
+fn native_new_chat_from_drawer_and_centered_overlay_preserves_other_drafts() {
+    unsafe {
+        let previous_dpi = SetThreadDpiAwarenessContext(-4isize as Handle);
+        struct DpiReset(Handle);
+        impl Drop for DpiReset { fn drop(&mut self) { unsafe { SetThreadDpiAwarenessContext(self.0); } } }
+        let _dpi = DpiReset(previous_dpi);
+        let cwd = std::env::temp_dir().join(format!("lidguard-new-chat-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let source = crate::background::integration_tests::start_overlay_fixture(&cwd);
+        new_chat::TEST_DELAY_MS.store(500, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = stop.clone();
+        let thread = std::thread::spawn(move || run_overlay_inner(Some(0), move |_| {
+            let frames = crate::background::frames(&crate::model::GuardSettings::default());
+            let mut frame = crate::overlay::groups::group_frames(frames).into_iter().next().unwrap_or_else(Frame::empty);
+            frame.close = done.load(Ordering::Relaxed); frame
+        }, |_, _| false.into(), || None, None, None));
+        struct Cleanup { stop: Arc<AtomicBool>, thread: Option<std::thread::JoinHandle<io::Result<()>>>, cwd: std::path::PathBuf }
+        impl Drop for Cleanup { fn drop(&mut self) {
+            new_chat::TEST_DELAY_MS.store(0, Ordering::Relaxed);
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() { thread.join().unwrap().unwrap(); }
+            crate::background::shutdown();
+            let _ = std::fs::remove_file(self.cwd.join("fixture-child.pid"));
+            let _ = std::fs::remove_dir(&self.cwd);
+        } }
+        let _cleanup = Cleanup { stop, thread: Some(thread), cwd };
+        let class = wide(format!("CodexLidGuardMessageOverlay.{}", GetCurrentProcessId()));
+        let mut window = null_mut();
+        wait_for(|| { window = FindWindowW(class.as_ptr(), null()); !window.is_null() && SendMessageW(window, 0x80f0, 1, 0) == 1 });
+        SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
+        PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
+        wait_for(|| SendMessageW(window, 0x80f0, 13, 0) != 0 && SendMessageW(window, 0x80f0, 3, 0) == 0);
+        std::thread::sleep(Duration::from_millis(350));
+        let input = SendMessageW(window, 0x80f0, 13, 0) as Hwnd;
+        let read = || { let mut text = [0u16; 100]; let count = GetWindowTextW(input, text.as_mut_ptr(), 100); String::from_utf16_lossy(&text[..count as usize]) };
+        let write = |text: &str| {
+            SendMessageW(input, 0x00b1, 0, -1);
+            SendMessageW(input, 0x00c2, 1, wide(text).as_ptr() as isize);
+        };
+        let click = |action| { let point = SendMessageW(window, 0x80f0, action, 0); assert_ne!(point, 0);
+            SendMessageW(window, WM_LBUTTONDOWN, 1, point); SendMessageW(window, WM_LBUTTONUP, 0, point); };
+        write("Keep my old draft");
+        wait_for(|| SendMessageW(window, 0x80f0, 25, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        click(19);
+        wait_for(|| SendMessageW(window, 0x80f0, 14, 0) == 1);
+        PostMessageW(window, WM_APP_SEND_REPLY, 0, 0);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(read(), "Keep my old draft", "Enter during creation must not submit the old draft");
+        assert!(crate::background::chat_snapshot(&source).unwrap().messages.is_empty());
+        wait_for(|| SendMessageW(window, 0x80f0, 1, 0) == 2 && SendMessageW(window, 0x80f0, 25, 0) == 1);
+        wait_for(|| SendMessageW(window, 0x80f0, 18, 0) == 0 && SendMessageW(window, 0x80f0, 20, 0) == 1);
+        assert!(read().is_empty());
+        assert_eq!(SendMessageW(window, 0x80f0, 17, 0), window as isize, "new chat stays inside the original overlay");
+        write("Second chat draft with enough text to exceed the available single-line message box width and maximize the overlay.");
+        wait_for(|| SendMessageW(window, 0x80f0, 16, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        write("Second chat draft");
+        click(19);
+        wait_for(|| SendMessageW(window, 0x80f0, 1, 0) == 3 && read().is_empty());
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 1);
+        let new_chat_point = SendMessageW(window, 0x80f0, 19, 0);
+        SendMessageW(window, WM_LBUTTONDBLCLK, 1, new_chat_point);
+        SendMessageW(window, WM_LBUTTONUP, 0, new_chat_point);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(SendMessageW(window, 0x80f0, 1, 0), 3, "a double-click must not create a duplicate session");
+        if let Some(path) = std::env::var_os("LIDGUARD_TEST_SCREENSHOT") {
+            crate::win::background_window::tests::capture(window, std::path::Path::new(&path));
+        }
+        click(23); wait_for(|| read() == "Keep my old draft");
+        click(24); wait_for(|| read() == "Second chat draft");
+        let activity = SendMessageW(window, 0x80f0, 21, 0) as u64;
+        let selected = crate::background::frames(&crate::model::GuardSettings::default()).into_iter()
+            .find(|frame| frame.activity == activity).unwrap().session_id.unwrap();
+        assert_ne!(selected, source);
+        write("wait-fixture my first message");
+        SendMessageW(input, 0x0100, 13, 0);
+        wait_for(|| read().is_empty() && crate::background::chat_snapshot(&selected).is_some_and(|view| view.turn_id.is_some()));
+        assert_eq!(crate::background::chat_snapshot(&selected).unwrap().messages[0].text, "wait-fixture my first message");
+        assert!(crate::background::chat_snapshot(&source).unwrap().messages.is_empty());
+        assert!(crate::background::frames(&crate::model::GuardSettings::default()).iter().all(|frame| frame.window.is_none()), "new chats never open a separate task window");
     }
 }
 
@@ -82,15 +185,18 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
                             activity: i,
                             cards: vec![Card {
                                 // Independent feeds can issue the same card ID.
-                                id: 0,
+                                id: u64::from(phase == 4),
                                 label: format!("OverlayTest — Session {i}"),
                                 text: "Native grouping test".into(),
-                                final_message: i == 0 && matches!(phase, 1 | 3),
-                                attention: i == 0 && phase == 1,
+                                final_message: i == 0 && matches!(phase, 1 | 3 | 4),
+                                attention: i == 0 && matches!(phase, 1 | 4),
                                 target: Some(CardTarget {
                                     window: i + 1,
                                     session_id: i.to_string(),
-                                    project: None,
+                                    project: Some(crate::session_navigation::Project {
+                                        cwd: r"C:\LidGuard-Test".into(), path: r"C:\LidGuard-Test".into(),
+                                        executable: r"C:\LidGuard-Test\Code.exe".into(),
+                                    }),
                                 }),
                             }],
                             dock_request: 1,
@@ -134,6 +240,8 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
             !window.is_null() && SendMessageW(window, 0x80f0, 1, 0) == 2
         });
         let foreground = GetForegroundWindow();
+        // Real pointer movement must not hover this message-driven fixture.
+        SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
         wait_for(|| shortcuts.test_binding(0).is_some());
         let dpi = SendMessageW(window, 0x80f0, 2, 0) as u32;
         let tab_width = || { let mut rect: Rect = zeroed(); GetWindowRect(window, &mut rect); rect.right-rect.left };
@@ -155,13 +263,38 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
         wait_for(|| tab_width() == scale_dip(18,dpi));
         scenario.store(1,Ordering::Relaxed);
         PostMessageW(window,WM_FRAME_READY,0,0);
-        let completed_at = Instant::now();
         wait_for(|| tab_width() == scale_dip(152,dpi));
-        std::thread::sleep(Duration::from_secs(7));
-        assert_eq!(tab_width(),scale_dip(152,dpi),"completion should remain visible for about eight seconds");
-        wait_for(|| tab_width() == scale_dip(18,dpi));
-        assert!(completed_at.elapsed() >= Duration::from_secs(8));
-        assert_eq!(SendMessageW(window,0x80f0,12,0),1,"folding must retain the unread bead");
+        std::thread::sleep(Duration::from_millis(8500));
+        assert_eq!(tab_width(),scale_dip(152,dpi),"completion must remain popped out beyond the old timeout");
+        assert_eq!(SendMessageW(window,0x80f0,12,0),1,"completion must retain the unread bead");
+        let point = ((scale_dip(12, dpi) as u32) << 16 | scale_dip(12, dpi) as u32) as isize;
+        SendMessageW(window, WM_MOUSEMOVE, 0, point);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
+        let preview_started = Instant::now();
+        wait_for_seconds(8, || SendMessageW(window, 0x80f0, 25, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        assert!(preview_started.elapsed() >= Duration::from_millis(4700), "hover must wait five seconds before fitting the reply");
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 0, "reading must not maximize or take focus");
+        assert_ne!(GetForegroundWindow(), window);
+        assert_eq!(SendMessageW(window, 0x80f0, 20, 0), 0, "timed expansion must not focus the input");
+        assert_eq!(tab_width(), scale_dip(group_window::MESSAGE_WIDTH, dpi));
+        let history = wide(format!("You\r\nAn older prompt\r\n\r\nCodex\r\nAn older answer\r\n\r\nCodex\r\n{}", "The latest reply should be fully visible, including this final paragraph.\n\n".repeat(5)));
+        SendMessageW(window, 0x80f1, history.len() - 1, history.as_ptr() as isize);
+        wait_for(|| SendMessageW(window, 0x80f0, 26, 0) > scale_dip(160, dpi) as isize
+            && SendMessageW(window, 0x80f0, 26, 0) <= SendMessageW(window, 0x80f0, 27, 0)
+            && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+        wait_for(|| tab_width() == scale_dip(18, dpi) && SendMessageW(window, 0x80f0, 3, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(tab_width(), scale_dip(18, dpi), "the same completion must stay tucked after hover");
+        assert_eq!(SendMessageW(window, 0x80f0, 12, 0), 1, "previewing must preserve the unread marker");
+        scenario.store(4, Ordering::Relaxed);
+        PostMessageW(window, WM_FRAME_READY, 0, 0);
+        wait_for(|| tab_width() == scale_dip(152, dpi));
+        let (_, token) = shortcuts.test_binding(0).unwrap();
+        PostMessageW(window, WM_OVERLAY_SHORTCUT, token, 5); // Released-key preview.
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 1 && tab_width() == scale_dip(18, dpi));
+        assert_eq!(SendMessageW(window, 0x80f0, 12, 0), 1, "keyboard preview must preserve the unread marker");
         scenario.store(2,Ordering::Relaxed);
         PostMessageW(window,WM_FRAME_READY,0,0);
         wait_for(|| tab_width() == scale_dip(152,dpi));
@@ -171,8 +304,14 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
         assert_eq!(SendMessageW(window,0x80f0,12,0),0,"reading the result clears its halo");
         scenario.store(0,Ordering::Relaxed);
         PostMessageW(window,WM_FRAME_READY,0,0);
-        PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
+        let (_, token) = shortcuts.test_binding(0).unwrap();
+        PostMessageW(window, WM_OVERLAY_SHORTCUT, token, 0); // Letter-selected preview stays open.
         wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
+        wait_for_seconds(8, || SendMessageW(window, 0x80f0, 25, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 0);
+        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+        wait_for(|| tab_width() == scale_dip(18, dpi) && SendMessageW(window, 0x80f0, 3, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
         std::thread::sleep(Duration::from_millis(300));
         let click = |kind| {
             let point = SendMessageW(window, 0x80f0, kind, 0);
@@ -180,8 +319,154 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
             SendMessageW(window, WM_LBUTTONDOWN, 1, point);
             SendMessageW(window, WM_LBUTTONUP, 0, point);
         };
+        wait_for(|| SendMessageW(window, 0x80f0, 13, 0) != 0);
+        let input = SendMessageW(window, 0x80f0, 13, 0) as Hwnd;
+        let read_input = || {
+            let mut text = [0u16; 100];
+            let length = GetWindowTextW(input, text.as_mut_ptr(), 100);
+            String::from_utf16_lossy(&text[..length as usize])
+        };
+        wait_for(|| shortcuts.test_typing(0).is_some());
+        for down in [true, false] { shortcuts.test_hover_key(b'H' as u32, down, false); }
+        for key in [0x5b, 0xa0, 0x86] { shortcuts.test_hover_key(key, true, true); }
+        for key in [0x86, 0xa0, 0x5b] { shortcuts.test_hover_key(key, false, true); }
+        // Even a tapped Copilot macro owns its next letter while hovering.
+        let (code, _) = shortcuts.test_binding(0).unwrap();
+        for down in [true, false] { shortcuts.test_hover_key(code[0] as u32, down, true); }
+        let cancel = (b'A'..=b'Z').find(|key| *key != code[1]).unwrap();
+        for down in [true, false] { shortcuts.test_hover_key(cancel as u32, down, true); }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(read_input().is_empty(), "Copilot shortcuts and non-hover typing must not enter the draft");
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 0, "Copilot shortcuts must not maximize the chat");
+        for key in *b"HI" {
+            for down in [true, false] { shortcuts.test_hover_key(key as u32, down, true); }
+        }
+        let typing_started = Instant::now();
+        wait_for(|| read_input() == "hi" && SendMessageW(window, 0x80f0, 25, 0) == 1);
+        wait_for(|| SendMessageW(window, 0x80f0, 18, 0) == 0);
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 0, "first keystrokes should only fit the latest reply");
+        assert_eq!(GetForegroundWindow() as usize, shortcuts.test_typing(0).unwrap().surface,
+            "hover typing must move keyboard focus to the composer");
+        wait_for_seconds(8, || SendMessageW(window, 0x80f0, 16, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        assert!(typing_started.elapsed() >= Duration::from_millis(4700), "maximize has its own typing deadline");
+        PostMessageW(input, WM_KEYDOWN, 27, 0);
+        wait_for(|| tab_width() == scale_dip(18, dpi) && SendMessageW(window, 0x80f0, 3, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
+        wait_for(|| tab_width() == scale_dip(group_window::PANEL_WIDTH, dpi) && shortcuts.test_typing(0).is_some());
+        SendMessageW(input, 0x000c, 0, wide("").as_ptr() as isize);
+        for character in "A draft \u{1f30d}".encode_utf16() { SendMessageW(input, 0x0102, character as usize, 0); }
+        assert_eq!(read_input(), "A draft \u{1f30d}");
+        SendMessageW(input, 0x0100, 13, 0); // Enter sends only the selected chat.
+        wait_for(|| SendMessageW(window, 0x80f0, 14, 0) == 1);
+        assert_eq!(read_input(), "A draft \u{1f30d}", "a rejected send keeps the draft");
+        wait_for(|| SendMessageW(window, 0x80f0, 22, 0) == 0);
+        assert!(received.try_recv().is_err(), "Send must not open a chat");
+        let old_typing = shortcuts.test_typing(0).unwrap();
         click(4);
         wait_for(|| SendMessageW(window, 0x80f0, 0, 0) == 2);
+        wait_for(|| read_input().is_empty());
+        SendMessageW(old_typing.surface as Hwnd, super::super::overlay_shortcuts::WM_HOVER_TEXT,
+            old_typing.token, b'x' as isize);
+        assert!(read_input().is_empty(), "queued hover input must not leak into a replacement session");
+        for character in "Second draft".encode_utf16() { SendMessageW(input, 0x0102, character as usize, 0); }
+        click(9); // The icon uses the same send path as Enter.
+        wait_for(|| SendMessageW(window, 0x80f0, 14, 0) == 1);
+        assert_eq!(read_input(), "Second draft");
+        click(15);
+        wait_for(|| read_input() == "A draft \u{1f30d}");
+        click(4);
+        wait_for(|| read_input() == "Second draft");
+        // Overflow grows the same message preview into the centered conversation.
+        let mut initial_bounds: Rect = zeroed(); GetWindowRect(window, &mut initial_bounds);
+        let (display, _) = overlay_display(None, window).unwrap();
+        let expected = chat_panel::centered(display.work, dpi);
+        let mut compact_input: Rect = zeroed(); GetWindowRect(input, &mut compact_input);
+        SendMessageW(input, 0x00b1, 0, -1);
+        SendMessageW(input, 0x00c2, 1, wide(format!("Second draft{}", " long".repeat(30))).as_ptr() as isize);
+        if SendMessageW(window, 0x80f0, 11, 0) != 0 {
+            wait_for(|| SendMessageW(window, 0x80f0, 18, 0) != 0);
+            SendMessageW(input, 0x000c, 0, wide("Second draft").as_ptr() as isize);
+            let mut frozen_input: Rect = zeroed(); GetWindowRect(input, &mut frozen_input);
+            assert_eq!(frozen_input, compact_input, "cached growth keeps the native edit stationary");
+            SendMessageW(input, 0x00b1, 12, 12);
+            SendMessageW(input, 0x0102, b'?' as usize, 0);
+            assert_eq!(read_input(), "Second draft?");
+            SendMessageW(input, 0x0102, 8, 0);
+            assert_eq!(read_input(), "Second draft");
+        }
+        else { SendMessageW(input, 0x000c, 0, wide("Second draft").as_ptr() as isize); }
+        let mut chat_bounds: Rect = zeroed();
+        let mut growth_frames = Vec::new();
+        wait_for(|| {
+            GetWindowRect(window, &mut chat_bounds);
+            if growth_frames.last() != Some(&chat_bounds) { growth_frames.push(chat_bounds); }
+            chat_bounds == expected
+        });
+        if SendMessageW(window, 0x80f0, 11, 0) != 0 {
+            assert!(growth_frames.iter().filter(|frame| **frame != initial_bounds && **frame != expected).count() >= 1,
+                "expansion from {initial_bounds:?} must show intermediate sizes: {growth_frames:?}");
+            assert!(growth_frames.windows(2).all(|pair| pair[1].right-pair[1].left >= pair[0].right-pair[0].left));
+        }
+        let chat = SendMessageW(window, 0x80f0, 17, 0) as Hwnd;
+        assert_eq!(chat, window, "full conversation belongs to the original overlay");
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 1);
+        wait_for(|| SendMessageW(window, 0x80f0, 18, 0) == 0);
+        assert_eq!(GetWindowLongPtrW(window, -16) & 0x00cf_0000, 0, "no title bar or native frame is added");
+        let mut input_bounds: Rect = zeroed(); GetWindowRect(input, &mut input_bounds);
+        assert!(input_bounds.left >= chat_bounds.left && input_bounds.right < chat_bounds.right);
+        assert!(input_bounds.top > chat_bounds.top && input_bounds.bottom < chat_bounds.bottom);
+        click(15); wait_for(|| read_input() == "A draft \u{1f30d}");
+        click(4); wait_for(|| read_input() == "Second draft");
+        assert_eq!(SendMessageW(window, 0x80f0, 16, 0), 1, "session switching keeps the overlay centered");
+        let history = wide("You\r\nWhat needs to happen for it to run?\r\n\r\nCodex\r\nIt needs to complete **three steps**:\n\n1. **Check the collected data** has enough usable minutes.\n2. **Train a model** and pass validation.\n3. **Activate that model** automatically.\r\n\r\nCodex\r\nRun `cargo test` to verify the changes. The next check runs in **15 minutes**.\r\n\r\nYou\r\n[Image]\r\n\r\nCodex\r\nThe screenshot confirms **1,896 minutes collected**. Training can start once the data passes validation.");
+        SendMessageW(window, 0x80f1, history.len() - 1, history.as_ptr() as isize);
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(path) = std::env::var_os("LIDGUARD_TEST_SCREENSHOT") {
+            crate::win::background_window::tests::capture(window, std::path::Path::new(&path));
+        }
+        assert_eq!(read_input(), "Second draft");
+        // Keep composing at the end after the actual focus click.
+        SendMessageW(input, 0x00b1, 12, 12);
+        for icon in [true, false] {
+            SendMessageW(input, 0x0102, b'!' as usize, 0);
+            wait_for(|| SendMessageW(window, 0x80f0, 14, 0) == 0);
+            if icon { click(9); }
+            else { SendMessageW(input, WM_KEYDOWN, 13, 0); }
+            wait_for(|| SendMessageW(window, 0x80f0, 14, 0) == 1);
+        }
+        assert_eq!(read_input(), "Second draft!!", "both centered controls submit and restore a rejected draft");
+        PostMessageW(input, WM_KEYDOWN, 27, 0);
+        let mut fold_frames = Vec::new();
+        wait_for(|| {
+            let mut bounds: Rect = zeroed(); GetWindowRect(window, &mut bounds);
+            if fold_frames.last() != Some(&bounds) { fold_frames.push(bounds); }
+            bounds.right-bounds.left == scale_dip(18,dpi) && SendMessageW(window, 0x80f0, 16, 0) == 0
+        });
+        if SendMessageW(window, 0x80f0, 11, 0) != 0 {
+            assert!(fold_frames.iter().filter(|frame| frame.right-frame.left > scale_dip(18,dpi)
+                && frame.right-frame.left < expected.right-expected.left).count() >= 1,
+                "Escape must shrink continuously back to the tab: {fold_frames:?}");
+        }
+        wait_for(|| tab_width() == scale_dip(18,dpi));
+        assert_eq!(read_input(), "Second draft!!", "minimizing preserves the draft");
+        println!("Expansion widths: {:?}; Escape widths: {:?}",
+            growth_frames.iter().map(|r| r.right-r.left).collect::<Vec<_>>(),
+            fold_frames.iter().map(|r| r.right-r.left).collect::<Vec<_>>());
+        if SendMessageW(window, 0x80f0, 11, 0) != 0 {
+            PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
+            wait_for(|| tab_width() == scale_dip(group_window::PANEL_WIDTH,dpi));
+            std::thread::sleep(Duration::from_millis(100));
+            PostMessageW(input, WM_LBUTTONDOWN, 1, 0);
+            PostMessageW(input, WM_LBUTTONUP, 0, 0);
+            wait_for(|| tab_width() > scale_dip(group_window::PANEL_WIDTH,dpi));
+            PostMessageW(input, WM_KEYDOWN, 27, 0);
+            wait_for(|| tab_width() == scale_dip(18,dpi) && SendMessageW(window, 0x80f0, 3, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+            assert_eq!(read_input(), "Second draft!!", "Escape during growth preserves the same session draft");
+        }
+        SetForegroundWindow(foreground);
+        PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
+        std::thread::sleep(Duration::from_millis(300));
         click(5);
         assert_eq!(received.recv_timeout(Duration::from_secs(3)).unwrap(), "1");
         // The callback intentionally reports failure: no real editor is opened.

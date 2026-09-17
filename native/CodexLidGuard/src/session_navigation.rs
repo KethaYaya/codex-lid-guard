@@ -165,16 +165,57 @@ pub fn dispatch(window: u64, session_id: &str, cwd: Option<&str>) -> Option<bool
     dispatch_from(&paths::data_directory().join("windows"), window, session_id, cwd)
 }
 
+pub fn new_chat_runtime(target: &crate::overlay::CardTarget) -> Result<String, String> {
+    let project = target.project.as_ref().ok_or("Open this project in VS Code before starting a chat.")?;
+    let window = matching_window(project, target.window).ok_or("Open this project in VS Code before starting a chat.")?;
+    let context = read_context(&paths::data_directory().join("windows"), window)
+        .filter(|context| context.allows(Some(&project.cwd))).ok_or("The chat's project is no longer available.")?;
+    let connection = win::connect_pipe(&context.pipe, Duration::from_millis(200), Duration::from_secs(10))
+        .map_err(|_| "Reload this project's VS Code window to enable new overlay chats.")?;
+    connection.write_line(&serde_json::json!({"action":"prepare-new-chat", "cwd":project.cwd}).to_string())
+        .map_err(|_| "Could not prepare the new chat. Try again.")?;
+    let response: serde_json::Value = serde_json::from_str(&connection.read_line()
+        .map_err(|_| "Could not prepare the new chat. Try again.")?).map_err(|_| "Invalid new chat response.")?;
+    if response["accepted"] == true && let Some(path) = response["codexPath"].as_str() { Ok(path.into()) }
+    else { Err(response["error"].as_str().unwrap_or("Reload this project's VS Code window to enable new overlay chats.").chars().take(180).collect()) }
+}
+
+pub fn send_reply(target: &crate::overlay::CardTarget, text: &str, busy: bool) -> Result<(), String> {
+    let project = target.project.as_ref().ok_or("Open this chat in VS Code once, then try again.")?;
+    let window = matching_window(project, target.window).ok_or("Open this project in VS Code before sending.")?;
+    let context = read_context(&paths::data_directory().join("windows"), window)
+        .filter(|context| context.allows(Some(&project.cwd)))
+        .ok_or("The chat's project is no longer available.")?;
+    if !valid_session_id(&target.session_id) || text.trim().is_empty() || text.encode_utf16().count() > 8192 {
+        return Err("Enter a message of at most 8,192 characters.".into());
+    }
+    let connection = win::connect_pipe(&context.pipe, Duration::from_millis(200), Duration::from_secs(100))
+        .map_err(|_| "Reload this project's VS Code window, then try again.")?;
+    connection.write_line(&serde_json::json!({ "action": "send", "sessionId": target.session_id,
+        "cwd": project.cwd, "text": text, "busy": busy }).to_string())
+        .map_err(|_| "Send not confirmed. Check the chat before retrying.")?;
+    let response: serde_json::Value = serde_json::from_str(&connection.read_line()
+        .map_err(|_| "Send not confirmed. Check the chat before retrying.")?)
+        .map_err(|_| "Send not confirmed. Check the chat before retrying.")?;
+    if response["accepted"] == true { Ok(()) }
+    else { Err(response["error"].as_str().unwrap_or("Reload the project's VS Code window to enable overlay replies.").chars().take(180).collect()) }
+}
+
 fn dispatch_from(directory: &Path, window: u64, session_id: &str, cwd: Option<&str>) -> Option<bool> {
     let context = read_context(directory, window)?;
     if !valid_session_id(session_id) || !context.allows(cwd) { return Some(false); }
+    Some(send_request(&context, serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
+        Duration::from_secs(1)))
+}
+
+fn send_request(context: &WindowContext, request: serde_json::Value, timeout: Duration) -> bool {
     let result = (|| {
-        let connection = win::connect_pipe(&context.pipe, Duration::from_millis(100), Duration::from_secs(1)).ok()?;
-        connection.write_line(&serde_json::json!({ "sessionId": session_id, "cwd": cwd }).to_string()).ok()?;
+        let connection = win::connect_pipe(&context.pipe, Duration::from_millis(100), timeout).ok()?;
+        connection.write_line(&request.to_string()).ok()?;
         let response: serde_json::Value = serde_json::from_str(&connection.read_line().ok()?).ok()?;
         response.get("accepted")?.as_bool()
     })();
-    Some(result.unwrap_or(false))
+    result.unwrap_or(false)
 }
 
 #[cfg(test)]

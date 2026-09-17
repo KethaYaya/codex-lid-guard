@@ -83,3 +83,79 @@ test("navigation opens only a valid session in the current focused workspace", {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("overlay replies validate the project and acknowledge delivery without focusing or opening a chat", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lid-guard-reply-"));
+  let roots = ["C:\\One"];
+  let fail = false;
+  const delivered: unknown[] = [];
+  const errors: unknown[] = [];
+  const opened: string[] = [];
+  const bridge = await createSessionBridge({
+    directory, roots: () => roots, focused: () => false,
+    open: async (id) => { opened.push(id); },
+    send: async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      if (fail) { throw new Error("Codex unavailable"); }
+      delivered.push(args);
+    },
+    reportError: (error) => errors.push(error)
+  });
+  const send = (text = "Hello 🌍", cwd = "C:\\One", action = "send", id = sessionId) =>
+    request(bridge.pipe, `${JSON.stringify({ action, cwd, text, sessionId: id, busy: false })}\n`);
+  try {
+    assert.equal(await send(), false);
+    await bridge.bindWindow(42);
+    assert.equal(await send(), true);
+    assert.deepEqual(delivered, [[sessionId, "Hello 🌍", "C:\\One", false]]);
+    assert.equal(await send("  "), false);
+    assert.equal(await send("a".repeat(8193)), false);
+    assert.equal(await send("hello", "C:\\One", "send", "../bad"), false);
+    assert.equal(await send("hello", "C:\\One-other"), false);
+    assert.equal(await send("hello", "C:\\One", "new-chat"), false);
+    roots = ["C:\\Two"];
+    assert.equal(await send(), false, "a changed project invalidates a queued reply");
+    roots = [];
+    assert.equal(await send(), false);
+    roots = ["C:\\One"];
+    fail = true;
+    assert.equal(await send(), false, "failure is reported without losing the draft");
+    assert.equal(errors.length, 1);
+    assert.equal(delivered.length, 1);
+    assert.deepEqual(opened, []);
+  } finally {
+    bridge.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("new overlay chats prepare the current workspace runtime without navigating or sending a prompt", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lid-guard-new-chat-"));
+  let roots = ["C:\\One"];
+  let trusted = true;
+  let prepared = 0;
+  const bridge = await createSessionBridge({ directory, roots: () => roots, focused: () => false,
+    open: async () => assert.fail("preparing a chat must not open an editor"),
+    send: async () => assert.fail("preparing a chat must not submit a prompt"),
+    prepareNewChat: async () => {
+      if (!trusted) { throw new Error("Trust this project first"); }
+      prepared++; return "C:\\Codex\\codex.exe";
+    }, reportError: () => undefined });
+  const prepare = (cwd = "C:\\One") => request(bridge.pipe, `${JSON.stringify({ action: "prepare-new-chat", cwd })}\n`);
+  try {
+    assert.equal(await prepare(), false);
+    await bridge.bindWindow(42);
+    assert.equal(await prepare(), true);
+    assert.equal(prepared, 1);
+    assert.equal(await prepare("C:\\One-other"), false);
+    roots = ["C:\\Two"];
+    assert.equal(await prepare(), false);
+    roots = ["C:\\One"]; trusted = false;
+    assert.equal(await prepare(), false);
+    assert.equal(prepared, 1);
+  } finally { bridge.dispose(); await rm(directory, { recursive: true, force: true }); }
+});

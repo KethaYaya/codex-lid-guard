@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.2.24
+
+- Smoothly fit the latest reply at the screen edge after a mouse or keyboard preview stays open for five seconds.
+- Start typing in that message-sized view; maximize the same overlay after five seconds of composing or when the draft exceeds the available line width.
+- Cancel typing deadlines when sending, clearing, switching sessions, or folding; preserve Copilot shortcuts, drafts, scrolling, and cached animations.
+
+## 0.2.23
+
+- Keep compact previews and centered chat history updating when Codex resumes a session in a new transcript file.
+- Recheck the current transcript in the background and include messages written before the file switch was detected.
+- Reconstruct earlier conversation history from continuation metadata, respecting its recorded boundary and preserving history across live file changes.
+
+## 0.2.22
+
+- After a finished pop-out is expanded by mouse hover, click, or keyboard shortcut, fold it back to the small edge tab.
+- Preserve unread markers and question notices; pop out again for a new completion.
+
+## 0.2.21
+
+- Add an icon-only New chat action to the headers of the expanded drawer and maximized overlay.
+- Create an empty Codex session in the same project, select it inside the existing overlay, and focus its message box. Preserve other sessions and their drafts; avoid duplicate sessions from double-clicks.
+- Keep new chats idle until the first message, wait for startup when sending immediately, and retain normal approval handling and sleep protection during work.
+
+## 0.2.20
+
+- Restyle the centered conversation to match the chat mockup: compact blue user bubbles on the right and Codex answers directly on the glass, with one quiet label per consecutive reply group.
+- Render bold text, numbered and bulleted lists with hanging indents, and inline code. Preserve incomplete formatting while replies arrive, Unicode wrapping, history scrolling, and cached expansion animation.
+- Show image attachments as compact chips, keep literal image-placeholder text intact, and center muted notices and composer hints.
+
+## 0.2.19
+
+- Fix intermittent overlay sends when saved history lags behind Codex: use the live conversation owner and start a new turn only after a definitive inactive-turn rejection.
+- Confirm delivery before reporting Sent, and never automatically resend after a lost connection, timeout, or uncertain response.
+- Keep a second draft intact and show an explicit message if Send is pressed while the previous submission is still being confirmed.
+
+## 0.2.18
+
+- Animate three working dots in both the expanded drawer and centered chat, reusing cached conversation pixels and respecting reduced-motion settings.
+- Show user messages in blue bubbles aligned right and Codex replies in dark bubbles aligned left, with speaker labels, padding, and paragraph spacing.
+- Preserve message roles from saved history and streamed background replies, including follow-ups sent while Codex is working. Keep history scrolling and smooth expansion intact.
+
+## 0.2.17
+
+- Keep finished, unread result tabs popped out until the result is viewed, dismissed, or new work starts; remove the eight-second timeout.
+- Typing while hovering a chat preview focuses its composer and smoothly expands the same overlay, preserving the first characters and the current draft.
+- Keep Copilot shortcut chords and other modifier shortcuts separate from hover typing, and reject queued typing after hiding or switching sessions.
+
+## 0.2.16
+
+- Ease the centered chat expansion in and out, reducing the abrupt first jump and peak movement between frames.
+- Deliver slightly late animation ticks promptly instead of skipping another frame interval, while keeping queued keyboard input responsive and avoiding catch-up bursts after long stalls.
+
+## 0.2.15
+
+- Include the composer in the cached expansion image, avoiding repeated native text-box resizing and repainting during growth.
+- Keep growth on its animation timer; input and history notifications no longer insert extra frames between scheduled ticks.
+- Keep keyboard focus and accept typing during the animation; restore the live input at the final position or safely cancel on Escape.
+
+## 0.2.14
+
+- Smooth chat expansion by preparing the glass and conversation once, then reusing native-size image sections throughout the animation.
+- Keep text sharp, controls anchored, and Escape responsive during growth. Resume live chat updates and controls as soon as the overlay reaches its final size.
+
+## 0.2.13
+
+- Animate the same overlay smoothly from its current position into the centered full chat over 300 ms, retaining its normal font size and glass appearance.
+- Animate Escape and the header arrow back to the edge tab, including Escape while expansion is still in progress. Keep the session and draft intact.
+- Respect Windows reduced-motion settings, preallocate animation surfaces, and reuse wrapped history text during growth.
+
+## 0.2.12
+
+- Enlarge and center the existing glass overlay when its message box is clicked, preserving the project header, session list, footer controls, opacity, and blur.
+- Display the full scrollable conversation in the enlarged message area, with per-session drafts and automatic scrolling only when already at the bottom.
+- Remove the separate framed chat presentation. Enter and the send icon still clear the composer immediately; Escape and the header arrow fold the same overlay.
+
+## 0.2.11
+
+- Clicking the overlay message box opens a centered, resizable chat window for that session with its saved user and assistant messages and live history updates.
+- Keep drafts and the selected chat when expanding, resizing, and returning to the overlay. Preserve history scroll position while reading earlier messages.
+- Clear the composer immediately on Enter or the send icon; restore failed submissions without discarding newer typing. Shift+Enter adds a line. Escape, Back to overlay, and Close return to the compact overlay.
+
+## 0.2.10
+
+- Replace the New chat button with a message box at the bottom left and an icon-only send button. Move Open chat and Dismiss to the right.
+- Send with Enter or the up-arrow icon to the selected editor or background conversation, preserving its settings and existing worker. Keep separate drafts per chat and retain text when delivery fails or is unconfirmed.
+- Activate keyboard input only on click, preserve normal preview focus behavior, and fold the drawer with Escape while typing.
+
+## 0.2.9
+
+- Add **+ New chat** to project overlay drawers with saved editor details. Open a blank Codex sidebar chat in the matching VS Code project, reopening its window when needed.
+- Preserve existing tasks and unread results when starting a chat. Reject navigation if the project or focused window changes, and keep overlay controls available if opening fails.
+
 ## 0.2.8
 
 - Replace always-wide project tabs with 18 by 42 DIP slivers, folder monograms, and priority-sorted state beads. Reveal shortcut codes at 44 DIP while the prefix is held; show new results at 152 DIP for eight seconds and questions at 152 DIP until resolved.
