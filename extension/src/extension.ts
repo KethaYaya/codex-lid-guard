@@ -914,7 +914,7 @@ async function syncSettings(): Promise<void> {
     config.get<boolean>("sleepWhenLidClosed", true),
     config.get<number>("sleepDelaySeconds", 10),
     config.get<boolean>("enabled", true) && config.get<boolean>("messageOverlay", false),
-    config.get<number>("overlayOpacity", 82),
+    config.get<number>("overlayOpacity", 35),
     config.get<number>("overlayDurationSeconds", 90),
     config.get<string>("overlayPosition", "bottom-right"),
     config.get<number>("overlayMaxTabs", 3),

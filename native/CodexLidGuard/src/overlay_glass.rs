@@ -1,6 +1,30 @@
 //! Static glass lighting painted into the overlay's existing cached surfaces.
 //! Transparency comes from the layered window; no backdrop capture or blur pass.
 use super::*;
+use std::cell::Cell;
+
+thread_local! { static BACKGROUND: Cell<Option<u32>> = const { Cell::new(None) }; }
+
+// Two coverage passes isolate GDI text/glyph antialiasing from the glass tint.
+// This is thread-local because project windows paint on independent threads.
+pub(in super::super) fn with_background<T>(color: u32, paint: impl FnOnce() -> T) -> T {
+    struct Reset(Option<u32>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            BACKGROUND.set(self.0);
+        }
+    }
+    let _reset = Reset(BACKGROUND.replace(Some(color)));
+    paint()
+}
+
+#[derive(Default)]
+pub(in super::super) struct PaintCache {
+    pub pass: usize,
+    pub frames: [PaintBuffer; 2],
+    pub panels: [PaintBuffer; 2],
+    pub tint: Option<u8>,
+}
 
 #[repr(C)]
 struct Vertex {
@@ -39,6 +63,10 @@ unsafe extern "system" {
 
 pub(super) unsafe fn surface(dc: Handle, rect: Rect) {
     unsafe {
+        if let Some(color) = BACKGROUND.get() {
+            fill_rectangle(dc, &rect, color);
+            return;
+        }
         let vertices = [
             Vertex::new(rect.left, rect.top, 55, 71, 90),
             Vertex::new(rect.right, rect.top, 38, 50, 66),
@@ -98,7 +126,12 @@ pub(super) unsafe fn rim(dc: Handle, rect: Rect, radius: i32) {
 pub(super) unsafe fn plate(dc: Handle, rect: Rect, dpi: u32) {
     unsafe {
         let radius = scale_dip(5, dpi);
-        fill_rounded_rectangle(dc, &rect, color_ref(48, 64, 83), radius);
+        fill_rounded_rectangle(
+            dc,
+            &rect,
+            BACKGROUND.get().unwrap_or(color_ref(48, 64, 83)),
+            radius,
+        );
         rim(dc, rect, radius);
     }
 }

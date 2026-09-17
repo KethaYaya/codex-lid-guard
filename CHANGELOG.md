@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.8
+
+- Replace always-wide project tabs with 18 by 42 DIP slivers, folder monograms, and priority-sorted state beads. Reveal shortcut codes at 44 DIP while the prefix is held; show new results at 152 DIP for eight seconds and questions at 152 DIP until resolved.
+- Keep unread halos after a completion card retracts. Preserve hover drawers, independent chat actions, 90 ms tab movement, and sibling clearance before expansion.
+- Separate glass background opacity from foreground text and shortcuts. Reduce the default tint to 35%, preserving opaque labels, antialiased edges, and live acrylic blur. Preview three projects with working, completed, and question states.
+
+## 0.2.7
+
+- Add live Windows acrylic blur behind project tabs and drawers on Windows 11 22H2 and newer. Keep content and shortcuts on their existing sharp surface, with the current tint as a fallback when the backdrop API is unavailable.
+- Fit separate blur surfaces to the visible panel and tab during sliding, keeping transparent gaps clear. Hide the blur when opening a chat, hiding the overlay, or using full opacity; preserve non-activating input and project stacking.
+
 ## 0.2.6
 
 - Give project tabs and drawers a dark glass appearance with translucent surfaces, soft highlights, fine edges, and inset selection and action controls. Keep the existing opacity setting and cached drawing path; no live background blur or extra animation timers.

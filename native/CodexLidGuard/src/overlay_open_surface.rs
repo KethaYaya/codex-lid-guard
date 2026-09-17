@@ -156,6 +156,7 @@ impl OpenSurface {
         layout: DockLayout,
         dpi: u32,
         to: Rect,
+        preserve_alpha: bool,
     ) -> io::Result<Self> {
         unsafe {
             let width = layout.window.right - layout.window.left;
@@ -189,7 +190,11 @@ impl OpenSurface {
             let mask = output.pixels();
             for (index, pixel) in source.pixels().iter_mut().enumerate() {
                 *pixel = if mask[(index / width as usize) * stride + index % width as usize] != 0 {
-                    *pixel | 0xff00_0000
+                    if preserve_alpha {
+                        *pixel
+                    } else {
+                        *pixel | 0xff00_0000
+                    }
                 } else {
                     0
                 };
@@ -270,8 +275,12 @@ pub(super) struct FrameSurface {
     image: Surface,
     mask: Surface,
     shape: Option<(DockLayout, u32)>,
+    coverage: Option<(Surface, Surface)>,
 }
 impl FrameSurface {
+    pub(super) fn cached_dc(&self) -> Handle {
+        self.image.dc
+    }
     #[cfg(test)]
     pub(super) fn alpha_at(&self, x: i32, y: i32) -> u8 {
         let Some((layout, _)) = self.shape else {
@@ -293,6 +302,7 @@ impl FrameSurface {
                 image: Surface::new(width, height)?,
                 mask: Surface::new(width, height)?,
                 shape: None,
+                coverage: None,
             })
         }
     }
@@ -304,6 +314,18 @@ impl FrameSurface {
         layout: DockLayout,
         dpi: u32,
         alpha: u8,
+    ) -> io::Result<()> {
+        unsafe { self.present_material(window, cached, layout, dpi, alpha, None) }
+    }
+
+    pub(super) unsafe fn present_material(
+        &mut self,
+        window: Hwnd,
+        cached: Handle,
+        layout: DockLayout,
+        dpi: u32,
+        alpha: u8,
+        material: Option<([Handle; 2], u8)>,
     ) -> io::Result<()> {
         unsafe {
             let bounds = layout.window;
@@ -334,7 +356,25 @@ impl FrameSurface {
             if BitBlt(self.image.dc, 0, 0, width, height, cached, 0, 0, 0x00cc0020) == 0 {
                 return Err(error("Copy overlay frame pixels"));
             }
+            if let Some((samples, _)) = material {
+                if self.coverage.is_none() {
+                    self.coverage = Some((
+                        Surface::new(self.image.width, self.image.height)?,
+                        Surface::new(self.image.width, self.image.height)?,
+                    ));
+                }
+                let (black, white) = self.coverage.as_mut().unwrap();
+                for (surface, source) in [(black, samples[0]), (white, samples[1])] {
+                    if BitBlt(surface.dc, 0, 0, width, height, source, 0, 0, 0x00cc0020) == 0 {
+                        return Err(error("Copy glass foreground coverage"));
+                    }
+                }
+            }
             GdiFlush();
+            let coverage = self
+                .coverage
+                .as_mut()
+                .map(|(black, white)| (black.pixels(), white.pixels()));
             let stride = self.image.width as usize;
             let mask = self.mask.pixels();
             let pixels = self.image.pixels();
@@ -342,7 +382,12 @@ impl FrameSurface {
                 let start = y * stride;
                 for x in start..start + width as usize {
                     pixels[x] = if mask[x] != 0 {
-                        pixels[x] | 0xff00_0000
+                        if let Some((_, tint)) = material {
+                            let (black, white) = coverage.as_ref().unwrap();
+                            glass_pixel(pixels[x], black[x], white[x], tint)
+                        } else {
+                            pixels[x] | 0xff00_0000
+                        }
                     } else {
                         0
                     };
@@ -370,6 +415,27 @@ impl FrameSurface {
     }
 }
 
+// GDI's black/white coverage pair preserves fully opaque glyphs and their
+// antialiased edges. Only the background contribution receives the tint alpha.
+fn glass_pixel(color: u32, black: u32, white: u32, tint: u8) -> u32 {
+    let channel = |pixel: u32, shift: u32| ((pixel >> shift) & 255u32) as i32;
+    let transparent = [0, 8, 16]
+        .into_iter()
+        .map(|shift| (channel(white, shift) - channel(black, shift)).clamp(0, 255))
+        .min()
+        .unwrap();
+    let alpha = 255 - transparent + (transparent * i32::from(tint) + 127) / 255;
+    [0, 8, 16]
+        .into_iter()
+        .fold((alpha as u32) << 24, |pixel, shift| {
+            let foreground = channel(black, shift);
+            let background = channel(color, shift) - foreground;
+            let premultiplied =
+                (foreground + (background * i32::from(tint) + 127) / 255).clamp(0, alpha);
+            pixel | ((premultiplied as u32) << shift)
+        })
+}
+
 // SetLayeredWindowAttributes and UpdateLayeredWindow use different presentation
 // modes. Reset once at each handoff, never during the animation's frame loop.
 pub(super) unsafe fn reset_layered_mode(window: Hwnd) {
@@ -383,6 +449,22 @@ pub(super) unsafe fn reset_layered_mode(window: Hwnd) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glass_keeps_solid_labels_and_shortcuts_opaque_while_reducing_background() {
+        let tint = 89; // 35% background, independently of foreground coverage.
+        assert_eq!(glass_pixel(0x1e2836, 0, 0xffffff, tint) >> 24, 89);
+        for ink in [0xf2f7fd, 0xbfccdc, 0xa4b5c9, 0xcab98b, 0x86d5a9, 0xf1ba75] {
+            assert_eq!(glass_pixel(ink, ink, ink, tint), 0xff000000 | ink);
+        }
+        // A half-covered white edge over the dark tint remains premultiplied.
+        let edge = glass_pixel(0x8f939b, 0x808080, 0xffffff, tint);
+        assert!((171..=173).contains(&(edge >> 24)));
+        for shift in [0, 8, 16] {
+            assert!(((edge >> shift) & 255) <= (edge >> 24));
+        }
+        assert_eq!(glass_pixel(0x8f939b, 0x808080, 0xffffff, 255), 0xff8f939b);
+    }
 
     #[test]
     fn native_slide_frames_preserve_pixel_scale_and_fill_the_right_edge_without_a_second_resize() {
@@ -542,7 +624,8 @@ mod tests {
                         for (index, pixel) in cached.pixels().iter_mut().enumerate() {
                             *pixel = (index as u32 * 7919) & 0x00ff_ffff;
                         }
-                        let mut surface = OpenSurface::capture(cached.dc, layout, dpi, to).unwrap();
+                        let mut surface =
+                            OpenSurface::capture(cached.dc, layout, dpi, to, false).unwrap();
                         let allocations = (
                             surface.source.dc,
                             surface.source.bitmap,

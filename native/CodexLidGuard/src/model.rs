@@ -108,7 +108,7 @@ impl Default for GuardSettings {
     fn default() -> Self {
         Self {
             message_overlay: false,
-            overlay_opacity: 82,
+            overlay_opacity: 35,
             overlay_duration_seconds: 90,
             overlay_position: "bottom-right".into(),
             overlay_max_tabs: 3,

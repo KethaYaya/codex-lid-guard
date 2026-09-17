@@ -97,7 +97,7 @@ impl Frame {
             activity: 0,
             cards: vec![],
             window: None,
-            opacity: 82,
+            opacity: 35,
             position: "bottom-right".into(),
             max_tabs: 3,
             shortcuts: Default::default(),
@@ -704,28 +704,29 @@ pub fn preview() -> io::Result<()> {
     let settings = GuardSettings::load();
     let mut threads = Vec::new();
     let shortcuts = win::OverlayShortcuts::start()?;
-    for slot in 0..settings.overlay_max_tabs.min(2) {
+    for slot in 0..settings.overlay_max_tabs.min(3) {
         let settings = settings.clone();
         let shortcuts = shortcuts.publisher(slot);
         threads.push(std::thread::spawn(move || {
             win::run_session_overlay(slot, |_| {
                 let elapsed = started.elapsed();
-                let project=["CodexLidGuard","JargonLens"][slot];
+                let project=["CodexLidGuard","JargonLens","Website"][slot];
                 let titles: &[&str] = if slot==0{&["Fix overlay flicker","Simplify tab labels","Retry pipe integration test"]}
-                    else{&["Fix sign-in timeout","Tighten landing copy"]};
+                    else if slot==1{&["Fix sign-in timeout","Tighten landing copy"]} else{&["Review the new navigation"]};
                 let frames=titles.iter().enumerate().map(|(index, title)|{
-                    let completed=index==2 || (elapsed>=Duration::from_secs(15)&&index==0);
-                    let waiting=slot==0&&index==1;
+                    let completed=(slot==1 && index==0) || (slot==0 && elapsed>=Duration::from_secs(10) && index==0);
+                    let waiting=slot==2;
                     Frame {
                         project_path:Some(format!("C:\\Preview\\{project}")),needs_input:waiting,
                         session_id:Some(format!("preview-{slot}-{index}")),activity:index as u64,
                         cards:vec![Card{id:index as u64,label:format!("{project} — {title}"),
-                            text:if waiting{"Choose between short project names and full names."}
+                            text:if waiting{"Use the compact navigation?"}
                                 else if completed{"The checks passed. Open the conversation to read the full result."}
                                 else{"Checking the latest changes. Select another task to preview its update."}.into(),
                             final_message:completed,attention:completed||waiting,target:None}],
-                        opacity:settings.overlay_opacity,position:settings.overlay_position.clone(),
-                        max_tabs:settings.overlay_max_tabs.min(2),
+                        // Preview the new default material without changing saved preferences.
+                        opacity:GuardSettings::default().overlay_opacity,position:settings.overlay_position.clone(),
+                        max_tabs:settings.overlay_max_tabs.min(3),
                         shortcuts:crate::shortcut_config::ShortcutConfig::from_settings(&settings.overlay_shortcuts),
                         close:elapsed>=Duration::from_secs(35),busy:!completed,attention:completed||waiting,
                         dock_request:1,..Frame::empty()

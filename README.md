@@ -51,11 +51,11 @@ To try the controls without starting a task, run **Codex Lid Guard: Preview Mess
 
 ## Message overlays
 
-Tabs and drawers use a dark glass style with soft highlights and fine edges. Adjust **Overlay Opacity** to control transparency. The glass lighting is static, so it adds no continuous animation or live background blur.
+Tabs and drawers use dark glass with live background blur on Windows 11 22H2 and newer. Text and shortcut badges stay solid. **Overlay Opacity** controls only the glass background, with a new 35% default; 100% opacity hides the blur. Windows manages the blur and its transparency/accessibility fallbacks. Older Windows versions keep the translucent glass tint.
 
-![Project tabs and a glass drawer with a selected session.](extension/images/screenshots/overlay-project-groups.png)
+![Native overlay tab states at twice their desktop size.](extension/images/screenshots/overlay-tab-states.png)
 
-Each project has a small 152 by 42 DIP tab showing its name, highest-priority task, status icon, and a +N count for other sessions. Expand it to see a 344 DIP drawer with up to four compact task rows, a two-line update, and Open/Dismiss actions. Larger lists scroll; selecting a task keeps the rows in place. Neighboring tabs visibly slide aside first; expansion waits until they are clear. Tabs slide back only after the drawer has fully folded. Switching projects folds the previous drawer first. The expanded project stays above sibling tabs without taking keyboard focus. Same-named folders get distinct path labels, with their full path shown in the drawer header.
+A calm project occupies an 18 by 42 DIP sliver: a folder monogram and priority-sorted session beads. Blue beads breathe while working, green halos mark unread results, hollow grey beads mean read or idle, and amber rings mean a question. Three beads plus a dash represent four or more sessions. Holding the shortcut prefix reveals the assigned two-letter code in a 44 DIP tab. A new result unfolds to 152 DIP for about eight seconds, then returns to a sliver with its unread halo intact. A question stays 152 DIP wide with the question text until it is resolved. Hover or expand a tab to see a 344 DIP drawer with up to four compact task rows, a two-line update, and Open/Dismiss actions. Larger lists scroll; selecting a task keeps the rows in place. Neighboring tabs visibly slide aside first; expansion waits until they are clear. Tabs slide back only after the drawer has fully folded. Switching projects folds the previous drawer first. The expanded project stays above sibling tabs without taking keyboard focus. Same-named folders get distinct path labels, with their full path shown in the drawer header.
 
 The session currently viewed in a focused editor hides from the preview; other sessions in its project remain available. The project tab hides when it has no visible sessions. It returns when you switch away.
 
@@ -111,7 +111,7 @@ These shortcuts work from other apps while overlay tabs are visible. The default
 | **Enter** after selecting a project | Open its selected session. |
 | **Esc** immediately after selecting a project | Dismiss its selected session until its next task. Other sessions stay available. |
 | **Tab** after releasing Copilot | Fold the keyboard-selected preview immediately. |
-| **Copilot + first shortcut letter**, then the **second letter** | Preview the project, then open its selected session. The assigned letters are always visible beside each project name and highlight while the prefix is held. |
+| **Copilot + first shortcut letter**, then the **second letter** | Preview the project, then open its selected session. Hold the prefix to reveal the assigned letters beside each sliver; questions and completion notices keep their full width. |
 
 Previews selected with **Copilot + Tab** fold automatically three seconds after you release Copilot. Click-opened and letter-selected previews stay open.
 
@@ -123,7 +123,7 @@ Previews selected with **Copilot + Tab** fold automatically three seconds after 
 - The default Copilot binding expects **Win + Shift + F23**. Keyboard utilities that remap that sequence can prevent detection.
 - Some keyboards send Copilot as a quick tap even when you hold it. On those keyboards, enter each next step within **1.5 seconds**. Press Copilot again before Tab to keep cycling; Tab alone folds the selected preview.
 - Enter and Esc return to their normal behavior when the shortcut expires or focus changes. Esc before selecting a tab cancels the shortcut.
-- Customize **Overlay Cycle Key**, **Overlay Open Key**, and **Overlay Close Key** using different keys for each. Shortcut letters stay visible on tabs whenever shortcuts are enabled; holding the prefix highlights them.
+- Customize **Overlay Cycle Key**, **Overlay Open Key**, and **Overlay Close Key** using different keys for each. Shortcut letters appear only while the prefix is held, then the sliver returns to its calm width.
 - Changes apply immediately. Invalid or duplicate bindings disable shortcuts and show a settings warning.
 - Turn off **Overlay Shortcuts Enabled** to disable global shortcuts. Without visible tabs, Copilot keeps its normal Windows behavior. These bindings are separate from VS Code's Keyboard Shortcuts editor.
 
@@ -154,7 +154,7 @@ Open VS Code Settings with **Ctrl + ,** and search for **Codex Lid Guard**.
 | See desktop chat previews | Turn on **Message Overlay**. Default: off. |
 | Follow more projects | Set **Overlay Max Tabs** from 1 to 10. Default: 3. |
 | Move the previews | Choose a corner with **Overlay Position**. Default: bottom-right. |
-| Make previews more transparent | Lower **Overlay Opacity**. Default: 82%. |
+| Make previews more transparent | Lower **Overlay Opacity**. Default: 35%; labels remain solid. |
 | Use a keyboard without a Copilot key | Change **Overlay Shortcut Prefix**, for example to `Ctrl+Alt+Space`. |
 | Turn off sounds | Turn off **Alert Sounds**. Default: on. |
 | Allow more time before sleep | Increase **Sleep Delay Seconds**. Default: 10 seconds. |

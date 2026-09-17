@@ -2,7 +2,7 @@
 use super::*;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     mpsc,
 };
 
@@ -18,6 +18,7 @@ pub(super) fn query(state: &OverlayState, kind: usize) -> isize {
         3 => state.collapsed as isize,
         10 => state.shortcut_hints as isize,
         11 => state.animate as isize,
+        12 => ui.group.sessions.iter().filter(|s| s.card.attention && s.card.final_message).count() as isize,
         _ => ui
             .test_point(kind)
             .and_then(|(x, y)| {
@@ -66,11 +67,14 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
         let publisher = shortcuts.publisher(0);
         let stop = Arc::new(AtomicBool::new(false));
         let done = stop.clone();
+        let scenario = Arc::new(AtomicU8::new(0));
+        let feed_scenario = scenario.clone();
         let (opened, received) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             run_overlay_inner(
                 Some(0),
                 move |_| {
+                    let phase = feed_scenario.load(Ordering::Relaxed);
                     let frames = (0..2)
                         .map(|i| Frame {
                             session_id: Some(i.to_string()),
@@ -81,8 +85,8 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
                                 id: 0,
                                 label: format!("OverlayTest — Session {i}"),
                                 text: "Native grouping test".into(),
-                                final_message: false,
-                                attention: false,
+                                final_message: i == 0 && matches!(phase, 1 | 3),
+                                attention: i == 0 && phase == 1,
                                 target: Some(CardTarget {
                                     window: i + 1,
                                     session_id: i.to_string(),
@@ -90,7 +94,8 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
                                 }),
                             }],
                             dock_request: 1,
-                            busy: true,
+                            busy: i != 0 || phase == 0,
+                            needs_input: i == 0 && phase == 2,
                             close: done.load(Ordering::Relaxed),
                             ..Frame::empty()
                         })
@@ -130,10 +135,14 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
         });
         let foreground = GetForegroundWindow();
         wait_for(|| shortcuts.test_binding(0).is_some());
+        let dpi = SendMessageW(window, 0x80f0, 2, 0) as u32;
+        let tab_width = || { let mut rect: Rect = zeroed(); GetWindowRect(window, &mut rect); rect.right-rect.left };
+        wait_for(|| tab_width() == scale_dip(18,dpi));
         for key in [0x5b, 0xa0, 0x86] {
             shortcuts.test_key(key, true);
         }
         wait_for(|| SendMessageW(window, 0x80f0, 10, 0) == 1);
+        wait_for(|| tab_width() == scale_dip(44,dpi));
         assert_eq!(
             SendMessageW(window, 0x80f0, 3, 0),
             1,
@@ -143,6 +152,25 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
             shortcuts.test_key(key, false);
         }
         wait_for(|| SendMessageW(window, 0x80f0, 10, 0) == 0);
+        wait_for(|| tab_width() == scale_dip(18,dpi));
+        scenario.store(1,Ordering::Relaxed);
+        PostMessageW(window,WM_FRAME_READY,0,0);
+        let completed_at = Instant::now();
+        wait_for(|| tab_width() == scale_dip(152,dpi));
+        std::thread::sleep(Duration::from_secs(7));
+        assert_eq!(tab_width(),scale_dip(152,dpi),"completion should remain visible for about eight seconds");
+        wait_for(|| tab_width() == scale_dip(18,dpi));
+        assert!(completed_at.elapsed() >= Duration::from_secs(8));
+        assert_eq!(SendMessageW(window,0x80f0,12,0),1,"folding must retain the unread bead");
+        scenario.store(2,Ordering::Relaxed);
+        PostMessageW(window,WM_FRAME_READY,0,0);
+        wait_for(|| tab_width() == scale_dip(152,dpi));
+        scenario.store(3,Ordering::Relaxed);
+        PostMessageW(window,WM_FRAME_READY,0,0);
+        wait_for(|| tab_width() == scale_dip(18,dpi));
+        assert_eq!(SendMessageW(window,0x80f0,12,0),0,"reading the result clears its halo");
+        scenario.store(0,Ordering::Relaxed);
+        PostMessageW(window,WM_FRAME_READY,0,0);
         PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
         wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
         std::thread::sleep(Duration::from_millis(300));
@@ -183,7 +211,7 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
         wait_for(|| {
             let mut rect: Rect = zeroed();
             GetWindowRect(window, &mut rect);
-            rect.right - rect.left == scale_dip(group_window::TAB_WIDTH, dpi)
+            rect.right - rect.left == scale_dip(group_window::tab_state::CALM_WIDTH, dpi)
         });
         PostMessageW(window, WM_APP_EXPAND_OVERLAY, 0, 0);
         wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
@@ -318,10 +346,53 @@ fn native_group_stack_case(position: &'static str) {
             rect
         };
         let original = windows.map(bounds);
+        let backdrops = windows.map(|window| {
+            ["panel", "tab"].map(|part| {
+                let class = wide(format!(
+                    "CodexLidGuardBackdrop.{}.{window_id}.{part}",
+                    GetCurrentProcessId(),
+                    window_id = window as usize
+                ));
+                FindWindowW(class.as_ptr(), null())
+            })
+        });
+        let check_backdrop = |slot: usize, expanded: bool| {
+            let [panel, tab] = backdrops[slot];
+            if panel.is_null() && tab.is_null() {
+                return;
+            } // Tint fallback on older Windows.
+            assert!(!panel.is_null() && !tab.is_null());
+            let (shown, hidden) = if expanded { (panel, tab) } else { (tab, panel) };
+            wait_for(|| {
+                IsWindowVisible(shown) != 0
+                    && IsWindowVisible(hidden) == 0
+                    && bounds(shown) == bounds(windows[slot])
+            });
+            assert!(
+                above(windows[slot], shown),
+                "blur must stay beneath sharp content"
+            );
+            for handle in [panel, tab] {
+                assert_ne!(
+                    GetWindowLongPtrW(handle, -20) & WS_EX_NOACTIVATE as isize,
+                    0
+                );
+            }
+        };
+        for slot in 0..2 {
+            check_backdrop(slot, false);
+        }
         let assert_separate = || {
             assert!(
                 !windows.contains(&GetForegroundWindow()),
                 "moving overlays must never take keyboard focus"
+            );
+            assert!(
+                !backdrops
+                    .iter()
+                    .flatten()
+                    .any(|&window| !window.is_null() && window == GetForegroundWindow()),
+                "blur surfaces must never take keyboard focus"
             );
             let [a, b] = windows.map(bounds);
             assert!(
@@ -362,7 +433,7 @@ fn native_group_stack_case(position: &'static str) {
                 {
                     intermediate.push(sibling);
                 }
-                let compact = own.right - own.left == scale_dip(group_window::TAB_WIDTH, dpi)
+                let compact = own.right - own.left == scale_dip(group_window::tab_state::CALM_WIDTH, dpi)
                     && own.bottom - own.top == scale_dip(group_window::TAB_HEIGHT, dpi);
                 if expand && !compact {
                     assert_eq!(
@@ -393,6 +464,7 @@ fn native_group_stack_case(position: &'static str) {
                     intermediate.len()
                 );
             }
+            check_backdrop(0, expand);
         }
         // Start with whichever tab is behind: initial arrival order is asynchronous.
         let behind = if above(windows[0], windows[1]) { 1 } else { 0 };
@@ -426,6 +498,15 @@ fn native_group_stack_case(position: &'static str) {
         show_second.store(false, Ordering::Relaxed);
         PostMessageW(windows[1], WM_FRAME_READY, 0, 0);
         wait_for(|| IsWindowVisible(windows[1]) == 0);
+        for handle in backdrops[1] {
+            if !handle.is_null() {
+                assert_eq!(
+                    IsWindowVisible(handle),
+                    0,
+                    "hiding the tab must hide its blur"
+                );
+            }
+        }
         show_second.store(true, Ordering::Relaxed);
         PostMessageW(windows[1], WM_FRAME_READY, 0, 0);
         wait_for(|| IsWindowVisible(windows[1]) != 0);
@@ -472,9 +553,22 @@ fn native_group_stack_case(position: &'static str) {
             std::thread::sleep(Duration::from_millis(5));
         }
         wait_for(|| windows.map(bounds) == original);
+        for slot in 0..2 {
+            check_backdrop(slot, false);
+        }
         assert!(
             !windows.contains(&GetForegroundWindow()),
             "changing overlay stacking must not steal focus"
         );
+        drop(cleanup);
+        for handle in backdrops.into_iter().flatten() {
+            if !handle.is_null() {
+                assert_eq!(
+                    IsWindow(handle),
+                    0,
+                    "closing overlays must remove their blur surfaces"
+                );
+            }
+        }
     }
 }

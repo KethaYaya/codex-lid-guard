@@ -2,9 +2,12 @@
 use super::*;
 use crate::overlay::groups::{GroupSession, ProjectGroup};
 #[path = "overlay_glass.rs"]
-mod glass;
+pub(super) mod glass;
+#[path = "overlay_tab_state.rs"]
+pub(super) mod tab_state;
 
-pub(super) const TAB_WIDTH: i32 = 152;
+// Keep a stable maximum column reservation while individual tabs change width.
+pub(super) const TAB_WIDTH: i32 = tab_state::NOTICE_WIDTH;
 pub(super) const TAB_HEIGHT: i32 = 42;
 pub(super) const PANEL_WIDTH: i32 = 344;
 const HEADER: i32 = 28;
@@ -23,6 +26,7 @@ pub(super) enum Action {
 
 pub(super) struct GroupUi {
     pub group: ProjectGroup,
+    pub tab: tab_state::TabState,
     pub selected: Option<String>,
     remembered: Option<String>,
     order: Vec<String>,
@@ -47,8 +51,10 @@ impl GroupUi {
         group.sessions.sort_by_key(GroupSession::priority);
         let selected = group.sessions.first().map(|s| s.id.clone());
         let order = group.sessions.iter().map(|s| s.id.clone()).collect();
+        let tab = tab_state::TabState::new(&group, Instant::now());
         Self {
             group,
+            tab,
             selected,
             remembered: None,
             order,
@@ -70,6 +76,7 @@ impl GroupUi {
     }
 
     pub fn sync(&mut self, mut group: ProjectGroup) {
+        self.tab.observe(&group, Instant::now());
         for session in &group.sessions {
             if !self.order.contains(&session.id) {
                 self.order.push(session.id.clone());
@@ -722,133 +729,102 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
     }
 }
 
+unsafe fn bead(dc: Handle, session: &GroupSession, x: i32, y: i32, dpi: u32, elapsed: Duration, animate: bool) {
+    unsafe {
+        let d = |n| scale_dip(n, dpi);
+        let unread = session.card.final_message && session.card.attention;
+        let color = if session.needs_input { color_ref(241, 186, 117) }
+            else if session.busy { color_ref(141, 186, 255) }
+            else if unread { color_ref(134, 213, 169) } else { color_ref(174, 187, 200) };
+        let color = if session.busy && !session.needs_input && animate {
+            let pulse = 0.72 + 0.28 * (elapsed.as_secs_f32() * std::f32::consts::TAU / 2.4).cos();
+            blend_color(color_ref(30, 40, 54), color, pulse)
+        } else { color };
+        let pen = CreatePen(0, d(1).max(1), color);
+        let old_pen = SelectObject(dc, pen);
+        let brush = if session.busy || session.needs_input || unread { CreateSolidBrush(color) } else { null_mut() };
+        let old_brush = SelectObject(dc, if brush.is_null() { GetStockObject(5) } else { brush });
+        Ellipse(dc, x-d(2), y-d(2), x+d(3), y+d(3));
+        if session.needs_input || (!session.busy && unread) {
+            SelectObject(dc, GetStockObject(5));
+            Ellipse(dc, x-d(4), y-d(4), x+d(4), y+d(4));
+        }
+        SelectObject(dc, old_brush); SelectObject(dc, old_pen);
+        if !brush.is_null() { DeleteObject(brush); }
+        if !pen.is_null() { DeleteObject(pen); }
+    }
+}
+
+unsafe fn shortcut_badge(dc: Handle, rect: Rect, code: [u8;2], dpi: u32) {
+    unsafe {
+        fill_rounded_rectangle(dc, &rect, color_ref(202,185,139), scale_dip(3,dpi));
+        text(dc, &format!("{} {}", code[0] as char,code[1] as char), rect,
+            color_ref(27,33,40), DT_SINGLELINE | DT_VCENTER | 1);
+    }
+}
+
 pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi: u32) {
     unsafe {
         let Some(ui) = &state.group else { return };
         let d = |n| scale_dip(n, dpi);
         let saved = SaveDC(dc);
         IntersectClipRect(dc, tab.left, tab.top, tab.right, tab.bottom);
-        let left = tab.right - d(TAB_WIDTH);
+        let left = tab.right - d(ui.tab.width);
         let base = Rect { left, ..tab };
         glass::surface(dc, base);
-        fill_rectangle(
-            dc,
-            &Rect {
-                right: left + d(3),
-                ..base
-            },
-            stripe_color(&ui.group),
-        );
-        let small = font(10, 400, dpi);
-        let regular = font(12, 400, dpi);
+        fill_rectangle(dc, &Rect { right: left+d(3), ..base }, stripe_color(&ui.group));
+        let small = font(10,400,dpi);
+        let regular = font(12,400,dpi);
+        let mono = font(10,700,dpi);
         let old = SelectObject(dc, small);
-        let badge = state.shortcut_code;
-        let remaining = ui.group.sessions.len().saturating_sub(1);
-        let reserved = if badge.is_some() {
-            if remaining > 0 { 60 } else { 36 }
-        } else if remaining > 0 {
-            31
+        let notice = matches!(ui.tab.kind, tab_state::Kind::Finished | tab_state::Kind::Question);
+        if notice {
+            let hint = state.shortcut_hints.then_some(state.shortcut_code).flatten();
+            let right = tab.right - d(if hint.is_some() { 34 } else { 8 });
+            text(dc, &ui.group.name, Rect { left:left+d(10), top:tab.top+d(3),right:right-d(48),bottom:tab.top+d(18) },
+                color_ref(191,204,220), DT_SINGLELINE | DT_END_ELLIPSIS);
+            if let Some(session) = ui.tab.notice_session(&ui.group) {
+                text(dc, if session.needs_input { "Needs you" } else { "Done" },
+                    Rect {left:right-d(50),top:tab.top+d(3),right,bottom:tab.top+d(18)},
+                    status_color(session),DT_SINGLELINE | 2);
+                SelectObject(dc,regular);
+                glyph(dc,session,left+d(10),tab.top+d(25),dpi);
+                let question;
+                let label = if session.needs_input {
+                    question = session.card.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if question.is_empty() { session.title() } else { &question }
+                } else { session.title() };
+                text(dc,label,Rect {left:left+d(25),top:tab.top+d(20),right:tab.right-d(8),bottom:tab.top+d(38)},
+                    if session.needs_input { status_color(session) } else { color_ref(242,247,253) },
+                    DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            if let Some(code) = hint {
+                SelectObject(dc,small);
+                shortcut_badge(dc,Rect {left:tab.right-d(31),top:tab.top+d(3),right:tab.right-d(5),bottom:tab.top+d(17)},code,dpi);
+            }
         } else {
-            8
-        };
-        text(
-            dc,
-            &ui.group.name,
-            Rect {
-                left: left + d(10),
-                top: tab.top + d(4),
-                right: tab.right - d(reserved),
-                bottom: tab.top + d(18),
-            },
-            color_ref(191, 204, 220),
-            DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        if let Some(code) = badge {
-            let r = Rect {
-                left: tab.right - d(32),
-                top: tab.top + d(3),
-                right: tab.right - d(6),
-                bottom: tab.top + d(17),
-            };
-            fill_rounded_rectangle(
-                dc,
-                &r,
-                if state.shortcut_hints {
-                    color_ref(202, 185, 139)
-                } else {
-                    color_ref(67, 84, 105)
-                },
-                d(3),
-            );
-            text(
-                dc,
-                &format!("{} {}", code[0] as char, code[1] as char),
-                r,
-                if state.shortcut_hints {
-                    color_ref(27, 33, 40)
-                } else {
-                    color_ref(225, 233, 242)
-                },
-                DT_SINGLELINE | DT_VCENTER | 1,
-            );
-        }
-        if remaining > 0 {
-            let right = tab.right - d(if badge.is_some() { 36 } else { 7 });
-            text(
-                dc,
-                &format!("+{remaining}"),
-                Rect {
-                    left: right - d(20),
-                    top: tab.top + d(4),
-                    right,
-                    bottom: tab.top + d(18),
-                },
-                color_ref(191, 204, 220),
-                DT_SINGLELINE | 2,
-            );
-        }
-        if let Some(session) = ui.group.sessions.first() {
-            SelectObject(dc, regular);
-            glyph(dc, session, left + d(10), tab.top + d(25), dpi);
-            // A small unread dot preserves the distinction between read and new results.
-            if session.card.attention && session.card.final_message && !session.needs_input {
-                fill_rounded_rectangle(
-                    dc,
-                    &Rect {
-                        left: tab.right - d(8),
-                        top: tab.top + d(28),
-                        right: tab.right - d(4),
-                        bottom: tab.top + d(32),
-                    },
-                    status_color(session),
-                    d(4),
-                );
+            SelectObject(dc,mono);
+            let folder = ui.group.path.as_deref().and_then(|path| path.trim_end_matches(['\\','/']).rsplit(['\\','/']).next())
+                .unwrap_or(&ui.group.name);
+            let monogram = folder.chars().next().unwrap_or('?').to_uppercase().to_string();
+            text(dc,&monogram,Rect {left:left+d(3),top:tab.top+d(2),right:left+d(18),bottom:tab.top+d(15)},
+                identity_color(&ui.group.key),DT_SINGLELINE | DT_VCENTER | 1);
+            for (i,session) in ui.group.sessions.iter().take(3).enumerate() {
+                bead(dc,session,left+d(10),tab.top+d(19+i as i32*7),dpi,state.activity_started.elapsed(),state.animate);
             }
-            text(
-                dc,
-                session.title(),
-                Rect {
-                    left: left + d(25),
-                    top: tab.top + d(20),
-                    right: tab.right - d(10),
-                    bottom: tab.top + d(38),
-                },
-                if session.needs_input {
-                    status_color(session)
-                } else {
-                    color_ref(242, 247, 253)
-                },
-                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-            );
-        }
-        SelectObject(dc, old);
-        for handle in [small, regular] {
-            if !handle.is_null() {
-                DeleteObject(handle);
+            if ui.group.sessions.len() >= 4 {
+                fill_rounded_rectangle(dc,&Rect {left:left+d(8),right:left+d(13),top:tab.top+d(38),bottom:tab.top+d(40)},
+                    color_ref(111,129,150),d(1));
+            }
+            if state.shortcut_hints && let Some(code) = state.shortcut_code {
+                SelectObject(dc,small);
+                shortcut_badge(dc,Rect {left:left+d(19),top:tab.top+d(14),right:left+d(43),bottom:tab.top+d(29)},code,dpi);
             }
         }
-        glass::rim(dc, base, d(6));
-        RestoreDC(dc, saved);
+        SelectObject(dc,old);
+        for handle in [small,regular,mono] { if !handle.is_null() { DeleteObject(handle); } }
+        glass::rim(dc,base,d(6));
+        RestoreDC(dc,saved);
     }
 }
 
@@ -1024,13 +1000,17 @@ mod tests {
         unsafe {
             let reference = GetDC(null_mut());
             assert!(!reference.is_null());
-            for (dpi, session_count, shortcut_hints) in [
-                (96, 3, false),
-                (144, 3, false),
-                (192, 3, false),
-                (96, 1, false),
-                (96, 5, true),
-                (192, 10, false),
+            for (dpi, session_count, shortcut_hints, mode) in [
+                (96, 3, false, 0),
+                (144, 3, false, 0),
+                (192, 3, false, 0),
+                (96, 1, false, 1),
+                (96, 5, true, 0),
+                (192, 10, false, 0),
+                (96, 4, false, 1),
+                (96, 4, true, 1),
+                (96, 3, false, 2),
+                (192, 4, true, 1),
             ] {
                 let mut sample = group();
                 sample.sessions.truncate(session_count);
@@ -1040,6 +1020,7 @@ mod tests {
                 sample.sessions[0].card.text="Checking redraw timing after minimizing VS Code. The selected session stays in place as updates arrive.".into();
                 if let Some(session) = sample.sessions.get_mut(1) {
                     session.card.label = "CodexLidGuard — Simplify tab labels".into();
+                    session.card.text = "Simplify tab labels?".into();
                     session.needs_input = true;
                 }
                 if let Some(session) = sample.sessions.get_mut(2) {
@@ -1048,7 +1029,13 @@ mod tests {
                     session.card.final_message = true;
                     session.card.attention = true;
                 }
+                if mode != 0 {
+                    for session in &mut sample.sessions { session.needs_input = false; session.busy = true; session.card.attention = false; }
+                    if mode == 2 { sample.sessions[0].busy = false; sample.sessions[0].card.final_message = true; sample.sessions[0].card.attention = true; }
+                    else if sample.sessions.len() > 2 { sample.sessions[2].busy = false; sample.sessions[2].card.final_message = false; }
+                }
                 let mut ui = GroupUi::new(sample);
+                ui.tab.tick(&ui.group, shortcut_hints, false, Instant::now());
                 ui.select("0".into());
                 ui.layout(scale_dip(PANEL_WIDTH, dpi), scale_dip(480, dpi), dpi);
                 let state = OverlayState {
@@ -1074,6 +1061,7 @@ mod tests {
                     activity_started: Instant::now(),
                     buffer: PaintBuffer::default(),
                     panel_buffer: PaintBuffer::default(),
+                    material: glass::PaintCache::default(),
                     panel_dirty: true,
                     panel_size: (1, 1),
                     shortcut_code: Some(*b"CL"),
@@ -1142,7 +1130,7 @@ mod tests {
                 }
                 let ui = state.group.as_ref().unwrap();
                 assert!(
-                    matches!(ui.hit(scale_dip(22,dpi),scale_dip(if session_count > 1 {70} else {42},dpi)),Some(Action::Select(id)) if id=="0")
+                    matches!(ui.hit(scale_dip(22,dpi),scale_dip(42 + 28 * ui.group.sessions.iter().position(|s| s.id == "0").unwrap() as i32,dpi)),Some(Action::Select(id)) if id=="0")
                 );
                 if let Some(directory) = std::env::var_os("CODEX_OVERLAY_RENDER_DIR") {
                     #[link(name = "gdi32")]
@@ -1162,9 +1150,9 @@ mod tests {
                     }
                     std::fs::create_dir_all(&directory).unwrap();
                     std::fs::write(
-                        std::path::Path::new(&directory).join(if session_count == 3 && !shortcut_hints {
+                        std::path::Path::new(&directory).join(if session_count == 3 && !shortcut_hints && mode == 0 {
                             format!("project-overlay-{dpi}.ppm")
-                        } else { format!("project-overlay-{dpi}-{session_count}-hints{shortcut_hints}.ppm") }),
+                        } else { format!("project-overlay-{dpi}-{session_count}-hints{shortcut_hints}-mode{mode}.ppm") }),
                         bytes,
                     )
                     .unwrap();

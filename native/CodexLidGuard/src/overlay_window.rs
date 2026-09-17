@@ -15,6 +15,8 @@ use overlay_dock::{DockLayout, TabPlacement, arrival_layout_custom, dock_layout_
 mod group_window;
 #[path = "overlay_group_stack.rs"]
 mod group_stack;
+#[path = "overlay_backdrop.rs"]
+mod overlay_backdrop;
 use group_window::{GroupUi, Action as GroupAction};
 #[cfg(test)]
 use overlay_dock::dock_layout;
@@ -226,6 +228,7 @@ struct OverlayState {
     activity_started: Instant,
     buffer: PaintBuffer,
     panel_buffer: PaintBuffer,
+    material: group_window::glass::PaintCache,
     panel_dirty: bool,
     panel_size: (i32, i32),
     shortcut_code: Option<[u8; 2]>,
@@ -627,6 +630,7 @@ fn run_overlay_inner(
             activity_started: Instant::now(),
             buffer: PaintBuffer::default(),
             panel_buffer: PaintBuffer::default(),
+            material: group_window::glass::PaintCache::default(),
             panel_dirty: true,
             panel_size: (1, 1),
             shortcut_code: None,
@@ -672,6 +676,8 @@ fn run_overlay_inner(
             let mut motion = Motion::new(started);
             let mut dock = DockMotion::new(started);
             let mut stack_motion = group_stack::PlacementMotion::default();
+            let mut backdrop: Option<overlay_backdrop::Backdrop> = None;
+            let mut backdrop_attempted = false;
             let mut dock_center = None;
             let mut dense_tab = None;
             let mut dock_request = 0;
@@ -703,6 +709,7 @@ fn run_overlay_inner(
                             state.layout = None;
                             motion = Motion::new(now);
                             ShowWindow(window, 0);
+                            if let Some(backdrop) = &mut backdrop { backdrop.hide(); }
                             visible = false;
                         }
                         reset_layered_mode(window);
@@ -1080,7 +1087,14 @@ fn run_overlay_inner(
                         state.shortcut_token = 0;
                     }
                 }
+                let mut tab_moving = false;
+                if let Some(ui) = &mut state.group {
+                    let (changed, moving) = ui.tab.tick(&ui.group, state.shortcut_hints, animate, now);
+                    repaint |= changed;
+                    tab_moving = moving;
+                }
                 if state.rows.is_empty() {
+                    if let Some(backdrop) = &mut backdrop { backdrop.hide(); }
                     cancel_hover(window, &mut state);
                     cancel_keyboard_preview(window, &mut state);
                     state.collapsed = false;
@@ -1104,6 +1118,7 @@ fn run_overlay_inner(
                         break;
                     }
                 } else if let Some(open) = &mut opening {
+                    if let Some(backdrop) = &mut backdrop { backdrop.hide(); }
                     if let Some(surface) = &mut open.surface {
                         let (growth, fade, _) = open.motion.sample(real);
                         let bounds = opening_bounds(open.from, open.to, growth);
@@ -1140,10 +1155,10 @@ fn run_overlay_inner(
                         * if position.starts_with("top") { -1 } else { 1 };
                     if state.group.is_none() { bounds.top += slide; bounds.bottom += slide; }
                     let layout = if let Some(progress) = arrival_progress {
-                        if state.group.is_some() { overlay_dock::arrival_layout_sized(bounds,work,progress,dpi,dense_tab,scale_dip(group_window::TAB_WIDTH,dpi)) }
+                        if state.group.is_some() { overlay_dock::arrival_layout_sized(bounds,work,progress,dpi,dense_tab,overlay_tab_width(&state)) }
                         else { arrival_layout_custom(bounds, work, progress, dpi, dense_tab) }
                     } else {
-                        if state.group.is_some() { overlay_dock::dock_layout_sized(bounds,draw_work,docked,dpi,None,dense_tab,scale_dip(group_window::TAB_WIDTH,dpi)) }
+                        if state.group.is_some() { overlay_dock::dock_layout_sized(bounds,draw_work,docked,dpi,None,dense_tab,overlay_tab_width(&state)) }
                         else { dock_layout_custom(bounds, work, docked, dpi, dock_center, dense_tab) }
                     };
                     let shape_changed = state.layout != Some(layout);
@@ -1151,9 +1166,21 @@ fn run_overlay_inner(
                     let bounds = layout.window;
                     let window_width = bounds.right - bounds.left;
                     let window_height = bounds.bottom - bounds.top;
-                    let alpha =
-                        (panel * (opacity.clamp(30, 100) as u16 * 255 / 100) as f32).round() as u8;
-                    let compositor_started = state.compositor.is_none() && (docking || stack_moving) && arrival.is_none();
+                    if state.group.is_some() && opacity < 100 && !backdrop_attempted {
+                        backdrop_attempted = true;
+                        match overlay_backdrop::Backdrop::new(window) {
+                            Ok(surface) => backdrop = Some(surface),
+                            Err(cause) => logging::write(format!("Overlay blur unavailable; keeping glass tint: {cause}")),
+                        }
+                    }
+                    // Keep labels readable against sharp desktop content on older Windows.
+                    let effective_opacity = if state.group.is_some() && backdrop.is_none() { opacity.max(82) } else { opacity };
+                    let tint = (effective_opacity.clamp(30, 100) as u16 * 255 / 100) as u8;
+                    let material = (state.group.is_some() && tint < 255).then_some(tint);
+                    if state.material.tint != material { state.panel_dirty = true; repaint = true; }
+                    state.material.tint = material;
+                    let alpha = (panel * if state.group.is_some() { 255.0 } else { tint as f32 }).round() as u8;
+                    let compositor_started = state.compositor.is_none() && (state.group.is_some() || docking || stack_moving || tab_moving) && arrival.is_none();
                     if compositor_started {
                         state.compositor = Some(FrameSurface::new(
                             window_width.max(width + overlay_tab_width(&state)),
@@ -1214,25 +1241,35 @@ fn run_overlay_inner(
                             UpdateWindow(window);
                         }
                     }
+                    let backdrop_failed = if let Some(surface) = &mut backdrop {
+                        if state.group.is_some() && alpha > 0 && opacity < 100 {
+                            if let Err(cause) = surface.present(window,layout,dpi) {
+                                logging::write(format!("Overlay blur stopped; keeping glass tint: {cause}"));
+                                true
+                            } else { false }
+                        } else { surface.hide(); false }
+                    } else { false };
+                    if backdrop_failed { backdrop = None; }
                     if let Some(placement) = stack_placement && !stack_moving {
                         group_stack::painted(window, placement, state.collapsed && !docking && docked >= 1.0);
                     }
                 }
                 // Fast ticks only draw animation; transcript/settings polling stays at 250 ms.
-                let needs_timer = opening.as_ref().map_or(moving || docking || stack_moving || arrival.is_some(),
+                let needs_timer = opening.as_ref().map_or(moving || docking || stack_moving || tab_moving || arrival.is_some(),
                     |open| open.motion.sample(real).2)
                     && !state.clicks.frozen()
                     && !state.tab_pressed;
                 frame_timer.update(needs_timer)?;
                 let needs_activity = needs_activity_timer(
                     visible,
-                    animate && !needs_timer && opening.is_none() && state.group.is_none(),
-                    state.attention,
+                    animate && !needs_timer && opening.is_none() && state.group.as_ref().is_none_or(|ui|
+                        state.collapsed && !docking && matches!(ui.tab.kind, group_window::tab_state::Kind::Calm | group_window::tab_state::Kind::Hint)),
+                    state.attention && state.group.is_none(),
                     state.busy,
                 );
                 if needs_activity != activity_timer {
                     if needs_activity {
-                        if SetTimer(window, 4, 33, null()) == 0 {
+                        if SetTimer(window, 4, if state.group.is_some() { 80 } else { 33 }, null()) == 0 {
                             return Err(error("Start overlay activity timer"));
                         }
                     } else {
@@ -1404,6 +1441,15 @@ fn run_overlay_inner(
                         }
                         if message.wparam == 4 {
                             // Paint only: no feed reads, text measurements, motion or window resizing.
+                            if activity_timer && state.group.is_some() {
+                                // Only the tiny tab is animated; keep the drawer's cached text.
+                                let dc = GetDC(window);
+                                let result = if state.compositor.is_some() { paint_composited_frame(window, dc, &mut state) }
+                                    else { InvalidateRect(window, null(), 0); UpdateWindow(window); Ok(()) };
+                                ReleaseDC(window, dc);
+                                result?;
+                                continue;
+                            }
                             if activity_timer {
                                 state.panel_dirty = true;
                                 paint_activity(window, &state);
@@ -1434,7 +1480,7 @@ fn run_overlay_inner(
                             let system_animated = SystemParametersInfoW(0x0048, animation[0],
                                 animation.as_mut_ptr().cast(), 0) == 0 || animation[1] != 0;
                             let mut surface = if animate && system_animated {
-                                match OpenSurface::capture(state.buffer.dc, layout, state.dpi.max(96), to) {
+                                match OpenSurface::capture(state.compositor.as_ref().map_or(state.buffer.dc, FrameSurface::cached_dc), layout, state.dpi.max(96), to, state.compositor.is_some()) {
                                     Ok(surface) => Some(surface),
                                     Err(cause) => { logging::write(format!("Could not prepare editor restore animation: {cause}")); None }
                                 }
@@ -1448,6 +1494,7 @@ fn run_overlay_inner(
                             arrival = None;
                             state.compositor = None;
                             state.restoring = true;
+                            if let Some(backdrop) = &mut backdrop { backdrop.hide(); }
                             SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
                             let failed_surface = if let Some(surface) = &mut surface {
                                 reset_layered_mode(window);
@@ -1565,7 +1612,7 @@ fn selected_card(state:&OverlayState)->Option<&Card>{
 }
 
 fn overlay_tab_width(state:&OverlayState)->i32{
-    scale_dip(if state.group.is_some(){group_window::TAB_WIDTH}else{28},state.dpi.max(96))
+    scale_dip(state.group.as_ref().map_or(28, |ui| ui.tab.width),state.dpi.max(96))
 }
 
 fn card_at(state: &OverlayState, bounds: Rect, x: i32, y: i32) -> Option<usize> {
@@ -2027,9 +2074,11 @@ unsafe fn paint_overlay_buffer(reference: Handle, state: &mut OverlayState, rect
     unsafe {
         let dpi = state.dpi.max(96);
         // Keep the full panel allocation while clipping its visible slice.
-        let dc = state.buffer.get(reference,
-            rect.right.max(state.panel_size.0 + overlay_tab_width(state)),
-            rect.bottom.max(state.panel_size.1));
+        let width = rect.right.max(state.panel_size.0 + overlay_tab_width(state));
+        let height = rect.bottom.max(state.panel_size.1);
+        let buffer = if state.material.pass == 0 { &mut state.buffer }
+            else { &mut state.material.frames[state.material.pass-1] };
+        let dc = buffer.get(reference, width, height);
         fill_rectangle(dc, &rect, 0x00241e1a);
         SetBkMode(dc, TRANSPARENT);
         let old_font = SelectObject(dc, state.font);
@@ -2138,15 +2187,29 @@ unsafe fn paint_composited_frame(window: Hwnd, reference: Handle, state: &mut Ov
         let Some(layout) = state.layout else { return Ok(()); };
         let rect = Rect { left: 0, top: 0, right: layout.window.right - layout.window.left,
             bottom: layout.window.bottom - layout.window.top };
+        let dirty = state.panel_dirty;
         let cached = paint_overlay_buffer(reference, state, rect);
-        state.compositor.as_mut().unwrap().present(window, cached, layout, state.dpi.max(96), state.render_alpha)
+        let material = if let Some(tint) = state.material.tint {
+            let mut samples = [null_mut(); 2];
+            for (i, sample) in samples.iter_mut().enumerate() {
+                state.material.pass = i+1;
+                state.panel_dirty = dirty;
+                *sample = group_window::glass::with_background(if i == 0 { 0 } else { 0xffffff },
+                    || paint_overlay_buffer(reference, state, rect));
+            }
+            state.material.pass = 0;
+            Some((samples, tint))
+        } else { None };
+        state.compositor.as_mut().unwrap().present_material(window, cached, layout, state.dpi.max(96), state.render_alpha, material)
     }
 }
 
 unsafe fn paint_cached_panel(dc: Handle, state: &mut OverlayState, panel: Rect) {
     unsafe {
         let (width, height) = state.panel_size;
-        let cached = state.panel_buffer.get(dc, width, height);
+        let buffer = if state.material.pass == 0 { &mut state.panel_buffer }
+            else { &mut state.material.panels[state.material.pass-1] };
+        let cached = buffer.get(dc, width, height);
         if cached == dc {
             // Allocation failure still leaves a readable, correctly positioned message.
             SetViewportOrgEx(dc, panel.left, panel.top, null_mut());
@@ -3836,6 +3899,7 @@ mod tests {
                 activity_started: Instant::now(),
                 buffer: PaintBuffer::default(),
                 panel_buffer: PaintBuffer::default(),
+                material: group_window::glass::PaintCache::default(),
                 panel_dirty: true,
                 panel_size: (1, 1),
                 shortcut_code: None,
@@ -3940,6 +4004,7 @@ mod tests {
             activity_started: Instant::now(),
             buffer: PaintBuffer::default(),
             panel_buffer: PaintBuffer::default(),
+            material: group_window::glass::PaintCache::default(),
             panel_dirty: true,
             panel_size: (1, 1),
             shortcut_code: None,
