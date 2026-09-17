@@ -1,6 +1,8 @@
 //! Compact task-list tabs and a fixed master-detail project drawer.
 use super::*;
 use crate::overlay::groups::{GroupSession, ProjectGroup};
+#[path = "overlay_glass.rs"]
+mod glass;
 
 pub(super) const TAB_WIDTH: i32 = 152;
 pub(super) const TAB_HEIGHT: i32 = 42;
@@ -452,11 +454,11 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
         let Some(ui) = &state.group else { return };
         let dpi = state.dpi.max(96);
         let d = |n| scale_dip(n, dpi);
-        let foreground = color_ref(237, 242, 247);
-        let muted = color_ref(174, 187, 200);
-        let subtle = color_ref(139, 152, 165);
-        let edge = color_ref(57, 69, 81);
-        fill_rectangle(dc, &rect, color_ref(27, 33, 40));
+        let foreground = color_ref(242, 247, 253);
+        let muted = color_ref(191, 204, 220);
+        let subtle = color_ref(164, 181, 201);
+        let edge = color_ref(65, 83, 105);
+        glass::surface(dc, rect);
         fill_rectangle(
             dc,
             &Rect {
@@ -555,23 +557,23 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             let y = ui.list.top + d(ROW) * index as i32;
             let selected = ui.selected.as_ref() == Some(&session.id);
             if selected {
-                fill_rectangle(
+                glass::plate(
                     dc,
-                    &Rect {
-                        left: 0,
-                        top: y,
-                        right: rect.right,
-                        bottom: y + d(ROW),
+                    Rect {
+                        left: d(7),
+                        top: y + d(1),
+                        right: rect.right - d(7),
+                        bottom: y + d(ROW) - d(1),
                     },
-                    color_ref(35, 43, 52),
+                    dpi,
                 );
                 fill_rectangle(
                     dc,
                     &Rect {
-                        left: 0,
-                        top: y,
-                        right: d(2),
-                        bottom: y + d(ROW),
+                        left: d(7),
+                        top: y + d(7),
+                        right: d(9),
+                        bottom: y + d(ROW) - d(7),
                     },
                     identity_color(&ui.group.key),
                 );
@@ -666,6 +668,10 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             } else {
                 "Open chat \u{2197}"
             };
+            glass::plate(dc, Rect {
+                left: d(12), top: y + d(47),
+                right: d(128), bottom: y + d(72),
+            }, dpi);
             text(
                 dc,
                 action,
@@ -706,6 +712,7 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
                 );
             }
         }
+        glass::rim(dc, rect, d(9));
         SelectObject(dc, old);
         for handle in [regular, heading, small, action_font] {
             if !handle.is_null() {
@@ -723,7 +730,7 @@ pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi:
         IntersectClipRect(dc, tab.left, tab.top, tab.right, tab.bottom);
         let left = tab.right - d(TAB_WIDTH);
         let base = Rect { left, ..tab };
-        fill_rectangle(dc, &base, color_ref(27, 33, 40));
+        glass::surface(dc, base);
         fill_rectangle(
             dc,
             &Rect {
@@ -753,7 +760,7 @@ pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi:
                 right: tab.right - d(reserved),
                 bottom: tab.top + d(18),
             },
-            color_ref(174, 187, 200),
+            color_ref(191, 204, 220),
             DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         if let Some(code) = badge {
@@ -769,7 +776,7 @@ pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi:
                 if state.shortcut_hints {
                     color_ref(202, 185, 139)
                 } else {
-                    color_ref(52, 64, 75)
+                    color_ref(67, 84, 105)
                 },
                 d(3),
             );
@@ -796,7 +803,7 @@ pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi:
                     right,
                     bottom: tab.top + d(18),
                 },
-                color_ref(174, 187, 200),
+                color_ref(191, 204, 220),
                 DT_SINGLELINE | 2,
             );
         }
@@ -829,7 +836,7 @@ pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi:
                 if session.needs_input {
                     status_color(session)
                 } else {
-                    color_ref(237, 242, 247)
+                    color_ref(242, 247, 253)
                 },
                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
@@ -840,6 +847,7 @@ pub(super) unsafe fn paint_tab(dc: Handle, tab: Rect, state: &OverlayState, dpi:
                 DeleteObject(handle);
             }
         }
+        glass::rim(dc, base, d(6));
         RestoreDC(dc, saved);
     }
 }
@@ -1092,27 +1100,46 @@ mod tests {
                 );
                 SetBkMode(dc, TRANSPARENT);
                 SelectObject(dc, state.font);
-                paint_panel(
-                    dc,
-                    &state,
-                    Rect {
-                        left: 0,
-                        top: 0,
-                        right: scale_dip(PANEL_WIDTH, dpi),
-                        bottom: height,
-                    },
-                );
-                paint_tab(
-                    dc,
-                    Rect {
-                        left: scale_dip(PANEL_WIDTH + 20, dpi),
-                        top: 0,
-                        right: width,
-                        bottom: scale_dip(state.group.as_ref().unwrap().tab_height(), dpi),
-                    },
-                    &state,
-                    dpi,
-                );
+                // Opt-in cold-paint benchmark; normal frames reuse the drawer cache.
+                let iterations = std::env::var("CODEX_OVERLAY_BENCH_ITERATIONS")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 10_000);
+                #[link(name = "gdi32")]
+                unsafe extern "system" {
+                    fn GdiFlush() -> Bool;
+                }
+                GdiFlush();
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    paint_panel(
+                        dc,
+                        &state,
+                        Rect {
+                            left: 0,
+                            top: 0,
+                            right: scale_dip(PANEL_WIDTH, dpi),
+                            bottom: height,
+                        },
+                    );
+                    paint_tab(
+                        dc,
+                        Rect {
+                            left: scale_dip(PANEL_WIDTH + 20, dpi),
+                            top: 0,
+                            right: width,
+                            bottom: scale_dip(state.group.as_ref().unwrap().tab_height(), dpi),
+                        },
+                        &state,
+                        dpi,
+                    );
+                    GdiFlush();
+                }
+                if iterations > 1 {
+                    println!("overlay paint: dpi={dpi} sessions={session_count} iterations={iterations} us_per_pair={:.2}",
+                        started.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(iterations));
+                }
                 let ui = state.group.as_ref().unwrap();
                 assert!(
                     matches!(ui.hit(scale_dip(22,dpi),scale_dip(if session_count > 1 {70} else {42},dpi)),Some(Action::Select(id)) if id=="0")

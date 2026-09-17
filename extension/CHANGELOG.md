@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Give project tabs and drawers a dark glass appearance with translucent surfaces, soft highlights, fine edges, and inset selection and action controls. Keep the existing opacity setting and cached drawing path; no live background blur or extra animation timers.
+
 ## 0.2.5
 
 - Keep assigned two-letter shortcuts visible on compact project tabs. Use a quiet badge normally and highlight it while the shortcut prefix is held. Keep the extra-session count visible alongside it.

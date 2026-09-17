@@ -51,6 +51,10 @@ To try the controls without starting a task, run **Codex Lid Guard: Preview Mess
 
 ## Message overlays
 
+Tabs and drawers use a dark glass style with soft highlights and fine edges. Adjust **Overlay Opacity** to control transparency. The glass lighting is static, so it adds no continuous animation or live background blur.
+
+![Project tabs and a glass drawer with a selected session.](images/screenshots/overlay-project-groups.png)
+
 Each project has a small 152 by 42 DIP tab showing its name, highest-priority task, status icon, and a +N count for other sessions. Expand it to see a 344 DIP drawer with up to four compact task rows, a two-line update, and Open/Dismiss actions. Larger lists scroll; selecting a task keeps the rows in place. Neighboring tabs visibly slide aside first; expansion waits until they are clear. Tabs slide back only after the drawer has fully folded. Switching projects folds the previous drawer first. The expanded project stays above sibling tabs without taking keyboard focus. Same-named folders get distinct path labels, with their full path shown in the drawer header.
 
 The session currently viewed in a focused editor hides from the preview; other sessions in its project remain available. The project tab hides when it has no visible sessions. It returns when you switch away.
