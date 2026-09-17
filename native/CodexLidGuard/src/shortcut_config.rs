@@ -54,6 +54,17 @@ fn key(value: &str) -> Option<u32> {
     })
 }
 
+pub(crate) fn display_key(key: u32) -> String {
+    match key {
+        0x09 => "Tab", 0x0d => "Enter", 0x1b => "Esc", 0x20 => "Space",
+        0x08 => "Backspace", 0x2e => "Delete", 0x2d => "Insert",
+        0x24 => "Home", 0x23 => "End", 0x21 => "PageUp", 0x22 => "PageDown",
+        0x25 => "Left", 0x26 => "Up", 0x27 => "Right", 0x28 => "Down",
+        0x70..=0x87 => return format!("F{}", key - 0x6f),
+        _ => return String::new(),
+    }.into()
+}
+
 impl ShortcutConfig {
     pub fn parse(settings: &ShortcutSettings) -> Option<Self> {
         let prefix = settings.prefix.trim();

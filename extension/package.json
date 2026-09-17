@@ -3,7 +3,7 @@
   "displayName": "Codex Lid Guard",
   "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
   "icon": "images/codex-lid-guard-logo.png",
-  "version": "0.2.1",
+  "version": "0.2.5",
   "publisher": "KethaYaya",
   "license": "MIT",
   "pricing": "Free",
@@ -147,7 +147,7 @@
           "minimum": 1,
           "maximum": 10,
           "scope": "application",
-          "description": "Maximum number of recent chat overlay tabs, from 1 to 10. Changes apply immediately. Higher limits pack tabs more closely; expanded previews can overlap."
+          "description": "Maximum number of project overlay tabs, from 1 to 10. Each project groups its recent sessions. One project preview expands at a time; changes apply immediately."
         },
         "codexLidGuard.overlayShortcutsEnabled": {
           "type": "boolean",
@@ -253,7 +253,7 @@
             "F24"
           ],
           "scope": "application",
-          "description": "Key pressed after selecting a tab to open its chat. The second tab letter also works. Must differ from the cycle and close keys."
+          "description": "Key pressed after selecting a project tab to open its selected session. The second tab letter also works. Must differ from the cycle and close keys."
         },
         "codexLidGuard.overlayCloseKey": {
           "type": "string",
@@ -300,7 +300,7 @@
             "F24"
           ],
           "scope": "application",
-          "description": "Key pressed after selecting a tab to dismiss it. With no selection, cancels the shortcut. Must differ from the cycle and open keys."
+          "description": "Key pressed after selecting a project tab to dismiss only its selected session. With no selection, cancels the shortcut. Must differ from the cycle and open keys."
         },
         "codexLidGuard.alertSounds": {
           "type": "boolean",

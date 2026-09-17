@@ -68,6 +68,12 @@ impl Default for Keys {
 }
 
 impl Keys {
+    pub(super) fn prefix_held(&self) -> bool {
+        let modifiers = [(WIN, [0x5b, 0x5c, 0x5b]), (SHIFT, [0xa0, 0xa1, 0x10]),
+            (CTRL, [0xa2, 0xa3, 0x11]), (ALT, [0xa4, 0xa5, 0x12])]
+            .iter().fold(0, |flags, (flag, keys)| flags | if keys.iter().any(|key| self.down[*key]) { *flag } else { 0 });
+        self.config.enabled && self.down[self.config.trigger as usize] && modifiers == self.config.modifiers
+    }
     pub(super) fn set_expanded(&mut self, expanded: [Option<Binding>; crate::overlay::SESSION_LIMIT]) {
         if self.tab_target.is_some_and(|(_, binding)|
             self.expanded.contains(&Some(binding)) && !expanded.contains(&Some(binding))) {

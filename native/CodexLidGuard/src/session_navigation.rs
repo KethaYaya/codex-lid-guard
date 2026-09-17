@@ -28,7 +28,7 @@ pub struct Project {
     pub executable: String,
 }
 
-fn normalized_path(value: &str) -> String {
+pub(crate) fn normalized_path(value: &str) -> String {
     let value = value.strip_prefix(r"\\?\").unwrap_or(value).replace('/', "\\");
     let mut normalized = std::path::PathBuf::new();
     for component in Path::new(&value).components() {

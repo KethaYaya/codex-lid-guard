@@ -373,11 +373,15 @@ pub fn frames(settings: &GuardSettings) -> Vec<crate::overlay::Frame> {
             let window = task.window.load(Ordering::Acquire);
             let attention = !view.pending.is_empty() || !view.busy;
             Some(Frame {
+                group: None,
+                project_path: Some(view.cwd.clone()),
+                needs_input: !view.pending.is_empty(),
                 session_id: Some(task.id.clone()),
                 activity: view.activity,
                 cards: vec![Card {
                     id: view.activity,
-                    label: format!("Background · {}", view.title),
+                    label: format!("{} — {}", Path::new(&view.cwd).file_name()
+                        .unwrap_or_default().to_string_lossy(), view.title),
                     text: if !view.pending.is_empty() {
                         "Needs your response. Open this tab to continue.".into()
                     } else {

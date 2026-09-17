@@ -66,7 +66,12 @@ pub(super) fn arrival_layout(expanded: Rect, work: Rect, progress: f32, dpi: u32
 }
 
 pub(super) fn arrival_layout_custom(expanded: Rect, work: Rect, progress: f32, dpi: u32, tab: Option<TabPlacement>) -> DockLayout {
-    let target = dock_layout_custom(expanded, work, 1.0, dpi, None, tab);
+    arrival_layout_sized(expanded, work, progress, dpi, tab, scale_dip(28, dpi))
+}
+
+pub(super) fn arrival_layout_sized(expanded: Rect, work: Rect, progress: f32, dpi: u32,
+    tab: Option<TabPlacement>, tab_width: i32) -> DockLayout {
+    let target = dock_layout_sized(expanded, work, 1.0, dpi, None, tab, tab_width);
     if progress >= 1.0 {
         return target;
     }
@@ -106,9 +111,16 @@ pub(super) fn dock_layout_custom(
     expanded: Rect, work: Rect, progress: f32, dpi: u32,
     tab_center: Option<i32>, tab: Option<TabPlacement>,
 ) -> DockLayout {
+    dock_layout_sized(expanded, work, progress, dpi, tab_center, tab, scale_dip(28, dpi))
+}
+
+pub(super) fn dock_layout_sized(
+    expanded: Rect, work: Rect, progress: f32, dpi: u32,
+    tab_center: Option<i32>, tab: Option<TabPlacement>, tab_width: i32,
+) -> DockLayout {
     let width = expanded.right - expanded.left;
     let height = expanded.bottom - expanded.top;
-    let tab_width = scale_dip(28, dpi).min(work.right - work.left);
+    let tab_width = tab_width.min(work.right - work.left);
     let tab_height = tab.map_or(scale_dip(64, dpi), |tab| tab.height).min(height);
     let travel = work.right - expanded.left;
     let distance = (travel as f32 * progress.clamp(0.0, 1.0)).round() as i32;

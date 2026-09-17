@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.5
+
+- Keep assigned two-letter shortcuts visible on compact project tabs. Use a quiet badge normally and highlight it while the shortcut prefix is held. Keep the extra-session count visible alongside it.
+
+## 0.2.4
+
+- Halve overlay animation time: neighboring tabs slide in 90 ms and drawers expand or fold in 120 ms. Preserve the clearance check before expansion and the wait before tabs return.
+
+## 0.2.3
+
+- Slide neighboring tabs clear before opening a drawer, then slide them back only after folding finishes. Wait for the final painted positions so expanding panels cannot cover tabs still in motion.
+- Keep rapid animation reversals safe and respect reduced-motion preferences. Verify visible intermediate slide positions and opening/folding order in native interaction tests.
+
+## 0.2.2
+
+- Group overlays by project, with minimal two-line tabs showing the project, priority task, status icon, and extra-session count. Use an amber project stripe while a session needs a response.
+- Reduce drawers to 344 DIP wide with up to four 28 DIP task rows and a two-line preview. Selecting a task does not reflow the list; larger lists scroll within the drawer. Put Open chat and Dismiss directly below the preview.
+- Prioritize needs-response, working, unread completion, then idle/read completion while preserving the selected session and stable order within each status group. Distinguish same-named projects with path labels.
+- Move neighboring tabs aside before expansion and return them after folding; wrap long stacks into another column when needed. Always raise an expanded project above sibling tabs without taking keyboard focus, including hover, click, keyboard, refresh, and tab-return paths.
+- Reveal shortcut letter codes only while the prefix key is held. Enter opens the selected session; Escape dismisses only that session. The header chevron or existing Tab shortcut folds the project.
+- Update the native demo to show two projects and five sample sessions.
+
 ## 0.2.1
 
 - Show actual assistant updates and final replies from newer Codex sessions that use `item_completed` / `AgentMessage` records. Previously these chats could stay on the generic working and completion messages.

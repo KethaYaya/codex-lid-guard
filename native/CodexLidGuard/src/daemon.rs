@@ -434,6 +434,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -
             "associate-window" => associate_window(&mut state, &request),
             "sound-done" => state.snapshot(true, "Completion alert scheduled."),
             "sound-request" => {
+                if let Some(session)=&request.session_id {crate::overlay::needs_response(session);}
                 alert_window = origin_window_for_request(&state, &request);
                 alert_session_is_current =
                     origin_session_is_current(&state, &request, alert_window);

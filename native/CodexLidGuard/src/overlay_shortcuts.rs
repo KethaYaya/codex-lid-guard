@@ -79,9 +79,20 @@ unsafe extern "system" {
 struct HookState {
     keys: Keys,
     bindings: [Option<Binding>; SESSION_LIMIT],
+    hints_visible: bool,
 }
 thread_local! {
-    static HOOK_STATE: RefCell<HookState> = RefCell::new(HookState { keys: Keys::default(), bindings: [None; SESSION_LIMIT] });
+    static HOOK_STATE: RefCell<HookState> = RefCell::new(HookState { keys: Keys::default(), bindings: [None; SESSION_LIMIT], hints_visible: false });
+}
+
+fn publish_hints(state: &mut HookState, bindings_changed: bool) {
+    let visible = state.keys.prefix_held();
+    if visible != state.hints_visible || bindings_changed {
+        state.hints_visible = visible;
+        for binding in state.bindings.iter().flatten() {
+            unsafe { PostMessageW(binding.window as Hwnd, WM_OVERLAY_SHORTCUT, binding.token, if visible { 8 } else { 9 }); }
+        }
+    }
 }
 
 unsafe fn dispatch(action: Action) {
@@ -123,13 +134,15 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: Wparam, lparam: Lpara
         let outcome = HOOK_STATE.with(|state| {
             let mut state = state.borrow_mut();
             let bindings = state.bindings;
-            state.keys.event(
+            let outcome = state.keys.event(
                 event.key,
                 down,
                 Instant::now(),
                 GetForegroundWindow() as usize,
                 &bindings,
-            )
+            );
+            publish_hints(&mut state, false);
+            outcome
         });
         if outcome.mask_windows_key {
             // Prefix modifiers already passed through. Mark Win/Alt as used so
@@ -238,11 +251,13 @@ impl OverlayShortcuts {
                         if let Some(action) = state.keys.configure(worker.config.lock().unwrap().clone()) {
                             dispatch(action);
                         }
+                        let bindings_changed = state.bindings != bindings;
                         state.bindings = bindings;
                         state.keys.set_expanded(expanded);
                         if bindings.iter().all(Option::is_none) {
                             state.keys.cancel();
                         }
+                        publish_hints(&mut state, bindings_changed);
                     });
                     if install_hook && bindings.iter().any(Option::is_some) && hook.is_null() {
                         HOOK_STATE.with(|state| {
@@ -269,13 +284,15 @@ impl OverlayShortcuts {
                     let outcome = HOOK_STATE.with(|state| {
                         let mut state = state.borrow_mut();
                         let bindings = state.bindings;
-                        state.keys.event(
+                        let outcome = state.keys.event(
                             message.wparam as u32,
                             message.lparam != 0,
                             Instant::now(),
                             99,
                             &bindings,
-                        )
+                        );
+                        publish_hints(&mut state, false);
+                        outcome
                     });
                     if let Some(action) = outcome.action {
                         dispatch(action);

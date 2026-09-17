@@ -86,7 +86,7 @@ pub(super) struct DockMotion(Tween);
 impl DockMotion {
     pub(super) fn new(now: Instant) -> Self {
         let mut tween = Tween::new(0.0, now);
-        tween.duration = Duration::from_millis(240);
+        tween.duration = Duration::from_millis(120);
         Self(tween)
     }
 
@@ -361,12 +361,12 @@ mod tests {
         let now = Instant::now();
         let mut dock = DockMotion::new(now);
         dock.target(true, now, true);
-        let mid = now + Duration::from_millis(120);
+        let mid = now + Duration::from_millis(60);
         let (position, moving) = dock.sample(mid);
         assert!(moving && position > 0.0 && position < 1.0);
         dock.target(false, mid, true);
         assert_eq!(dock.sample(mid).0, position);
-        assert_eq!(dock.sample(mid + Duration::from_millis(240)), (0.0, false));
+        assert_eq!(dock.sample(mid + Duration::from_millis(120)), (0.0, false));
         dock.target(true, mid, false);
         assert_eq!(dock.sample(mid), (1.0, false));
     }

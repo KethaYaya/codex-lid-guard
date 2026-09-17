@@ -26,7 +26,7 @@ pub(super) struct FeedView {
     cached: Frame,
 }
 
-// Surviving chats keep their lanes even when their recency order changes.
+// Surviving projects keep their lanes even when their recency order changes.
 fn assign_slots(slots: &mut [Frame], mut frames: Vec<Frame>) -> u16 {
     let previous: Vec<_> = slots.iter().map(|frame| frame.session_id.clone()).collect();
     let limit = frames.first().map_or(slots.len(), |frame| frame.max_tabs.min(slots.len()));
@@ -74,7 +74,9 @@ impl FeedWorker {
                     .iter()
                     .enumerate()
                     .filter(|(slot, _)| bits & (1 << slot) != 0)
-                    .filter_map(|(_, frame): (_, &Frame)| frame.session_id.clone())
+                    .flat_map(|(_, frame): (_, &Frame)| frame.group.as_ref()
+                        .map(|group| group.sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>())
+                        .unwrap_or_else(|| frame.session_id.iter().cloned().collect()))
                     .collect();
                 let changed = assign_slots(&mut slots, read(&collapsed));
                 background.collapsed.fetch_and(!changed, Ordering::Relaxed);

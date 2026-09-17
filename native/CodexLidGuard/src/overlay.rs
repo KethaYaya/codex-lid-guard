@@ -12,10 +12,28 @@ use serde::Deserialize;
 #[path = "overlay_feed_worker.rs"]
 mod overlay_feed_worker;
 use overlay_feed_worker::FeedWorker;
+#[path = "overlay_groups.rs"]
+pub(crate) mod groups;
 
 const READ_LIMIT: u64 = 256 * 1024;
 const LINE_LIMIT: usize = 1024 * 1024;
 pub const SESSION_LIMIT: usize = 10;
+
+static INPUT_REQUESTS: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn needs_response(session: &str) {
+    let mut requests=INPUT_REQUESTS.lock().unwrap();
+    let requests=requests.get_or_insert_with(HashSet::new);
+    if requests.len()<256 { requests.insert(session.into()); }
+}
+
+fn clear_response(session:&str) {
+    if let Some(requests)=INPUT_REQUESTS.lock().unwrap().as_mut(){requests.remove(session);}
+}
+
+fn waiting_for_response(session:&str)->bool {
+    INPUT_REQUESTS.lock().unwrap().as_ref().is_some_and(|requests|requests.contains(session))
+}
 
 pub(crate) fn next_activity() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -49,6 +67,9 @@ pub struct Card {
 
 #[derive(Clone)]
 pub struct Frame {
+    pub group: Option<groups::ProjectGroup>,
+    pub project_path: Option<String>,
+    pub needs_input: bool,
     pub session_id: Option<String>,
     pub activity: u64,
     pub cards: Vec<Card>,
@@ -69,6 +90,9 @@ pub struct Frame {
 impl Frame {
     pub(crate) fn empty() -> Self {
         Self {
+            group: None,
+            project_path: None,
+            needs_input: false,
             session_id: None,
             activity: 0,
             cards: vec![],
@@ -241,7 +265,7 @@ impl Feed {
         }
         // Retain finished sessions briefly to drain the final write even if the
         // terminal lifecycle record wins the race with the overlay timer.
-        let recent = self.recent_sessions(settings.overlay_max_tabs);
+        let recent = self.recent_sessions(SESSION_LIMIT);
         self.sessions.retain(|id, session| {
             recent.contains(id)
                 || session.completion.is_some()
@@ -291,6 +315,9 @@ impl Feed {
                 .map(|cursor| cursor.read_updates().unwrap_or_default())
                 .unwrap_or_default();
             for update in updates {
+                // A new assistant update or lifecycle transition means a previously
+                // reported approval/question is no longer blocking this session.
+                clear_response(id);
                 match update {
                     Update::Started => {
                         self.dismissed.remove(id);
@@ -500,7 +527,7 @@ impl Feed {
     fn trim_previews(&mut self, settings: &GuardSettings, now: Instant) {
         let mut ordinary = 0;
         let mut kept_busy = std::collections::HashSet::new();
-        let recent = self.recent_sessions(settings.overlay_max_tabs);
+        let recent = self.recent_sessions(SESSION_LIMIT);
         let mut kept_recent = HashSet::new();
         // Walk newest first; retain one busy or unread card per session in addition to the cache.
         self.previews.make_contiguous().reverse();
@@ -560,7 +587,7 @@ impl Feed {
                 .cmp(&a.1.session.activity)
                 .then_with(|| a.0.cmp(b.0))
         });
-        eligible.truncate(settings.overlay_max_tabs.clamp(1, SESSION_LIMIT));
+        eligible.truncate(SESSION_LIMIT);
         eligible
             .into_iter()
             .map(|(id, tracked, window, preview)| {
@@ -573,6 +600,10 @@ impl Feed {
                     project: tracked.project.clone(),
                 });
                 Frame {
+                    group: None,
+                    project_path: tracked.project.as_ref().map(|project| project.path.clone())
+                        .or_else(|| tracked.session.cwd.clone()),
+                    needs_input: tracked.busy && waiting_for_response(id),
                     session_id: Some(id.clone()),
                     activity: tracked.session.activity,
                     cards: vec![card],
@@ -635,8 +666,7 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) -> std::sync::A
                 let mut frames = crate::background::frames(&settings);
                 frames.extend(feed.frame(source(), &settings, Instant::now(), collapsed));
                 frames.sort_by_key(|frame| std::cmp::Reverse(frame.activity));
-                frames.truncate(settings.overlay_max_tabs);
-                frames
+                groups::group_frames(frames)
             } else {
                 feed = Feed::default();
                 vec![]
@@ -674,40 +704,34 @@ pub fn preview() -> io::Result<()> {
     let settings = GuardSettings::load();
     let mut threads = Vec::new();
     let shortcuts = win::OverlayShortcuts::start()?;
-    for slot in 0..settings.overlay_max_tabs.min(3) {
+    for slot in 0..settings.overlay_max_tabs.min(2) {
         let settings = settings.clone();
         let shortcuts = shortcuts.publisher(slot);
         threads.push(std::thread::spawn(move || {
             win::run_session_overlay(slot, |_| {
                 let elapsed = started.elapsed();
-                let completed = elapsed >= Duration::from_secs(15 + slot as u64 * 3);
-                let text = if completed {
-                    "This chat is complete. Its tab color fades while the session initials stay steady. The expanded panel has a green completion dot. This demo closes automatically."
-                } else {
-                    "Each chat has its own tab. Click this message to tuck away just this panel, then hover over its tab to slide it back. Move away to tuck it again. Each chat keeps its own status."
-                };
-                Frame {
-                    session_id: Some(format!("preview-{slot}")),
-                    activity: 0,
-                    cards: vec![Card {
-                        id: 0,
-                        label: format!("Codex Lid Guard \u{2014} {} preview", ["Build", "Review", "Tests"][slot]),
-                        text: text.into(),
-                        final_message: completed,
-                        attention: completed,
-                        target: None,
-                    }],
-                    window: None,
-                    opacity: settings.overlay_opacity,
-                    position: settings.overlay_position.clone(),
-                    max_tabs: settings.overlay_max_tabs.min(3),
-                    shortcuts: crate::shortcut_config::ShortcutConfig::from_settings(&settings.overlay_shortcuts),
-                    close: elapsed >= Duration::from_secs(35),
-                    busy: !completed,
-                    attention: completed,
-                    dock_request: 1,
-                    hidden_in_focus: false,
-                }
+                let project=["CodexLidGuard","JargonLens"][slot];
+                let titles: &[&str] = if slot==0{&["Fix overlay flicker","Simplify tab labels","Retry pipe integration test"]}
+                    else{&["Fix sign-in timeout","Tighten landing copy"]};
+                let frames=titles.iter().enumerate().map(|(index, title)|{
+                    let completed=index==2 || (elapsed>=Duration::from_secs(15)&&index==0);
+                    let waiting=slot==0&&index==1;
+                    Frame {
+                        project_path:Some(format!("C:\\Preview\\{project}")),needs_input:waiting,
+                        session_id:Some(format!("preview-{slot}-{index}")),activity:index as u64,
+                        cards:vec![Card{id:index as u64,label:format!("{project} — {title}"),
+                            text:if waiting{"Choose between short project names and full names."}
+                                else if completed{"The checks passed. Open the conversation to read the full result."}
+                                else{"Checking the latest changes. Select another task to preview its update."}.into(),
+                            final_message:completed,attention:completed||waiting,target:None}],
+                        opacity:settings.overlay_opacity,position:settings.overlay_position.clone(),
+                        max_tabs:settings.overlay_max_tabs.min(2),
+                        shortcuts:crate::shortcut_config::ShortcutConfig::from_settings(&settings.overlay_shortcuts),
+                        close:elapsed>=Duration::from_secs(35),busy:!completed,attention:completed||waiting,
+                        dock_request:1,..Frame::empty()
+                    }
+                }).collect();
+                groups::group_frames(frames).remove(0)
             }, |_, _| false.into(), Some(shortcuts), None)
         }));
     }
@@ -1203,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_three_chats_have_independent_messages_status_and_targets() {
+    fn retained_chats_have_independent_messages_status_and_targets_before_grouping() {
         let now = Instant::now();
         let mut feed = Feed::default();
         for activity in 1..=4 {
@@ -1258,7 +1282,7 @@ mod tests {
                 .iter()
                 .map(|f| f.session_id.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            ["chat-4", "chat-3", "chat-2"]
+            ["chat-4", "chat-3", "chat-2", "chat-1"]
         );
         for frame in &frames {
             assert_eq!(frame.cards.len(), 1);
@@ -1276,7 +1300,7 @@ mod tests {
         assert_eq!(next[0].cards[0].id, 104);
         assert!(
             next.iter()
-                .all(|f| f.session_id.as_deref() != Some("chat-2"))
+                .any(|f| f.session_id.as_deref() == Some("chat-2"))
         );
         assert!(
             feed.sessions["chat-2"].completion.is_some(),
@@ -1285,13 +1309,14 @@ mod tests {
     }
 
     #[test]
-    fn configured_tab_limit_keeps_newest_chats_and_changes_without_restarting_feed() {
+    fn configured_tab_limit_keeps_newest_projects_and_changes_without_restarting_feed() {
         let now = Instant::now();
         let mut feed = Feed::default();
         for activity in 1..=12 {
             let id = format!("chat-{activity}");
             let mut session = tracked(&id, 10, now);
             session.session.activity = activity;
+            session.session.cwd = Some(format!("C:\\Projects\\project-{activity}"));
             feed.sessions.insert(id.clone(), session);
             feed.previews.push_back(Preview { session: id, received: now,
                 card: Card { id: activity, label: "Chat".into(), text: "Message".into(),
@@ -1299,12 +1324,13 @@ mod tests {
         }
         for limit in [3, 10, 1, 5] {
             let settings = GuardSettings { overlay_max_tabs: limit, ..Default::default() };
-            let frames = feed.visible_frames(&settings, |_| true, &HashSet::new());
+            let frames = groups::group_frames(feed.visible_frames(&settings, |_| true, &HashSet::new()));
             assert_eq!(frames.len(), limit);
             for (index, frame) in frames.iter().enumerate() {
-                assert_eq!(frame.session_id, Some(format!("chat-{}", 12 - index)));
+                let session=&frame.group.as_ref().unwrap().sessions[0];
+                assert_eq!(session.id, format!("chat-{}", 12 - index));
                 assert_eq!(frame.max_tabs, limit);
-                assert_eq!(frame.cards[0].target.as_ref().unwrap().session_id, frame.session_id.as_ref().unwrap().as_str());
+                assert_eq!(frame.cards[0].target.as_ref().unwrap().session_id, session.id);
             }
             assert_eq!(feed.recent_sessions(limit).len(), limit);
         }
@@ -1331,7 +1357,7 @@ mod tests {
         }
         let settings = GuardSettings::default();
         // Ordinary cached history still expires independently after newer chats replace it.
-        for activity in 1..=3 {
+        for activity in 1..=SESSION_LIMIT as u64 {
             let id = format!("newer-{activity}");
             let mut session = tracked(&id, 1, now);
             session.session.activity = activity;

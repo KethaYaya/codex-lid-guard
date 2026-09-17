@@ -8,14 +8,14 @@ Codex Lid Guard keeps your Windows laptop awake while local Codex tasks run, the
 
 [Get started](#quick-start) · [Desktop previews](#message-overlays) · [Background tasks](#background-tasks) · [Shortcuts](#keyboard-shortcuts) · [Settings](#settings) · [Help](#troubleshooting)
 
-![A Codex chat preview floating above the desktop, showing an assistant update and a keyboard shortcut.](images/screenshots/overlay-expanded.png)
+![A project overlay with two sessions, one selected update, and a named project tab.](images/screenshots/overlay-project-groups.png)
 
-*A sample desktop preview. Hover to read an update; double-click to return to its chat.*
+*A native preview with sample sessions. Select a task to read its update; choose Open chat to return to the conversation.*
 
 ## What you can do
 
 - **Keep working with the lid closed.** Protection starts automatically and stays on until the last active task finishes, including tasks in other VS Code windows.
-- **Follow several chats from other apps.** Small tabs at the screen edge show progress and unread completions. Follow three chats by default, or choose up to ten.
+- **Follow several projects from other apps.** Small two-line tabs show the project, highest-priority task, status icon, and extra-session count. Follow three projects by default, or choose up to ten.
 - **Run tasks independently of VS Code.** Start a background task in Lid Guard and return to its own conversation window whenever you need to.
 - **Return to normal sleep automatically.** Your original lid settings are restored when work stops. If the lid is still closed, the laptop sleeps after a 10-second grace period by default.
 
@@ -45,21 +45,25 @@ To keep a task running **after VS Code closes**, use [Start Background Task](#ba
 
 Run **Codex Lid Guard: Toggle Message Overlay** from the Command Palette. Previews are **off by default**.
 
-Wait for a new assistant update, then switch to another app or chat. A small tab appears at the screen edge. Hover to read the update; double-click the message to open its chat.
+Wait for a new assistant update, then switch to another app or chat. A named project tab appears at the screen edge. Hover or click to see its sessions, select a task, and choose **Open chat**.
 
-To try the controls without starting a task, run **Codex Lid Guard: Preview Message Overlay**. It shows three sample chats and closes automatically after 35 seconds.
+To try the controls without starting a task, run **Codex Lid Guard: Preview Message Overlay**. It shows five sample sessions across two projects (subject to your tab limit) and closes automatically after 35 seconds.
 
 ## Message overlays
 
-Overlays show the latest assistant updates for chats you are not currently viewing, on the originating VS Code window's display. A chat's tab hides while you view that chat in its focused VS Code window, and returns when you switch away.
+Each project has a small 152 by 42 DIP tab showing its name, highest-priority task, status icon, and a +N count for other sessions. Expand it to see a 344 DIP drawer with up to four compact task rows, a two-line update, and Open/Dismiss actions. Larger lists scroll; selecting a task keeps the rows in place. Neighboring tabs visibly slide aside first; expansion waits until they are clear. Tabs slide back only after the drawer has fully folded. Switching projects folds the previous drawer first. The expanded project stays above sibling tabs without taking keyboard focus. Same-named folders get distinct path labels, with their full path shown in the drawer header.
+
+The session currently viewed in a focused editor hides from the preview; other sessions in its project remain available. The project tab hides when it has no visible sessions. It returns when you switch away.
 
 | To… | Do this |
 | --- | --- |
-| Peek at an update | Hover over its tab. Move away to fold the preview back. |
-| Keep a preview open | Click the tab. |
-| Fold a preview | Single-click the message. |
-| Open the full conversation | Double-click the message. VS Code chats open in their project's Codex sidebar; background tasks open in their own window. |
-| Dismiss a tab until the next task in that chat | Click **×** in the preview header. This does not stop the task. |
+| Peek at a project | Hover over its tab. Move away to fold the preview back. |
+| Keep a project open | Click its tab. |
+| Select a session | Click its task title. The selected row is highlighted and its update appears below the list. |
+| Fold a project | Click the chevron in the header. |
+| Open the full conversation | Choose **Open chat**, **Reply in chat**, or **Read result**. Double-clicking a task title also opens it. |
+| Dismiss one session until its next task | Choose **Dismiss** beneath the selected update. Other sessions stay available; the task is not stopped. |
+| Browse a larger project | Scroll inside the session list with the mouse wheel, or drag/click its scrollbar. The preview stays fixed below it. |
 
 New messages update the preview without taking keyboard focus. Long replies are shortened; open the conversation to read them in full.
 
@@ -67,15 +71,15 @@ New messages update the preview without taking keyboard focus. Long replies are 
 
 | Indicator | Meaning |
 | --- | --- |
-| Moving amber dots | The task is working. |
-| Tab fading between dark gray and yellow | The task finished and you have not viewed its chat yet. |
-| Pulsing green dots in an expanded preview | The task is complete. |
+| **Working** | The task is running. |
+| **Needs you** | A reported approval or question is waiting for your response. |
+| **Done · unread** / **unread result** | The task finished and you have not viewed its chat yet. |
+| **Done** | The task completed and its result has been viewed. |
+| **Idle** | No active work or confirmed completion is reported for this session. |
 
-![A completed chat preview with green completion indicators.](images/screenshots/overlay-complete.png)
+Reading a preview does not mark the completion as viewed. Open the chat to clear its indicator, or start a new task in that chat. Tasks sort by needs-response, working, unread completion, then idle/read completion; selection stays on the same task. A filled dot means working, a ringed exclamation means needs-response, and a check means done. The project stripe turns amber while any session needs you and otherwise uses its project color. Needs-response indicators are immediate for background sessions; editor sessions use the optional request hooks.
 
-Reading a preview does not mark the completion as viewed. Open the chat to clear its indicator, or start a new task in that chat. Cancelled tasks are not marked as successfully completed. If Windows animations are disabled, the indicators use steady colors.
-
-Choose **1–10 tabs** with **Overlay Max Tabs** in Settings. At the limit, a more recently active chat can replace an older tab. Recent tabs remain available after VS Code closes while the Lid Guard helper is running, so you can reopen the original project and chat. Retaining a tab alone does not keep Windows awake or keep an editor task running.
+Choose **1–10 project tabs** with **Overlay Max Tabs** in Settings. At the limit, a more recently active project can replace an older one. Recent tabs remain available after VS Code closes while the helper is running, so you can reopen the original project and session. Retaining a tab alone does not keep Windows awake or keep an editor task running.
 
 ## Background tasks
 
@@ -99,15 +103,15 @@ These shortcuts work from other apps while overlay tabs are visible. The default
 
 | Shortcut | Action |
 | --- | --- |
-| Hold **Copilot**, tap **Tab** | Preview the next chat. Tap Tab again to keep cycling. |
-| **Enter** after selecting a chat | Open the conversation. |
-| **Esc** immediately after selecting a chat | Dismiss its tab until the next task in that chat. |
+| Hold **Copilot**, tap **Tab** | Preview the next project. Tap Tab again to keep cycling. |
+| **Enter** after selecting a project | Open its selected session. |
+| **Esc** immediately after selecting a project | Dismiss its selected session until its next task. Other sessions stay available. |
 | **Tab** after releasing Copilot | Fold the keyboard-selected preview immediately. |
-| **Copilot + first tab letter**, then the **second letter** | Preview, then open a specific chat. For a tab marked `DR`, use **Copilot + D**, then **R**. |
+| **Copilot + first shortcut letter**, then the **second letter** | Preview the project, then open its selected session. The assigned letters are always visible beside each project name and highlight while the prefix is held. |
 
 Previews selected with **Copilot + Tab** fold automatically three seconds after you release Copilot. Click-opened and letter-selected previews stay open.
 
-**Without a Copilot key**, set **Overlay Shortcut Prefix** to something like `Ctrl+Alt+Space`. Press that combination, then Tab to choose a chat and Enter to open it. Configure these global shortcuts in extension Settings.
+**Without a Copilot key**, set **Overlay Shortcut Prefix** to something like `Ctrl+Alt+Space`. Press that combination, then Tab to choose a project and Enter to open its selected session. Configure these global shortcuts in extension Settings.
 
 <details>
 <summary>Shortcut timing and customization</summary>
@@ -115,7 +119,7 @@ Previews selected with **Copilot + Tab** fold automatically three seconds after 
 - The default Copilot binding expects **Win + Shift + F23**. Keyboard utilities that remap that sequence can prevent detection.
 - Some keyboards send Copilot as a quick tap even when you hold it. On those keyboards, enter each next step within **1.5 seconds**. Press Copilot again before Tab to keep cycling; Tab alone folds the selected preview.
 - Enter and Esc return to their normal behavior when the shortcut expires or focus changes. Esc before selecting a tab cancels the shortcut.
-- Customize **Overlay Cycle Key**, **Overlay Open Key**, and **Overlay Close Key** using different keys for each. The displayed tab letters also work with a custom prefix.
+- Customize **Overlay Cycle Key**, **Overlay Open Key**, and **Overlay Close Key** using different keys for each. Shortcut letters stay visible on tabs whenever shortcuts are enabled; holding the prefix highlights them.
 - Changes apply immediately. Invalid or duplicate bindings disable shortcuts and show a settings warning.
 - Turn off **Overlay Shortcuts Enabled** to disable global shortcuts. Without visible tabs, Copilot keeps its normal Windows behavior. These bindings are separate from VS Code's Keyboard Shortcuts editor.
 
@@ -144,7 +148,7 @@ Open VS Code Settings with **Ctrl + ,** and search for **Codex Lid Guard**.
 | If you want to… | Change this setting |
 | --- | --- |
 | See desktop chat previews | Turn on **Message Overlay**. Default: off. |
-| Follow more chats | Set **Overlay Max Tabs** from 1 to 10. Default: 3. |
+| Follow more projects | Set **Overlay Max Tabs** from 1 to 10. Default: 3. |
 | Move the previews | Choose a corner with **Overlay Position**. Default: bottom-right. |
 | Make previews more transparent | Lower **Overlay Opacity**. Default: 82%. |
 | Use a keyboard without a Copilot key | Change **Overlay Shortcut Prefix**, for example to `Ctrl+Alt+Space`. |
@@ -161,7 +165,7 @@ All keys below start with `codexLidGuard.`. Use the full key when editing `setti
 | --- | --- | --- |
 | `enabled` | `true` | Monitor and protect local tasks automatically. |
 | `messageOverlay` | `false` | Show assistant previews for background chats. |
-| `overlayMaxTabs` | `3` | 1–10 tabs. At higher limits, expanded previews can overlap. |
+| `overlayMaxTabs` | `3` | 1–10 project tabs. Each groups its sessions; one project expands at a time. |
 | `overlayOpacity` | `82` | 30–100 percent. |
 | `overlayPosition` | `bottom-right` | `bottom-right`, `bottom-left`, `top-right`, or `top-left`. |
 | `overlayDurationSeconds` | `90` | 10–600 seconds for older previews. Recent chats and unread completions remain available, subject to the tab limit. |
@@ -169,7 +173,7 @@ All keys below start with `codexLidGuard.`. Use the full key when editing `setti
 | `overlayShortcutPrefix` | `Copilot` | `Copilot`, or a combination with Ctrl, Alt, or Win plus one key. |
 | `overlayCycleKey` | `Tab` | Select the next tab after the prefix. |
 | `overlayOpenKey` | `Enter` | Open the selected chat. Its second tab letter also works. |
-| `overlayCloseKey` | `Escape` | Dismiss the selected tab or cancel the shortcut. |
+| `overlayCloseKey` | `Escape` | Dismiss the selected session or cancel the shortcut. |
 | `alertSounds` | `true` | Play completion and request sounds. |
 | `alertSoundsOnlyWhenUnfocused` | `true` | Keep automatic alerts quiet while viewing the relevant chat. |
 | `optionalHooks` | `false` | Enable request-alert hooks after a one-time Codex review. |
@@ -212,7 +216,7 @@ Press **Ctrl + Shift + P** and search for **Codex Lid Guard**. Every command bel
 | Problem | What to try |
 | --- | --- |
 | **No desktop tab appears** | Turn on **Toggle Message Overlay**, wait for a new assistant update, and switch away from that chat. Run **Preview Message Overlay** to check that previews display. |
-| **A tab disappeared** | It may be hidden while you view its chat, dismissed until the next task, or replaced by a newer chat. Increase **Overlay Max Tabs** if needed. |
+| **A tab disappeared** | Its sessions may be focused, dismissed, or outside the recent-project limit. Increase **Overlay Max Tabs** if needed. |
 | **Copilot opens another app** | Make sure a tab is visible. Check keyboard remapping, or set **Overlay Shortcut Prefix** to `Ctrl+Alt+Space`. |
 | **Enter or Esc does nothing** | Select a tab with the shortcut first, then press Enter or Esc promptly. On quick-tap Copilot keyboards, each next step must be within 1.5 seconds. |
 | **The right chat does not open** | Reload existing VS Code windows after an update. Check **View → Output → Codex Lid Guard Navigation** for details. |
