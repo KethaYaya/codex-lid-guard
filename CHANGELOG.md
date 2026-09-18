@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.30
+
+- Keep clicked overlays pinned open even if a hover timeout was already queued.
+- Click the pinned preview background or selected session again to minimize; keep double-click maximization and ordinary session switching.
+
 ## 0.2.29
 
 - Single-click a popped-out tab, preview, or session row to immediately expand to the latest message at the same width and keep it open, without waiting for the five-second hover timer.

@@ -762,7 +762,8 @@ fn run_overlay_inner(
                     }
                     state.panel_dirty = true; refresh = true;
                 }
-                if state.composer.as_ref().is_some_and(|composer| composer.focused() || composer.expanded()) {
+                if state.group.as_ref().is_some_and(|ui| ui.pinned)
+                    || state.composer.as_ref().is_some_and(|composer| composer.focused() || composer.expanded()) {
                     cancel_hover(window, &mut state);
                     cancel_keyboard_preview(window, &mut state);
                 }
@@ -1580,6 +1581,7 @@ fn run_overlay_inner(
                         break;
                     }
                     if matches!(message.message, WM_APP_REPLY_EDITED | WM_APP_REPLY_FOCUS) {
+                        cancel_click_fold(window, &mut state);
                         if message.message == WM_APP_REPLY_EDITED && let Some(composer) = &mut state.composer {
                             composer.edited();
                             if let Some(ui) = &mut state.group { ui.progression.edit(Instant::now(), composer.has_text()); }
@@ -1636,11 +1638,11 @@ fn run_overlay_inner(
                         match state.group_action.take() {
                             Some(GroupAction::Pin) => {
                                 if let Some(id) = state.group.as_ref().and_then(|ui| ui.selected.clone()) {
-                                    expand_chat(window, &mut state, &id, Stage::Message, &mut chat_expansion)?;
+                                    toggle_chat(window, &mut state, &id, &mut chat_expansion)?;
                                 }
                             }
                             Some(GroupAction::Maximize(id)) => { expand_chat(window, &mut state, &id, Stage::Full, &mut chat_expansion)?; }
-                            Some(GroupAction::Select(id)) => { expand_chat(window, &mut state, &id, Stage::Message, &mut chat_expansion)?; }
+                            Some(GroupAction::Select(id)) => { toggle_chat(window, &mut state, &id, &mut chat_expansion)?; }
                             Some(GroupAction::Scroll(delta)) => { if let Some(ui)=&mut state.group { ui.scroll(delta); } }
                             Some(GroupAction::ScrollThumb | GroupAction::HistoryThumb) => {}
                             Some(GroupAction::HistoryScroll(delta)) => {
@@ -1713,7 +1715,7 @@ fn run_overlay_inner(
                             message.message = WM_APP_CLOSE_OVERLAY;
                             message.lparam = state.activity as isize;
                         } else if message.lparam == 3 {
-                            message.message = WM_APP_COLLAPSE_OVERLAY;
+                            message.message = WM_APP_COLLAPSE_OVERLAY; message.wparam = 0;
                         } else if matches!(message.lparam, 4 | 5) {
                             message.wparam = if message.lparam == 4 { 2 } else { 3 };
                             message.message = WM_APP_EXPAND_OVERLAY;
@@ -1756,6 +1758,15 @@ fn run_overlay_inner(
                         refresh = true;
                         break;
                     }
+                    if message.message == WM_TIMER && message.wparam == 8 {
+                        match state.group.as_ref().and_then(|ui| ui.fold_after_click) {
+                            Some(deadline) if Instant::now() >= deadline => {
+                                message.message = WM_APP_COLLAPSE_OVERLAY; message.wparam = 0;
+                            }
+                            Some(_) => continue,
+                            None => { KillTimer(window, 8); continue; }
+                        }
+                    }
                     if message.message == WM_TIMER && message.wparam == 6 {
                         if let Some(KeyboardPreview::Released(deadline)) = state.keyboard_preview {
                             if Instant::now() < deadline {
@@ -1763,7 +1774,7 @@ fn run_overlay_inner(
                                 set_keyboard_preview(window, &mut state, preview)?;
                                 continue;
                             }
-                            message.message = WM_APP_COLLAPSE_OVERLAY;
+                            message.message = WM_APP_COLLAPSE_OVERLAY; message.wparam = 1;
                         } else {
                             continue;
                         }
@@ -1780,7 +1791,7 @@ fn run_overlay_inner(
                                         Some((hover.anchor.top + hover.anchor.bottom) / 2);
                                     cancel_hover(window, &mut state);
                                     cancel_keyboard_preview(window, &mut state);
-                                    PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+                                    PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 1, 0);
                                 }
                             }
                             // Cursor checks never poll transcripts, repaint, or resize the window.
@@ -1882,6 +1893,10 @@ fn run_overlay_inner(
                         break;
                     }
                     if message.message == WM_APP_COLLAPSE_OVERLAY {
+                        // A queued hover timeout cannot dismiss a preview pinned by a later click.
+                        if message.wparam == 1 && state.group.as_ref().is_some_and(|ui| ui.pinned) { continue; }
+                        cancel_click_fold(window, &mut state);
+                        if let Some(ui) = &mut state.group { ui.pinned = false; ui.last_expand_click = None; }
                         let was_chat = chat_expanded(&state);
                         if was_chat && animate && let Some(layout) = state.layout {
                             cancel_hover(window, &mut state);
@@ -1979,6 +1994,7 @@ fn run_overlay_inner(
         KillTimer(window, 5);
         KillTimer(window, 6);
         KillTimer(window, 7);
+        KillTimer(window, 8);
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         DestroyWindow(window);
         if !state.font.is_null() {
@@ -2247,6 +2263,26 @@ fn begin_chat_stage(state: &mut OverlayState, stage: Stage, expansion: &mut Opti
     state.collapsed = false;
 }
 
+unsafe fn cancel_click_fold(window: Hwnd, state: &mut OverlayState) {
+    if let Some(ui) = &mut state.group { ui.fold_after_click = None; }
+    unsafe { KillTimer(window, 8); }
+}
+
+unsafe fn toggle_chat(window: Hwnd, state: &mut OverlayState, session: &str,
+    expansion: &mut Option<chat_panel::Expansion>) -> io::Result<()> {
+    unsafe {
+        if !state.collapsed && state.group.as_ref().is_some_and(|ui|
+            ui.pinned && ui.selected.as_deref() == Some(session)) {
+            // Keep the panel under the cursor until Windows can distinguish a
+            // single click from a double-click. Opening still starts immediately.
+            state.group.as_mut().unwrap().fold_after_click = Some(Instant::now()
+                + Duration::from_millis(GetDoubleClickTime() as u64));
+            if SetTimer(window, 8, 20, null()) == 0 { return Err(error("Start overlay click timer")); }
+            Ok(())
+        } else { expand_chat(window, state, session, Stage::Message, expansion) }
+    }
+}
+
 unsafe fn expand_chat(window: Hwnd, state: &mut OverlayState, session: &str, stage: Stage,
     expansion: &mut Option<chat_panel::Expansion>) -> io::Result<()> {
     unsafe {
@@ -2256,7 +2292,9 @@ unsafe fn expand_chat(window: Hwnd, state: &mut OverlayState, session: &str, sta
         cancel_keyboard_preview(window, state);
         let previous = EXPANDED_PROJECT.swap(window as usize, std::sync::atomic::Ordering::Relaxed);
         if previous != 0 && previous != window as usize { PostMessageW(previous as Hwnd, WM_APP_COLLAPSE_OVERLAY, 0, 0); }
+        cancel_click_fold(window, state);
         let ui = state.group.as_mut().unwrap();
+        ui.pinned = true;
         ui.tab.preview_opened(&ui.group);
         let stage = if ui.progression.stage == Stage::Full { Stage::Full } else { stage };
         if ui.selected.as_deref() == Some(session)
@@ -2342,6 +2380,7 @@ unsafe fn start_chat_fold(window: Hwnd, state: &OverlayState, layout: DockLayout
 fn collapse_chat(state: &mut OverlayState) {
     if let Some(ui) = &mut state.group {
         ui.progression.reset(); ui.message_anchor = None;
+        ui.pinned = false; ui.fold_after_click = None;
         if ui.chat.take().is_some() { ui.dirty = true; state.panel_dirty = true; }
     }
     if let Some(composer) = &mut state.composer { composer.collapse_chat(); }
@@ -2389,6 +2428,7 @@ unsafe extern "system" fn window_procedure(
             && let Some((at, id)) = state.group.as_mut().and_then(|ui| ui.last_expand_click.take())
             && at.elapsed() <= Duration::from_millis(GetDoubleClickTime() as u64) {
             cancel_hover(window, state); cancel_keyboard_preview(window, state);
+            cancel_click_fold(window, state);
             state.group_action = Some(GroupAction::Maximize(id));
             PostMessageW(window, WM_APP_GROUP_ACTION, 0, 0);
             return 0;
@@ -2482,6 +2522,7 @@ unsafe extern "system" fn window_procedure(
                 let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 if let Some(state) = state.as_mut() {
                     state.panel_dirty = true;
+                    cancel_click_fold(window, state);
                     // A new gesture cannot reuse the previous click's session.
                     if let Some(ui) = &mut state.group { ui.last_expand_click = None; }
                     if let Some(action)=group_window::action_at(state,lparam as i16 as i32,(lparam>>16) as i16 as i32) {

@@ -30,6 +30,8 @@ pub(super) fn query(state: &OverlayState, kind: usize) -> isize {
         25 => match ui.progression.stage { Stage::Compact => 0, Stage::Message => 1, Stage::Full => 2 },
         26 => ui.chat.as_ref().map_or(0, |chat| chat.content_height() as isize),
         27 => ui.chat.as_ref().map_or(0, |chat| (chat.bounds.bottom - chat.bounds.top) as isize),
+        33 => ui.pinned as isize,
+        34 => ui.fold_after_click.is_some() as isize,
         31 => state.layout.and_then(|layout| layout.panel).map_or(0, |panel| {
             let x = panel.left + scale_dip(20, state.dpi);
             let y = panel.top + scale_dip(10, state.dpi);
@@ -185,7 +187,7 @@ fn native_overlay_recovers_topmost_in_tab_drawer_message_and_full_chat() {
 
 #[test]
 #[ignore = "clicks only an owned overlay; never opens an editor or sends a chat message"]
-fn native_click_expands_immediately_and_double_click_maximizes_same_overlay() {
+fn native_click_toggles_pinned_expansion_and_double_click_maximizes_same_overlay() {
     unsafe {
         let previous_dpi = SetThreadDpiAwarenessContext(-4isize as Handle);
         struct DpiReset(Handle);
@@ -221,10 +223,11 @@ fn native_click_expands_immediately_and_double_click_maximizes_same_overlay() {
         let double = |at| { SendMessageW(window, WM_LBUTTONDBLCLK, 1, at); SendMessageW(window, WM_LBUTTONUP, 0, at); };
         let drawer = || SendMessageW(window, 0x80f0, 3, 0) == 0 && SendMessageW(window, 0x80f0, 13, 0) != 0;
         let full = || SendMessageW(window, 0x80f0, 25, 0) == 2 && SendMessageW(window, 0x80f0, 22, 0) == 0;
+        let tucked = || SendMessageW(window, 0x80f0, 3, 0) == 1 && SendMessageW(window, 0x80f0, 32, 0) != 0
+            && SendMessageW(window, 0x80f0, 22, 0) == 0;
         let fold = || {
             PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
-            wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 1 && SendMessageW(window, 0x80f0, 32, 0) != 0
-                && SendMessageW(window, 0x80f0, 22, 0) == 0);
+            wait_for(tucked);
             std::thread::sleep(Duration::from_millis(350));
         };
         std::thread::sleep(Duration::from_millis(350));
@@ -237,10 +240,23 @@ fn native_click_expands_immediately_and_double_click_maximizes_same_overlay() {
             scale_dip(group_window::PANEL_WIDTH, SendMessageW(window, 0x80f0, 2, 0) as u32),
             "click expansion preserves the drawer width");
         *pointer.lock().unwrap() = Some((-100_000, -100_000));
+        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 1, 0); // Hover timeout queued before the click.
         std::thread::sleep(Duration::from_millis(700));
         assert!(drawer(), "a clicked pop-out stays expanded after the pointer leaves");
         assert!(message(), "single-click shows the latest message without maximizing");
-        fold();
+        assert_eq!(SendMessageW(window, 0x80f0, 33, 0), 1);
+        click(point(31));
+        wait_for_seconds(2, tucked);
+        assert_eq!(SendMessageW(window, 0x80f0, 33, 0), 0, "the next click clears the pinned state");
+        std::thread::sleep(Duration::from_millis(350));
+
+        // Folding restores ordinary temporary hover behavior.
+        *pointer.lock().unwrap() = None;
+        PostMessageW(window, WM_MOUSEMOVE, 0, point(32));
+        wait_for(drawer);
+        *pointer.lock().unwrap() = Some((-100_000, -100_000));
+        wait_for(tucked);
+        std::thread::sleep(Duration::from_millis(350));
 
         // Hovered previews are temporary until their background is clicked.
         *pointer.lock().unwrap() = None;
@@ -252,8 +268,13 @@ fn native_click_expands_immediately_and_double_click_maximizes_same_overlay() {
         *pointer.lock().unwrap() = Some((-100_000, -100_000));
         std::thread::sleep(Duration::from_millis(700));
         assert!(drawer(), "clicking preview background pins the hover expansion");
-        double(point(31));
+        let header = point(31);
+        click(header); // A pending single-click fold must not win over a double-click.
+        wait_for(|| SendMessageW(window, 0x80f0, 34, 0) == 1);
+        double(header);
         wait_for(full);
+        std::thread::sleep(Duration::from_millis(GetDoubleClickTime() as u64 + 100));
+        assert!(full(), "double-click cancels the pending fold");
         assert_eq!(SendMessageW(window, 0x80f0, 17, 0), window as isize);
         fold();
 
@@ -265,8 +286,8 @@ fn native_click_expands_immediately_and_double_click_maximizes_same_overlay() {
         wait_for_seconds(1, full);
         assert_eq!(SendMessageW(window, 0x80f0, 1, 0), 2, "double-click neither creates nor dismisses a session");
         click(point(31));
-        assert!(full(), "single-clicking a maximized overlay must not shrink it");
-        fold();
+        wait_for_seconds(2, tucked);
+        std::thread::sleep(Duration::from_millis(350));
 
         PostMessageW(window, WM_APP_EXPAND_OVERLAY, 3, 0); // Keyboard preview has a three-second timeout.
         wait_for(drawer);
@@ -276,6 +297,17 @@ fn native_click_expands_immediately_and_double_click_maximizes_same_overlay() {
         assert_eq!(SendMessageW(window, 0x80f0, 0, 0), 2);
         std::thread::sleep(KEYBOARD_PREVIEW_DELAY + Duration::from_millis(200));
         assert!(drawer(), "clicking a session also pins a keyboard preview");
+        click(point(15)); // Another session switches selection without folding.
+        wait_for(|| SendMessageW(window, 0x80f0, 0, 0) == 1 && message());
+        std::thread::sleep(Duration::from_millis(GetDoubleClickTime() as u64 + 100));
+        assert!(drawer());
+        click(point(15)); // Clicking that selected session again folds the overlay.
+        wait_for_seconds(2, tucked);
+        std::thread::sleep(Duration::from_millis(350));
+        click(point(32));
+        wait_for_seconds(1, message);
+        click(point(4));
+        wait_for(|| SendMessageW(window, 0x80f0, 0, 0) == 2 && message());
         double(point(4));
         wait_for(full);
         assert_eq!(SendMessageW(window, 0x80f0, 0, 0), 2, "double-click maximizes the selected session");
