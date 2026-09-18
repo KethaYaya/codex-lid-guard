@@ -9,10 +9,40 @@ import {
   daemonHandoffRequired,
   isGuardianPipeName,
   preAcquireGuardian,
+  readCommandStatus,
   readHelperStatus,
   warmGuardianPipe,
   writeHelperSettings
 } from "../src/helper";
+
+test("enable and status recover after an upgrade interrupts their JSON response", async () => {
+  const expected = { ok: true, message: "ready", activeTurns: 1, isGuarding: true, lidState: "open", sleepPending: false };
+  for (const action of ["resume", "status", "status-with-recent"] as const) {
+    const replies = ["", '{"ok":', JSON.stringify(expected)];
+    let calls = 0;
+    assert.deepEqual(await readCommandStatus(action, async () => ({ stdout: replies[calls++] })), expected);
+    assert.equal(calls, 3);
+  }
+});
+
+test("incomplete helper replies are bounded and never replay side effects", async () => {
+  for (const action of ["resume", "restore", "sound-done", "sound-request"] as const) {
+    let calls = 0;
+    await assert.rejects(readCommandStatus(action, async () => { calls += 1; return { stdout: "" }; }), /empty or incomplete response/u);
+    assert.equal(calls, action === "resume" ? 3 : 1);
+  }
+});
+
+test("valid helper failures and process errors are reported without retry", async () => {
+  for (const reply of ['{"ok":false,"message":"Access denied"}', 'null', '{}']) {
+    let calls = 0;
+    await assert.rejects(readCommandStatus("resume", async () => { calls += 1; return { stdout: reply }; }), /Access denied|invalid response/u);
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  await assert.rejects(readCommandStatus("resume", async () => { calls += 1; throw new Error("Could not launch helper"); }), /Could not launch helper/u);
+  assert.equal(calls, 1);
+});
 
 test("hands an idle older daemon over to the installed helper", () => {
   const status = {

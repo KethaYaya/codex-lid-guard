@@ -111,17 +111,46 @@ export type GuardMenuTheme =
   | "high-contrast"
   | "high-contrast-light";
 
+type HelperAction = "status" | "status-with-recent" | "restore" | "resume" | "sound-done" | "sound-request";
+
+export async function readCommandStatus(
+  action: HelperAction,
+  execute: () => Promise<{ stdout: string }>
+): Promise<GuardStatus> {
+  // A concurrent upgrade can interrupt an older command before it writes JSON.
+  // Only repeat reads and the idempotent resume operation, never side effects.
+  const attempts = ["status", "status-with-recent", "resume"].includes(action) ? 3 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const { stdout } = await execute();
+    let status: unknown;
+    try { status = JSON.parse(stdout); }
+    catch {
+      if (attempt + 1 < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        continue;
+      }
+      throw new Error(`Lid Guard returned an empty or incomplete response to ${action}. Please try again.`);
+    }
+    if (typeof status !== "object" || status === null || typeof (status as GuardStatus).ok !== "boolean") {
+      throw new Error(`Lid Guard returned an invalid response to ${action}.`);
+    }
+    const result = status as GuardStatus;
+    if (!result.ok) { throw new Error(result.message || `Lid Guard could not complete ${action}.`); }
+    return result;
+  }
+  throw new Error(`Lid Guard did not respond to ${action}.`);
+}
+
 export async function runHelper(
   helperPath: string,
-  action: "status" | "status-with-recent" | "restore" | "resume" | "sound-done" | "sound-request"
+  action: HelperAction
 ): Promise<GuardStatus> {
   const args = action.startsWith("sound-") ? ["sound", action.slice("sound-".length)] : [action];
-  const { stdout } = await execFileAsync(helperPath, args, {
+  return readCommandStatus(action, () => execFileAsync(helperPath, args, {
     windowsHide: true,
     timeout: 7000,
     encoding: "utf8"
-  });
-  return JSON.parse(stdout) as GuardStatus;
+  }));
 }
 
 export type BackgroundRequest =

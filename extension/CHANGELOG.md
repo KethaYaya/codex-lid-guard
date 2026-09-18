@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.29
+
+- Single-click a popped-out tab, preview, or session row to immediately expand to the latest message at the same width and keep it open, without waiting for the five-second hover timer.
+- Preserve double-click maximization while the first click is still animating.
+
+## 0.2.28
+
+- Click a popped-out tab or preview background to keep its drawer expanded after the mouse leaves or a keyboard preview times out.
+- Double-click a tab, preview, or session title to maximize that same overlay and selected chat; Open chat keeps its explicit editor navigation behavior.
+
+## 0.2.27
+
+- Keep overlay tabs, message previews, full chat, and their composers above other windows after app switches and window restores, without taking keyboard focus.
+- Repair lost topmost state without disturbing cached animations, and keep sibling tabs from following a hidden or demoted overlay behind other apps.
+
+## 0.2.26
+
+- Open overlay-created chats in the same centered overlay from Open chat, double-click, or the keyboard open shortcut.
+- Show background-session approval details and Allow once/Deny controls in the overlay; answer questions through its composer without losing chat drafts.
+- Add Open in VS Code for background chats, routing by their saved Codex thread ID and original project. New threads use the editor-compatible history format.
+
+## 0.2.25
+
+- Keep the latest-message preview at the original drawer width; expand only its height.
+- Keep the overlay open when a shorter reply, new empty chat, or centered full-chat layout reduces its height. Reserve animation space for both endpoints and preserve native-size text and controls.
+- Recover Enable and status reads from incomplete helper replies during an upgrade. Retire only the daemon that owns the pipe, leaving concurrent command clients running.
+
 ## 0.2.24
 
 - Smoothly fit the latest reply at the screen edge after a mouse or keyboard preview stays open for five seconds.

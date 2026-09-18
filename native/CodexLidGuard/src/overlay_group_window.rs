@@ -10,15 +10,19 @@ pub(super) mod tab_state;
 pub(super) const TAB_WIDTH: i32 = tab_state::NOTICE_WIDTH;
 pub(super) const TAB_HEIGHT: i32 = 42;
 pub(super) const PANEL_WIDTH: i32 = 344;
-pub(super) const MESSAGE_WIDTH: i32 = 560;
+pub(super) const MESSAGE_WIDTH: i32 = PANEL_WIDTH;
 const HEADER: i32 = 28;
 const ROW: i32 = 28;
 const PREVIEW: i32 = 76;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Action {
+    Pin,
+    Maximize(String),
     Select(String),
     Open(CardTarget),
+    OpenEditor(CardTarget),
+    Answer(String, serde_json::Value, serde_json::Value),
     Send,
     NewChat,
     Fold,
@@ -37,6 +41,7 @@ pub(super) struct GroupUi {
     order: Vec<String>,
     pub pressed: Option<Action>,
     pub double: bool,
+    pub last_expand_click: Option<(Instant, String)>,
     pub dirty: bool,
     pub key_hint: String,
     offset: usize,
@@ -46,6 +51,7 @@ pub(super) struct GroupUi {
     drag_grab: i32,
     pub height: i32,
     pub chat: Option<chat_panel::Conversation>,
+    pub prompt: background_prompt::Prompt,
     pub progression: expand_state::Progression,
     pub message_anchor: Option<Rect>,
     width: i32,
@@ -70,6 +76,7 @@ impl GroupUi {
             order,
             pressed: None,
             double: false,
+            last_expand_click: None,
             dirty: true,
             key_hint: "Enter opens \u{b7} Esc dismisses".into(),
             offset: 0,
@@ -79,6 +86,7 @@ impl GroupUi {
             drag_grab: 0,
             height: 0,
             chat: None,
+            prompt: background_prompt::Prompt::default(),
             progression: expand_state::Progression::default(),
             message_anchor: None,
             width: 0,
@@ -165,6 +173,11 @@ impl GroupUi {
 
     fn open_rect(&self, dpi: u32) -> Rect {
         Rect { left: self.width - scale_dip(152, dpi), right: self.width - scale_dip(72, dpi), ..self.input_rect(dpi) }
+    }
+    fn approval_rect(&self, allow: bool, dpi: u32) -> Rect {
+        let d = |n| scale_dip(n, dpi);
+        let left = d(if allow { 18 } else { 124 });
+        Rect { left, right: left + d(98), top: self.footer_top - d(52), bottom: self.footer_top - d(28) }
     }
     fn dismiss_rect(&self, dpi: u32) -> Rect {
         Rect { left: self.width - scale_dip(68, dpi), right: self.width - scale_dip(12, dpi), ..self.input_rect(dpi) }
@@ -317,11 +330,23 @@ impl GroupUi {
             ));
         }
         if let Some(chat) = &mut self.chat {
-            chat.layout(Rect { left: d(18), top: self.preview_top + d(8), right: width - d(14), bottom: self.footer_top - d(28) }, dpi);
+            let approval = self.prompt.decision(true).is_some() || self.prompt.decision(false).is_some();
+            chat.layout(Rect { left: d(18), top: self.preview_top + d(8), right: width - d(14), bottom: self.footer_top - d(if approval { 58 } else { 28 }) }, dpi);
             if let Some((track, thumb)) = chat.scrollbar() {
                 self.hits.push((Rect { left: width - d(28), ..thumb }, Action::HistoryThumb));
                 self.hits.push((Rect { left: width - d(28), bottom: thumb.top, ..track }, Action::HistoryScroll(-(chat.bounds.bottom - chat.bounds.top))));
                 self.hits.push((Rect { left: width - d(28), top: thumb.bottom, ..track }, Action::HistoryScroll(chat.bounds.bottom - chat.bounds.top)));
+            }
+        }
+        if self.chat.is_some() {
+            for allow in [true, false] {
+                if let Some((session, id, result)) = self.prompt.decision(allow) {
+                    self.hits.push((self.approval_rect(allow, dpi), Action::Answer(session, id, result)));
+                }
+            }
+            if let Some(target) = self.selected_session().and_then(|s| s.card.target.clone())
+                && crate::background::is_task(&target.session_id) {
+                self.hits.push((Rect { left: d(18), top: self.footer_top - d(22), right: d(124), bottom: self.footer_top - d(4) }, Action::OpenEditor(target)));
             }
         }
         self.dirty = false;
@@ -395,6 +420,9 @@ impl GroupUi {
                 (9, Action::Send) => true,
                 (15, Action::Select(id)) => id == "0",
                 (19, Action::NewChat) => true,
+                (28, Action::OpenEditor(_)) => true,
+                (29, Action::Answer(_, _, result)) => result["decision"] == "accept",
+                (30, Action::Answer(_, _, result)) => result["decision"] != "accept",
                 (23, Action::Select(id)) => id.ends_with("-source"),
                 (24, Action::Select(id)) => !id.ends_with("-source") && self.selected.as_ref() != Some(id),
                 _ => false,
@@ -404,6 +432,8 @@ impl GroupUi {
 }
 
 pub(super) fn action_at(state: &OverlayState, x: i32, y: i32) -> Option<Action> {
+    let ui = state.group.as_ref()?;
+    if tab_at(state, x, y) { return Some(Action::Pin); }
     if state.collapsed {
         return None;
     }
@@ -411,7 +441,7 @@ pub(super) fn action_at(state: &OverlayState, x: i32, y: i32) -> Option<Action> 
     if x < panel.left || x >= panel.right || y < panel.top || y >= panel.bottom {
         return None;
     }
-    state.group.as_ref()?.hit(x - panel.left, y - panel.top)
+    ui.hit(x - panel.left, y - panel.top).or(Some(Action::Pin))
 }
 
 fn identity_color(key: &str) -> u32 {
@@ -735,9 +765,22 @@ pub(super) unsafe fn paint_panel(dc: Handle, state: &OverlayState, rect: Rect) {
             let preview = notice.map(str::to_owned).unwrap_or_else(|| session.card.text.split_whitespace().collect::<Vec<_>>().join(" "));
             if let Some(chat) = &ui.chat {
                 chat.paint(dc);
+                for allow in [true, false] {
+                    if ui.prompt.decision(allow).is_some() {
+                        let button = ui.approval_rect(allow, dpi);
+                        glass::plate(dc, button, dpi);
+                        SelectObject(dc, action_font);
+                        text(dc, if allow { "Allow once" } else { "Deny" }, button, foreground, DT_SINGLELINE | DT_VCENTER | 1);
+                    }
+                }
                 SelectObject(dc, small);
                 let status = state.composer.as_ref().map_or("", |composer| composer.history_status());
-                text(dc, status, Rect { left: d(18), top: ui.footer_top - d(22), right: rect.right - d(18), bottom: ui.footer_top - d(4) },
+                let background = crate::background::is_task(&session.id);
+                if background {
+                    text(dc, "Open in VS Code", Rect { left: d(18), top: ui.footer_top - d(22), right: d(124), bottom: ui.footer_top - d(4) },
+                        foreground, DT_SINGLELINE | DT_VCENTER);
+                }
+                text(dc, status, Rect { left: d(if background { 134 } else { 18 }), top: ui.footer_top - d(22), right: rect.right - d(18), bottom: ui.footer_top - d(4) },
                     subtle, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER | 1);
             } else {
                 text(dc, &preview, Rect { left: d(18), top: y + d(6), right: rect.right - d(18), bottom: y + d(42) },
@@ -966,9 +1009,9 @@ mod tests {
     #[test]
     fn new_chat_icon_is_reachable_in_both_sizes_without_overlapping_other_actions() {
         for dpi in [96, 120, 144, 192] {
-            for width in [PANEL_WIDTH, MESSAGE_WIDTH, 780] {
+            for (width, conversation) in [(PANEL_WIDTH, false), (MESSAGE_WIDTH, true), (780, true)] {
                 let mut ui = GroupUi::new(group());
-                if width != PANEL_WIDTH { ui.chat = Some(chat_panel::Conversation::default()); }
+                if conversation { ui.chat = Some(chat_panel::Conversation::default()); }
                 ui.layout(scale_dip(width, dpi), scale_dip(680, dpi), dpi);
                 let point = ui.test_point(19).unwrap();
                 assert_eq!(ui.hit(point.0, point.1), Some(Action::NewChat));

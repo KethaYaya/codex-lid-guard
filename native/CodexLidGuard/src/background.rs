@@ -358,6 +358,31 @@ pub fn chat_snapshot(id: &str) -> Option<View> {
     MANAGER.get()?.tasks.lock().ok()?.get(id).map(|task| task.snapshot())
 }
 
+pub fn pending_input(id: &str) -> Option<PendingInput> {
+    if !is_task(id) { return None; }
+    MANAGER.get()?.tasks.lock().ok()?.get(id)?.view.lock().ok()?.pending.first().cloned()
+}
+
+pub fn editor_target(id: &str) -> Result<crate::overlay::CardTarget, String> {
+    let task = MANAGER.get().and_then(|manager| manager.tasks.lock().ok()?.get(id).cloned())
+        .ok_or("This background session is no longer available.")?;
+    let thread = task.snapshot().thread_id.filter(|id| crate::session_navigation::valid_session_id(id))
+        .ok_or("The chat is still starting. Try again in a moment.")?;
+    let project = task.project.clone().ok_or("Open this project's saved chat from Codex history.")?;
+    Ok(crate::overlay::CardTarget { window: 0, session_id: thread, project: Some(project) })
+}
+
+pub fn answer(session: &str, id: &Value, result: Value) -> Result<(), String> {
+    let task = MANAGER.get().and_then(|manager| manager.tasks.lock().ok()?.get(session).cloned())
+        .ok_or("This background session is no longer available.")?;
+    let view = task.view.lock().unwrap();
+    if !view.pending.iter().any(|pending| &pending.id == id && valid_answer(pending, &result)) {
+        return Err("This request has changed. Review the current request before answering.".into());
+    }
+    task.send(Action::Answer { id: id.clone(), result }).then_some(())
+        .ok_or_else(|| "This background session has ended.".into())
+}
+
 pub fn show_tasks() {
     let Some(manager) = MANAGER.get() else {
         return;
@@ -931,7 +956,10 @@ fn run_worker(
                             "Sign in to Codex in VS Code, then start a new background task.",
                         ));
                     }
-                    server.call("thread/start", json!({"cwd":input.cwd,"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"workspace-write"}))?;
+                    // Match the installed VS Code client's persisted history contract.
+                    // Newer app-server versions otherwise default standalone clients to
+                    // paginated history, which older editor builds cannot resume.
+                    server.call("thread/start", json!({"cwd":input.cwd,"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"workspace-write","historyMode":"legacy","threadSource":"user"}))?;
                 }
                 "thread/start" => {
                     let thread_id = result["thread"]["id"]

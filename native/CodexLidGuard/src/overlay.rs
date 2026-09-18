@@ -688,8 +688,7 @@ pub fn start(source: impl Fn() -> Vec<Session> + Send + 'static) -> std::sync::A
                     slot,
                     |collapsed| view.snapshot(collapsed),
                     move |target: &CardTarget, window| {
-                        if crate::background::is_task(&target.session_id) { crate::background::show(&target.session_id).into() }
-                        else { win::OverlayOpen::activate(target.clone(), viewed.clone(), window) }
+                        win::OverlayOpen::activate(target.clone(), viewed.clone(), window)
                     },
                     shortcuts,
                     Some(updates),

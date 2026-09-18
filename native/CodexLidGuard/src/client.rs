@@ -22,10 +22,11 @@ pub fn send(mut request: GuardRequest) -> GuardResponse {
     }
     if crate::helper_pause::paused() { return crate::helper_pause::response(); }
     request.client_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    let mut response = try_send(&request, Duration::from_millis(25));
+    let (mut response, server_process_id) = try_send_identified(&request, Duration::from_millis(25))
+        .map_or((None, 0), |(response, process_id)| (Some(response), process_id));
     if let Some(value) = response.as_ref() {
         if !is_compatible(value) {
-            retire_legacy_daemon();
+            retire_legacy_daemon(server_process_id);
             response = None;
         } else if should_replace_idle_daemon(&request, value) {
             logging::write(format!(
@@ -33,7 +34,7 @@ pub fn send(mut request: GuardRequest) -> GuardResponse {
                 value.daemon_version.as_deref().unwrap_or("legacy"),
                 env!("CARGO_PKG_VERSION")
             ));
-            retire_legacy_daemon();
+            retire_legacy_daemon(server_process_id);
             response = None;
         }
     }
@@ -58,11 +59,16 @@ pub fn send(mut request: GuardRequest) -> GuardResponse {
 }
 
 fn try_send(request: &GuardRequest, timeout: Duration) -> Option<GuardResponse> {
+    try_send_identified(request, timeout).map(|(response, _)| response)
+}
+
+fn try_send_identified(request: &GuardRequest, timeout: Duration) -> Option<(GuardResponse, u32)> {
     let connection = win::connect_pipe(&paths::pipe_name(), timeout, RESPONSE_TIMEOUT).ok()?;
+    let process_id = connection.server_process_id().ok()?;
     connection
         .write_line(&serde_json::to_string(request).ok()?)
         .ok()?;
-    serde_json::from_str(&connection.read_line().ok()?).ok()
+    Some((serde_json::from_str(&connection.read_line().ok()?).ok()?, process_id))
 }
 
 fn start_daemon() -> std::io::Result<()> {
@@ -98,7 +104,7 @@ fn spawn_daemon(executable: &std::path::Path, creation_flags: u32) -> std::io::R
     Ok(())
 }
 
-fn retire_legacy_daemon() {
+fn retire_legacy_daemon(process_id: u32) {
     logging::write(
         "A legacy or different-build guardian daemon answered the pipe; restoring power policy and replacing it.",
     );
@@ -106,8 +112,16 @@ fn retire_legacy_daemon() {
         action: "restore".to_string(),
         ..GuardRequest::default()
     };
-    let _ = try_send(&restore, Duration::from_millis(1_500));
-    for process_id in win::terminate_other_helpers() {
+    let Ok(connection) = win::connect_pipe(&paths::pipe_name(), Duration::from_millis(1_500), RESPONSE_TIMEOUT) else { return; };
+    // Another window may already have replaced it. Never retire a new pipe owner,
+    // or the concurrent resume/status clients which still need to write replies.
+    if connection.server_process_id().ok() != Some(process_id) { return; }
+    let restored = connection.write_line(&serde_json::to_string(&restore).unwrap())
+        .and_then(|()| connection.read_line()).ok()
+        .and_then(|reply| serde_json::from_str::<GuardResponse>(&reply).ok())
+        .is_some_and(|response| response.ok);
+    if !restored { return; }
+    if win::terminate_helper_process(process_id) {
         logging::write(format!("Stopped legacy guardian process {process_id}."));
     }
     thread::sleep(Duration::from_millis(25));

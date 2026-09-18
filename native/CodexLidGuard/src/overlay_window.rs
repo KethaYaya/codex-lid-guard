@@ -24,6 +24,8 @@ mod reply_input;
 mod chat_panel;
 #[path = "overlay_new_chat.rs"]
 mod new_chat;
+#[path = "overlay_background.rs"]
+mod background_prompt;
 #[path = "overlay_expand_state.rs"]
 mod expand_state;
 use expand_state::Stage;
@@ -129,6 +131,7 @@ unsafe extern "system" {
     fn ScreenToClient(window: Hwnd, point: *mut Point) -> Bool;
     fn GetDoubleClickTime() -> u32;
     fn SetWindowTextW(window: Hwnd, text: *const u16) -> Bool;
+    fn IsWindowVisible(window: Hwnd) -> Bool;
     fn SystemParametersInfoW(action: u32, parameter: u32, value: *mut c_void, flags: u32) -> Bool;
 }
 
@@ -681,6 +684,7 @@ fn run_overlay_inner(
             let mut previous_bounds = None;
             let mut previous_opacity = None;
             let mut visible = false;
+            let mut raise_pending = true;
             let mut displayed_window = None;
             let mut displayed_session = None;
             let mut work: Rect = zeroed();
@@ -1307,7 +1311,7 @@ fn run_overlay_inner(
                         let bounds = if let Some(expansion) = &mut chat_expansion {
                             if expansion.pending() && animate {
                                 state.restoring = true;
-                                grow_surface = Some(prepare_chat_growth(window, &mut state, target)?);
+                                grow_surface = Some(prepare_chat_growth(window, &mut state, target, expansion.origin())?);
                             }
                             let (bounds, active) = expansion.sample(target, Instant::now(), animate);
                             // Cubic easing can round to the final pixels before its clock ends.
@@ -1426,6 +1430,14 @@ fn run_overlay_inner(
                             UpdateWindow(window);
                         }
                     }
+                    // Cached layered frames do not update Z order. Restore it
+                    // after app switches, and recover a lost topmost flag without
+                    // resizing, repainting, or taking keyboard focus.
+                    if raise_pending || GetWindowLongPtrW(window, -20) & WS_EX_TOPMOST as isize == 0 {
+                        raise_overlay(window)?;
+                        if let Some(composer) = &state.composer { composer.raise()?; }
+                        raise_pending = false;
+                    }
                     let backdrop_failed = if let Some(surface) = &mut backdrop {
                         #[cfg(test)]
                         { growth_profile[1] = real.elapsed().as_micros(); }
@@ -1516,7 +1528,13 @@ fn run_overlay_inner(
                     progression_timer = needs_progression;
                 }
                 loop {
-                    let Some(mut message) = frame_timer.message()? else {
+                    // Native focus/paint calls can run a nested Windows message
+                    // pump. The stored action is authoritative even if that pump
+                    // already dispatched its wake-up message to the window proc.
+                    let queued_action = state.group_action.is_some().then(|| Message {
+                        window, message: WM_APP_GROUP_ACTION, ..zeroed()
+                    });
+                    let Some(mut message) = (if queued_action.is_some() { queued_action } else { frame_timer.message()? }) else {
                         growth_frame_due = true;
                         refresh = false;
                         break;
@@ -1541,6 +1559,7 @@ fn run_overlay_inner(
                         break;
                     }
                     if matches!(message.message, WM_FOREGROUND | WM_MINIMIZE | WM_RESTORE) {
+                        raise_pending = true;
                         if message.message == WM_MINIMIZE && let Some(open) = &mut opening
                             && open.target.window == message.wparam as u64 {
                             open.motion = OpenMotion::new(Instant::now(), false);
@@ -1582,6 +1601,16 @@ fn run_overlay_inner(
                             }
                             state.panel_dirty = true; refresh = false; break;
                         }
+                        if let Some(ui) = &mut state.group && let Some(composer) = &mut state.composer
+                            && composer.target().is_some_and(|target| ui.selected.as_ref() == Some(&target.session_id))
+                            && let Some(result) = ui.prompt.answer(&composer.text()) {
+                            match result {
+                                Ok(()) => { composer.clear_answer(); ui.progression.clear_typing(); }
+                                Err(error) => { if let Some(id) = &ui.selected { composer.notice(id, &error); } }
+                            }
+                            update_chat_content(&mut state);
+                            state.panel_dirty = true; refresh = true; break;
+                        }
                         if state.composer.as_ref().is_some_and(|composer| composer.expanded()) {
                             state.composer.as_mut().unwrap().send_expanded();
                         } else if !state.collapsed && opening.is_none()
@@ -1605,14 +1634,32 @@ fn run_overlay_inner(
                     if message.message == WM_APP_GROUP_ACTION {
                         if opening.is_some() { state.group_action = None; continue; }
                         match state.group_action.take() {
-                            Some(GroupAction::Select(id)) => { if let Some(ui)=&mut state.group { ui.select(id); } }
+                            Some(GroupAction::Pin) => {
+                                if let Some(id) = state.group.as_ref().and_then(|ui| ui.selected.clone()) {
+                                    expand_chat(window, &mut state, &id, Stage::Message, &mut chat_expansion)?;
+                                }
+                            }
+                            Some(GroupAction::Maximize(id)) => { expand_chat(window, &mut state, &id, Stage::Full, &mut chat_expansion)?; }
+                            Some(GroupAction::Select(id)) => { expand_chat(window, &mut state, &id, Stage::Message, &mut chat_expansion)?; }
                             Some(GroupAction::Scroll(delta)) => { if let Some(ui)=&mut state.group { ui.scroll(delta); } }
                             Some(GroupAction::ScrollThumb | GroupAction::HistoryThumb) => {}
                             Some(GroupAction::HistoryScroll(delta)) => {
                                 if let Some(ui) = &mut state.group && let Some(chat) = &mut ui.chat { chat.scroll(delta); ui.dirty = true; }
                             }
                             Some(GroupAction::Fold) => { PostMessageW(window,WM_APP_COLLAPSE_OVERLAY,0,0); }
-                            Some(GroupAction::Open(target)) => { collapse_chat(&mut state); state.pending_target=Some(target);PostMessageW(window,WM_APP_OPEN_OVERLAY_CARD,0,0); }
+                            Some(GroupAction::Open(target)) => { state.pending_target=Some(target); message.message=WM_APP_OPEN_OVERLAY_CARD; }
+                            Some(GroupAction::OpenEditor(target)) => {
+                                match crate::background::editor_target(&target.session_id) {
+                                    Ok(target) => { state.pending_target=Some(target); message.message=WM_APP_OPEN_OVERLAY_CARD; }
+                                    Err(error) => { if let Some(composer) = &mut state.composer { composer.notice(&target.session_id, &error); } }
+                                }
+                            }
+                            Some(GroupAction::Answer(session, id, result)) => {
+                                match crate::background::answer(&session, &id, result) {
+                                    Ok(()) => { if let Some(ui) = &mut state.group && ui.selected.as_ref() == Some(&session) { ui.prompt.sent(); } }
+                                    Err(error) => { if let Some(composer) = &mut state.composer { composer.notice(&session, &error); } }
+                                }
+                            }
                             Some(GroupAction::Send) => { PostMessageW(window,WM_APP_SEND_REPLY,0,0); }
                             Some(GroupAction::NewChat) => {
                                 if new_request.is_none() && new_selection.is_none()
@@ -1636,7 +1683,10 @@ fn run_overlay_inner(
                             }
                             None => {}
                         }
-                        state.panel_dirty=true;refresh=true;break;
+                        state.panel_dirty=true;
+                        // Route the open before a render pass can pump and consume
+                        // a posted open message while synchronizing native controls.
+                        if !matches!(message.message, WM_APP_OPEN_OVERLAY_CARD | WM_APP_EXPAND_OVERLAY) { refresh=true;break; }
                     }
                     if message.message == WM_OVERLAY_SHORTCUT {
                         // Tokens bind queued input to this visible chat, never a replacement lane.
@@ -1767,6 +1817,12 @@ fn run_overlay_inner(
                         break;
                     }
                     if message.message == WM_APP_OPEN_OVERLAY_CARD {
+                        if state.pending_target.as_ref().is_some_and(|target| crate::background::is_task(&target.session_id)) {
+                            let target = state.pending_target.take().unwrap();
+                            expand_chat(window, &mut state, &target.session_id, Stage::Full, &mut chat_expansion)?;
+                            refresh = true;
+                            break;
+                        }
                         collapse_chat(&mut state);
                         // Preserve the exact last painted pixels before launching activation.
                         // The worker signals when it is about to restore the real window.
@@ -1897,10 +1953,7 @@ fn run_overlay_inner(
                         state.collapsed = false;
                         // Layered slide frames preserve Z order. Raise on every
                         // expansion path (click, hover, keyboard) without activation.
-                        if SetWindowPos(window, -1isize as Hwnd, 0, 0, 0, 0,
-                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER) == 0 {
-                            return Err(error("Raise expanded overlay"));
-                        }
+                        raise_overlay(window)?;
                         arrival = None;
                         state.clicks = ClickTracker::default();
                         // The message is already cached. Input must not wait on monitor
@@ -2157,16 +2210,22 @@ fn chat_expanded(state: &OverlayState) -> bool { state.group.as_ref().is_some_an
 fn update_chat_content(state: &mut OverlayState) {
     use crate::chat_history::{Message, Role};
     let Some(ui) = &mut state.group else { return; };
+    let session = ui.selected.as_deref().unwrap_or_default();
+    ui.prompt.sync(session, crate::background::pending_input(session));
+    let prompt = ui.prompt.details().map(|details| Message::new(Role::Notice, details));
     let messages = state.composer.as_ref().filter(|composer| composer.target().is_some_and(|target|
         ui.selected.as_ref() == Some(&target.session_id))).and_then(|composer| composer.history_messages());
     let latest = if ui.progression.stage == Stage::Message {
-        messages.and_then(|messages| messages.iter().rev().find(|message| message.role == Role::Assistant)
+        prompt.clone().or_else(|| messages.and_then(|messages| messages.iter().rev().find(|message| message.role == Role::Assistant)
             .or_else(|| messages.last())).cloned()
-            .or_else(|| ui.selected_session().map(|session| Message::new(Role::Assistant, &session.card.text)))
+            .or_else(|| ui.selected_session().map(|session| Message::new(Role::Assistant, &session.card.text))))
     } else { None };
     if let Some(chat) = &mut ui.chat {
         if let Some(latest) = latest { ui.dirty |= chat.update_latest(latest); }
-        else if let Some(messages) = messages { ui.dirty |= chat.update(messages); }
+        else if let Some(prompt) = prompt {
+            let mut history = messages.unwrap_or_default().to_vec(); history.push(prompt);
+            ui.dirty |= chat.update(&history);
+        } else if let Some(messages) = messages { ui.dirty |= chat.update(messages); }
     }
 }
 
@@ -2188,6 +2247,33 @@ fn begin_chat_stage(state: &mut OverlayState, stage: Stage, expansion: &mut Opti
     state.collapsed = false;
 }
 
+unsafe fn expand_chat(window: Hwnd, state: &mut OverlayState, session: &str, stage: Stage,
+    expansion: &mut Option<chat_panel::Expansion>) -> io::Result<()> {
+    unsafe {
+        let Some(target) = state.group.as_ref().and_then(|ui| ui.group.sessions.iter()
+            .find(|item| item.id == session)).and_then(|item| item.card.target.clone()) else { return Ok(()); };
+        cancel_hover(window, state);
+        cancel_keyboard_preview(window, state);
+        let previous = EXPANDED_PROJECT.swap(window as usize, std::sync::atomic::Ordering::Relaxed);
+        if previous != 0 && previous != window as usize { PostMessageW(previous as Hwnd, WM_APP_COLLAPSE_OVERLAY, 0, 0); }
+        let ui = state.group.as_mut().unwrap();
+        ui.tab.preview_opened(&ui.group);
+        let stage = if ui.progression.stage == Stage::Full { Stage::Full } else { stage };
+        if ui.selected.as_deref() == Some(session)
+            && (ui.progression.stage == Stage::Full || ui.progression.stage == stage) {
+            if stage == Stage::Full && let Some(composer) = &state.composer { composer.focus(); }
+            return raise_overlay(window);
+        }
+        ui.select(session.to_owned());
+        if state.composer.is_none() { state.composer = Some(reply_input::Composer::new(window)?); }
+        // A click can arrive before the drawer or its composer is painted.
+        state.composer.as_mut().unwrap().bind(target)?;
+        begin_chat_stage(state, stage, expansion);
+        raise_overlay(window)?;
+        Ok(())
+    }
+}
+
 unsafe fn reserve_chat_buffers(window: Hwnd, state: &mut OverlayState, target: Rect) -> io::Result<()> {
     unsafe {
         let width = target.right-target.left;
@@ -2203,7 +2289,7 @@ unsafe fn reserve_chat_buffers(window: Hwnd, state: &mut OverlayState, target: R
     }
 }
 
-unsafe fn prepare_chat_growth(window: Hwnd, state: &mut OverlayState, target: Rect) -> io::Result<GrowSurface> {
+unsafe fn prepare_chat_growth(window: Hwnd, state: &mut OverlayState, target: Rect, from: Rect) -> io::Result<GrowSurface> {
     unsafe {
         reserve_chat_buffers(window, state, target)?;
         let width = target.right-target.left;
@@ -2228,7 +2314,7 @@ unsafe fn prepare_chat_growth(window: Hwnd, state: &mut OverlayState, target: Re
         ReleaseDC(window, dc);
         result?;
         let mut surface = GrowSurface::capture(state.compositor.as_ref().unwrap().cached_dc(), width, height,
-            history.top, height-history.bottom, dpi)?;
+            history.top, height-history.bottom, dpi, (from.right-from.left, from.bottom-from.top))?;
         if let Some(composer) = &mut state.composer {
             surface.include_input(state.group.as_ref().unwrap().input_rect(dpi), |dc| composer.paint_snapshot(dc))?;
             composer.begin_growth()?;
@@ -2261,6 +2347,16 @@ fn collapse_chat(state: &mut OverlayState) {
     if let Some(composer) = &mut state.composer { composer.collapse_chat(); }
 }
 
+unsafe fn raise_overlay(window: Hwnd) -> io::Result<()> {
+    unsafe {
+        if SetWindowPos(window, -1isize as Hwnd, 0, 0, 0, 0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER) == 0 {
+            return Err(error("Keep overlay above other windows"));
+        }
+        Ok(())
+    }
+}
+
 unsafe extern "system" fn window_procedure(
     window: Hwnd,
     message: u32,
@@ -2274,6 +2370,11 @@ unsafe extern "system" fn window_procedure(
             return state.as_ref().map_or(0,|state|group_tests::query(state,wparam));
         }
         #[cfg(test)]
+        if message == 0x80f2 {
+            group_tests::nested_click(window, lparam);
+            return 0;
+        }
+        #[cfg(test)]
         if message == 0x80f1 {
             if let Some(state) = (state as *mut OverlayState).as_mut()
                 && let Some(composer) = &mut state.composer {
@@ -2281,6 +2382,15 @@ unsafe extern "system" fn window_procedure(
                 composer.test_history(text);
                 PostMessageW(window, WM_FRAME_READY, 0, 0);
             }
+            return 0;
+        }
+        if message == WM_LBUTTONDBLCLK
+            && let Some(state) = (state as *mut OverlayState).as_mut()
+            && let Some((at, id)) = state.group.as_mut().and_then(|ui| ui.last_expand_click.take())
+            && at.elapsed() <= Duration::from_millis(GetDoubleClickTime() as u64) {
+            cancel_hover(window, state); cancel_keyboard_preview(window, state);
+            state.group_action = Some(GroupAction::Maximize(id));
+            PostMessageW(window, WM_APP_GROUP_ACTION, 0, 0);
             return 0;
         }
         if state.as_ref().is_some_and(|state| state.restoring)
@@ -2305,14 +2415,17 @@ unsafe extern "system" fn window_procedure(
             WM_WINDOWPOSCHANGING => {
                 // A tab's initial show, refresh or collapse must never overtake
                 // the selected project, even while both windows are animating.
-                if state.as_ref().is_some_and(|state| state.group.is_some()) {
+                // Only follow a visible topmost sibling: following a demoted or
+                // hidden window can pull the entire overlay into the normal band.
+                if let Some(position) = (lparam as *mut WindowPosition).as_mut()
+                    && (position.flags & SWP_NOZORDER == 0 || position.flags & SWP_SHOWWINDOW != 0) {
                     let expanded = EXPANDED_PROJECT.load(std::sync::atomic::Ordering::Relaxed) as Hwnd;
-                    if !expanded.is_null() && expanded != window && IsWindow(expanded) != 0
-                        && let Some(position) = (lparam as *mut WindowPosition).as_mut()
-                        && (position.flags & SWP_NOZORDER == 0 || position.flags & SWP_SHOWWINDOW != 0) {
-                        position.after = expanded;
-                        position.flags = (position.flags & !SWP_NOZORDER) | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-                    }
+                    position.after = if state.as_ref().is_some_and(|state| state.group.is_some())
+                        && !expanded.is_null() && expanded != window && IsWindowVisible(expanded) != 0
+                        && GetWindowLongPtrW(expanded, -20) & WS_EX_TOPMOST as isize != 0 {
+                        expanded
+                    } else { -1isize as Hwnd };
+                    position.flags = (position.flags & !SWP_NOZORDER) | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
                 }
                 DefWindowProcW(window, message, wparam, lparam)
             }
@@ -2369,8 +2482,11 @@ unsafe extern "system" fn window_procedure(
                 let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 if let Some(state) = state.as_mut() {
                     state.panel_dirty = true;
+                    // A new gesture cannot reuse the previous click's session.
+                    if let Some(ui) = &mut state.group { ui.last_expand_click = None; }
                     if let Some(action)=group_window::action_at(state,lparam as i16 as i32,(lparam>>16) as i16 as i32) {
                         cancel_hover(window,state);cancel_keyboard_preview(window,state);
+                        state.tab_pressed = tab_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32);
                         if action == GroupAction::ScrollThumb {
                             let panel_top = state.layout.and_then(|layout| layout.panel).map_or(0, |panel| panel.top);
                             state.group.as_mut().unwrap().begin_drag((lparam >> 16) as i16 as i32 - panel_top);
@@ -2418,11 +2534,20 @@ unsafe extern "system" fn window_procedure(
                         let released=group_window::action_at(state,lparam as i16 as i32,(lparam>>16) as i16 as i32);
                         let ui=state.group.as_mut().unwrap();let pressed=ui.pressed.take();
                         if pressed==released {
+                            // Growth moves controls under the cursor. Bind the second
+                            // click to the original expandable surface, including while animating.
+                            ui.last_expand_click = match &pressed {
+                                Some(GroupAction::Pin) => ui.selected.clone(),
+                                Some(GroupAction::Select(id)) => Some(id.clone()),
+                                _ => None,
+                            }.map(|id| (Instant::now(), id));
                             state.group_action=if ui.double {
-                                match pressed {Some(GroupAction::Select(id))=>ui.group.sessions.iter().find(|s|s.id==id)
-                                    .and_then(|s|s.card.target.clone()).map(GroupAction::Open),Some(GroupAction::NewChat)=>None,other=>other}
+                                match pressed { Some(GroupAction::Select(id)) => Some(GroupAction::Maximize(id)),
+                                    Some(GroupAction::Pin) => ui.selected.clone().map(GroupAction::Maximize),
+                                    Some(GroupAction::NewChat) => None, other => other }
                             }else{pressed};
                         }
+                        state.tab_pressed = false;
                         ReleaseCapture();PostMessageW(window,WM_APP_GROUP_ACTION,0,0);
                         return 0;
                     }

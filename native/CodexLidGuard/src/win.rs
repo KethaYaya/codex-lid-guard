@@ -87,7 +87,6 @@ const PIPE_WAIT: u32 = 0;
 const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x0000_0008;
 const TOKEN_QUERY: u32 = 0x0008;
 const TOKEN_USER_CLASS: u32 = 1;
-const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 const PROCESS_TERMINATE: u32 = 0x0001;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -251,20 +250,6 @@ struct TokenUser {
 }
 
 #[repr(C)]
-struct ProcessEntry32W {
-    size: u32,
-    usage: u32,
-    process_id: u32,
-    default_heap_id: usize,
-    module_id: u32,
-    threads: u32,
-    parent_process_id: u32,
-    priority_base: i32,
-    flags: u32,
-    exe_file: [u16; 260],
-}
-
-#[repr(C)]
 struct SystemTime {
     year: u16,
     month: u16,
@@ -422,6 +407,7 @@ unsafe extern "system" {
         security: *const c_void,
     ) -> Handle;
     fn ConnectNamedPipe(pipe: Handle, overlapped: *mut Overlapped) -> Bool;
+    fn GetNamedPipeServerProcessId(pipe: Handle, process_id: *mut u32) -> Bool;
     fn CancelIoEx(handle: Handle, overlapped: *const Overlapped) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn GetCurrentProcessId() -> u32;
@@ -444,8 +430,6 @@ unsafe extern "system" {
         executable_name: *mut u16,
         size: *mut u32,
     ) -> Bool;
-    fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
-    fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
     fn ProcessIdToSessionId(process_id: u32, session_id: *mut u32) -> Bool;
     fn ReadFile(
         handle: Handle,
@@ -466,7 +450,6 @@ unsafe extern "system" {
         written: *mut u32,
         overlapped: *mut Overlapped,
     ) -> Bool;
-    fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
 }
 
 #[link(name = "advapi32")]
@@ -641,14 +624,6 @@ fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
-}
-
-fn wide_string(value: &[u16]) -> String {
-    let end = value
-        .iter()
-        .position(|character| *character == 0)
-        .unwrap_or(value.len());
-    String::from_utf16_lossy(&value[..end])
 }
 
 fn error(operation: &str) -> io::Error {
@@ -856,6 +831,14 @@ pub struct PipeConnection {
 }
 
 impl PipeConnection {
+    pub fn server_process_id(&self) -> io::Result<u32> {
+        let mut process_id = 0;
+        if unsafe { GetNamedPipeServerProcessId(self.handle.0, &mut process_id) } == 0 {
+            return Err(error("Identify guardian pipe owner"));
+        }
+        Ok(process_id)
+    }
+
     pub fn read_line(&self) -> io::Result<String> {
         let mut bytes = Vec::new();
         let mut buffer = [0u8; 4096];
@@ -2482,40 +2465,42 @@ unsafe extern "system" fn lid_window_procedure(
     }
 }
 
-pub fn terminate_other_helpers() -> Vec<u32> {
-    let mut stopped = Vec::new();
+pub fn terminate_helper_process(process_id: u32) -> bool {
     unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == INVALID_HANDLE_VALUE {
-            return stopped;
-        }
-        let snapshot = OwnedHandle(snapshot);
-        let mut entry: ProcessEntry32W = zeroed();
-        entry.size = size_of::<ProcessEntry32W>() as u32;
-        let current = GetCurrentProcessId();
-        let mut available = Process32FirstW(snapshot.0, &mut entry) != 0;
-        while available {
-            if entry.process_id != current
-                && wide_string(&entry.exe_file).eq_ignore_ascii_case("CodexLidGuard.exe")
-            {
-                let process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, entry.process_id);
-                if !process.is_null() {
-                    let process = OwnedHandle(process);
-                    if TerminateProcess(process.0, 0) != 0 {
-                        let _ = WaitForSingleObject(process.0, 2_000);
-                        stopped.push(entry.process_id);
-                    }
-                }
-            }
-            available = Process32NextW(snapshot.0, &mut entry) != 0;
-        }
+        if process_id == 0 || process_id == GetCurrentProcessId() { return false; }
+        let process = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, process_id);
+        if process.is_null() { return false; }
+        let process = OwnedHandle(process);
+        let mut buffer = [0u16; 32768];
+        let mut length = buffer.len() as u32;
+        if QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &mut length) == 0 { return false; }
+        let executable = String::from_utf16_lossy(&buffer[..length as usize]);
+        if !Path::new(&executable).file_name().and_then(OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case("CodexLidGuard.exe")) { return false; }
+        if TerminateProcess(process.0, 0) == 0 { return false; }
+        let _ = WaitForSingleObject(process.0, 2_000);
+        true
     }
-    stopped
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guardian_retirement_refuses_the_caller_and_unrelated_processes() {
+        assert!(!terminate_helper_process(0));
+        assert!(!terminate_helper_process(std::process::id()));
+        use std::os::windows::process::CommandExt;
+        let child = std::process::Command::new("ping.exe").args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000).spawn().unwrap();
+        struct Cleanup(std::process::Child);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let mut child = Cleanup(child);
+        assert!(!terminate_helper_process(child.0.id()));
+        assert!(child.0.try_wait().unwrap().is_none(), "a different executable must remain running");
+    }
 
     #[test]
     fn overlay_chat_routes_are_local_and_validate_the_session_id() {
@@ -2729,6 +2714,7 @@ mod tests {
                 Err(cause) => panic!("test client could not connect: {cause}"),
             }
         };
+        assert_eq!(connection.server_process_id().unwrap(), std::process::id(), "handoff must identify the exact pipe server, not enumerate command clients");
         connection.write_line("request").unwrap();
         written.recv_timeout(Duration::from_secs(1)).unwrap();
         let response = connection.read_line().unwrap();

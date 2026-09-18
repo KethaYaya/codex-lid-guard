@@ -15,6 +15,7 @@ impl Expansion {
     pub fn new(from: Rect) -> Self { Self { from, started: None, smooth_start: false } }
     pub fn growing(from: Rect) -> Self { Self { smooth_start: true, ..Self::new(from) } }
     pub fn pending(&self) -> bool { self.started.is_none() }
+    pub fn origin(&self) -> Rect { self.from }
     pub fn sample(&mut self, to: Rect, now: Instant, animate: bool) -> (Rect, bool) {
         let started = *self.started.get_or_insert(now);
         if !animate { return (to, false); }

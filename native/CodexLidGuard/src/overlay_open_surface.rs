@@ -281,10 +281,10 @@ pub(super) struct GrowSurface {
 }
 
 impl GrowSurface {
-    pub(super) unsafe fn capture(cached: Handle, width: i32, height: i32, header: i32, footer: i32, dpi: u32) -> io::Result<Self> {
+    pub(super) unsafe fn capture(cached: Handle, width: i32, height: i32, header: i32, footer: i32, dpi: u32, from_size: (i32, i32)) -> io::Result<Self> {
         unsafe {
             let source = Surface::new(width, height)?;
-            let output = Surface::new(width, height)?;
+            let output = Surface::new(width.max(from_size.0), height.max(from_size.1))?;
             if BitBlt(source.dc, 0, 0, width, height, cached, 0, 0, 0x00cc0020) == 0 {
                 return Err(error("Cache growing overlay"));
             }
@@ -318,8 +318,17 @@ impl GrowSurface {
 
     unsafe fn compose(&mut self, width: i32, height: i32) -> io::Result<()> {
         unsafe {
-            if width <= 0 || height <= 0 || width > self.source.width || height > self.source.height {
+            if width <= 0 || height <= 0 || width > self.output.width || height > self.output.height {
                 return Err(io::Error::other("Growth frame exceeds its cached layout"));
+            }
+            if width > self.source.width || height > self.source.height {
+                // A shorter reply, smaller monitor, or wide full-chat layout can
+                // shrink one dimension. Fill the extra space with cached glass,
+                // while keeping the reply and footer at their native pixel size.
+                GdiFlush();
+                let background = *self.source.bits.add((self.header.min(self.source.height-1) * self.source.width
+                    + scale_dip(8, self.dpi).min(self.source.width-1)) as usize);
+                self.output.pixels().fill(background);
             }
             let header = self.header.min(height);
             let footer = self.footer.min(height-header);
@@ -327,11 +336,11 @@ impl GrowSurface {
             // Left text stays anchored; status, scrollbars and buttons stay on the right.
             for (y, sy, band_height, right) in [
                 (0, 0, header, scale_dip(160, self.dpi)),
-                (header, self.header, height-header-footer, scale_dip(18, self.dpi)),
+                (header, self.header, (height-header-footer).min((self.source.height-self.header-self.footer).max(0)), scale_dip(18, self.dpi)),
                 (height-footer, self.source.height-footer, footer, scale_dip(200, self.dpi)),
             ] {
-                let right = right.min(width);
-                for (x, sx, band_width) in [(0, 0, width-right), (width-right, self.source.width-right, right)] {
+                let right = right.min(width).min(self.source.width);
+                for (x, sx, band_width) in [(0, 0, (width-right).min(self.source.width-right)), (width-right, self.source.width-right, right)] {
                     if band_height > 0 && band_width > 0
                         && BitBlt(self.output.dc, x, y, band_width, band_height, self.source.dc, sx, sy, 0x00cc0020) == 0 {
                         return Err(error("Copy growing overlay section"));
@@ -575,7 +584,7 @@ mod tests {
                 for (i, pixel) in cached.pixels().iter_mut().enumerate() {
                     *pixel = (i as u32).wrapping_mul(7919);
                 }
-                let mut growth = GrowSurface::capture(cached.dc, width, height, d(94), d(62), dpi).unwrap();
+                let mut growth = GrowSurface::capture(cached.dc, width, height, d(94), d(62), dpi, (width, height)).unwrap();
                 let buffers = (growth.output.dc, growth.output.bitmap);
                 for (w, h) in [(d(344), d(166)), (d(520), d(400)), (width, height)] {
                     growth.compose(w, h).unwrap();
@@ -599,6 +608,43 @@ mod tests {
                         assert_eq!(pixels, source, "final frame must exactly match the live full-size image");
                     }
                     assert_eq!(buffers, (growth.output.dc, growth.output.bitmap));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shorter_replies_and_tall_previews_can_resize_without_exceeding_the_cached_frame() {
+        unsafe {
+            for dpi in [96, 144, 192] {
+                let d = |value| scale_dip(value, dpi);
+                for (width, height, from_width, from_height) in [(344, 240, 344, 900), (780, 680, 344, 900), (344, 240, 780, 680)] {
+                    let (width, height, from_width, from_height) = (d(width), d(height), d(from_width), d(from_height));
+                    let mut cached = Surface::new(width, height).unwrap();
+                    for (i, pixel) in cached.pixels().iter_mut().enumerate() { *pixel = (i as u32).wrapping_mul(7919); }
+                    let mut frame = GrowSurface::capture(cached.dc, width, height, d(94), d(62), dpi, (from_width, from_height)).unwrap();
+                    let buffers = (frame.output.dc, frame.output.bitmap);
+                    let stride = frame.output.width;
+                    for step in 0..=20 {
+                        let w = from_width + (width-from_width)*step/20;
+                        let h = from_height + (height-from_height)*step/20;
+                        frame.compose(w, h).unwrap();
+                        GdiFlush();
+                        let output = frame.output.pixels();
+                        let source = cached.pixels();
+                        assert_eq!(output[0], source[0]);
+                        assert_eq!(output[((h-1)*stride+w-1) as usize], source[(height*width-1) as usize]);
+                        assert_eq!(output[((h-d(20))*stride+w-d(100)) as usize], source[((height-d(20))*width+width-d(100)) as usize]);
+                        if h > height {
+                            assert_eq!(output[((h-d(62)-1)*stride) as usize], source[(d(94)*width+d(8)) as usize], "extra height must contain cached glass, not stale text");
+                        }
+                        if step == 20 {
+                            for y in 0..height {
+                                assert_eq!(&output[(y*stride) as usize..(y*stride+width) as usize], &source[(y*width) as usize..((y+1)*width) as usize]);
+                            }
+                        }
+                        assert_eq!(buffers, (frame.output.dc, frame.output.bitmap));
+                    }
                 }
             }
         }

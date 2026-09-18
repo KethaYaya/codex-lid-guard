@@ -52,6 +52,8 @@ fn main() {
             assert!(line.contains("\"sandbox\":\"workspace-write\""));
             assert!(line.contains("\"approvalPolicy\":\"on-request\""));
             assert!(line.contains("\"approvalsReviewer\":\"user\""));
+            assert!(line.contains("\"historyMode\":\"legacy\""));
+            assert!(line.contains("\"threadSource\":\"user\""));
             reply(id, "{\"thread\":{\"id\":\"test-thread\"}}");
         } else if line.contains("\"method\":\"turn/start\"") {
             turns += 1;

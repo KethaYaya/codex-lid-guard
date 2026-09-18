@@ -93,7 +93,7 @@ impl Composer {
         }
     }
 
-    fn text(&self) -> String {
+    pub fn text(&self) -> String {
         unsafe {
             // A restored failed submission may sit alongside a newer 8K draft.
             let count = GetWindowTextLengthW(self.edit.input).clamp(0, 32 * 1024);
@@ -123,6 +123,10 @@ impl Composer {
         if let Some(target) = &self.bound { self.notices.remove(&target.session_id); }
     }
     pub fn focused(&self) -> bool { unsafe { self.visible && GetFocus() == self.edit.input } }
+    pub fn raise(&self) -> io::Result<()> {
+        if self.visible && !self.animating { unsafe { raise_overlay(self.window)?; } }
+        Ok(())
+    }
     pub fn focus(&self) {
         if self.visible && self.edit.typing_token != 0 {
             unsafe { PostMessageW(self.window, WM_HOVER_TEXT, self.edit.typing_token, 0); }
@@ -131,6 +135,10 @@ impl Composer {
     pub fn notice(&mut self, id: &str, text: &str) {
         self.sent = None;
         if text.is_empty() { self.notices.remove(id); } else { self.notices.insert(id.into(), text.into()); }
+    }
+    pub fn clear_answer(&mut self) {
+        if let Some(target) = &self.bound { self.drafts.remove(&target.session_id); self.notices.remove(&target.session_id); }
+        self.set_text("");
     }
     pub fn expanded(&self) -> bool { self.expanded }
     pub fn has_text(&self) -> bool { !self.text().is_empty() }
@@ -238,12 +246,11 @@ impl Composer {
             SendMessageW(self.window, 0x0317, dc as usize, 0x04 | 0x08 | 0x10);
         }
     }
-    pub fn sync(&mut self, rect: Rect, dpi: u32, target: CardTarget) -> io::Result<()> {
-        if self.animating { return Ok(()); }
-        if !self.visible || self.bound.as_ref() != Some(&target) {
-            self.edit.typing_token = NEXT_TYPING_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+    pub fn bind(&mut self, target: CardTarget) -> io::Result<()> {
         if self.bound.as_ref() != Some(&target) {
+            // Binding can precede sync while a click starts the growth animation.
+            // Reject queued hover text belonging to the previous session immediately.
+            self.edit.typing_token = 0;
             self.save();
             let text = self.drafts.get(&target.session_id).cloned().unwrap_or_default();
             self.set_text(&text);
@@ -252,6 +259,14 @@ impl Composer {
                 self.snapshot = None; self.history_error = None;
             }
             self.bound = Some(target);
+        }
+        Ok(())
+    }
+    pub fn sync(&mut self, rect: Rect, dpi: u32, target: CardTarget) -> io::Result<()> {
+        if self.animating { return Ok(()); }
+        self.bind(target)?;
+        if !self.visible || self.edit.typing_token == 0 {
+            self.edit.typing_token = NEXT_TYPING_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         unsafe {
             if self.dpi != dpi {

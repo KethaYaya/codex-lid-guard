@@ -72,7 +72,21 @@ pub(crate) fn start_overlay_fixture(cwd: &Path) -> String {
     initialize(|_| GuardResponse { ok: true, ..Default::default() });
     let id = format!("lidguard-background-{}-source", std::process::id());
     start_session(Start { codex_path: fixture().to_string_lossy().into(), cwd: cwd.to_string_lossy().into(), prompt: String::new() },
-        id, true, None).unwrap()
+        id, true, Some(crate::session_navigation::Project { cwd: cwd.to_string_lossy().into(),
+            path: cwd.to_string_lossy().into(), executable: cwd.join("Code.exe").to_string_lossy().into() })).unwrap()
+}
+
+pub(crate) fn set_overlay_fixture_request(id: &str, pending: PendingInput) {
+    let task = MANAGER.get().unwrap().tasks.lock().unwrap().get(id).unwrap().clone();
+    task.update(|view| { view.pending = vec![pending]; view.thread_id = Some("11111111-1111-1111-1111-111111111111".into()); });
+}
+
+pub(crate) fn set_overlay_fixture_reply(id: &str, text: &str) {
+    let task = MANAGER.get().unwrap().tasks.lock().unwrap().get(id).unwrap().clone();
+    let mut view = task.view.lock().unwrap();
+    view.latest = text.into();
+    view.messages = vec![ChatMessage::new(Role::Assistant, text)];
+    view.revision += 1;
 }
 
 #[test]
