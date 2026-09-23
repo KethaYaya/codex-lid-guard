@@ -1262,6 +1262,7 @@ mod tests {
                     hover_open: None,
                     keyboard_preview: None,
                     tab_pressed: false,
+                    tab_drag: tab_drag::Interaction::default(),
                     close_pressed: false,
                     activity: 0,
                     layout: None,

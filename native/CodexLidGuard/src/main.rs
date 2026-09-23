@@ -27,6 +27,9 @@ use model::{GuardRequest, GuardResponse, HookPayload, PROTOCOL_VERSION};
 use sound::AlertSound;
 
 fn main() {
+    std::panic::set_hook(Box::new(|panic| {
+        logging::write(format!("Guardian {} panic: {panic}", env!("CARGO_PKG_VERSION")));
+    }));
     let result = run();
     if let Err(cause) = result {
         logging::write(format!("Fatal command failure: {cause}"));

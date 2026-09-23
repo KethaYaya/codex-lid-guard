@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.38
+
+- Use a stronger dark background tint in the full-height, one-third-screen chat panel to improve text readability, including during expansion. Preserve the configured tint for folded tabs and smaller previews.
+
+## 0.2.37
+
+- Fix a native helper crash when an expanded panel or a previous space reservation is taller than the available desktop area. Keep columns populated, fit panels and tabs within the current height, and preserve dragged positions through resizing and folding.
+
+## 0.2.36
+
+- Save dragged tab positions per project and overlay corner across helper restarts and updates. Restore the position when a project tab hides and returns, and preserve the last valid position during layout changes.
+- Include the helper version and unexpected native panics in diagnostic logs.
+
+## 0.2.35
+
+- Match newly active sessions to their open project workspace before using the foreground editor. Keep overlay tabs available when a turn starts while another project or app is focused, and avoid guessing between duplicate workspace windows.
+
+## 0.2.34
+
+- Expand full chats into a full-height panel occupying the right third of the monitor. Reserve the remaining two-thirds for other apps and keep the chat visible while working in them.
+- Restore affected windows to their previous positions, sizes, and maximized state when the chat is minimized, closed, or the helper shuts down or updates. Keep other monitors and already minimized windows unchanged.
+
+## 0.2.33
+
+- Drag popped-out previews by their header or background while keeping them snapped to the screen edge. Preserve their size, pin state, and click controls.
+
+## 0.2.32
+
+- Drag individual folded tabs up and down their screen border, keeping them snapped and clear of neighboring tabs. Preserve the chosen positions while the helper runs.
+- Allow time to grab a tab before its hover preview opens; keep clicks, double-clicks, and dropping without opening a chat distinct.
+
+## 0.2.31
+
+- Keep neighboring project tabs visible while a message preview expands, resizes, or folds; reserve its space until the animation finishes.
+- Leave room for other tabs when fitting long replies, scrolling the message within the remaining height at the original width.
+
 ## 0.2.30
 
 - Keep clicked overlays pinned open even if a hover timeout was already queued.

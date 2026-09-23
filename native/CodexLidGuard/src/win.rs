@@ -18,6 +18,9 @@ use crate::paths;
 #[path = "overlay_window.rs"]
 mod overlay_window;
 pub use overlay_window::run_session_overlay;
+#[path = "overlay_workspace.rs"]
+mod overlay_workspace;
+pub use overlay_workspace::restore_overlay_workspace;
 #[path = "overlay_shortcuts.rs"]
 mod overlay_shortcuts;
 pub use overlay_shortcuts::OverlayShortcuts;

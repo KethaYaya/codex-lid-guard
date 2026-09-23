@@ -3,7 +3,7 @@
   "displayName": "Codex Lid Guard",
   "description": "Keeps Windows awake while a local Codex turn runs, even with the laptop lid closed, then restores sleep behavior.",
   "icon": "images/codex-lid-guard-logo.png",
-  "version": "0.2.30",
+  "version": "0.2.38",
   "publisher": "KethaYaya",
   "license": "MIT",
   "pricing": "Free",
@@ -111,7 +111,7 @@
           "type": "boolean",
           "default": false,
           "scope": "application",
-          "description": "Show the latest assistant updates whenever another app or chat is in focus. Hide only the chat currently visible in its focused VS Code window. Hover over a tab to expand it; move away to tuck it back. Double-click a message to maximize VS Code and open its chat. Reads newly appended assistant display messages from local Codex session files; previews stay in memory."
+          "description": "Show assistant updates when another app or chat is in focus. Hover over a tab to preview it. Double-click a tab, preview, or session title to open the full chat in the right third of the screen, making room beside it for other apps. Minimize the chat to restore their previous sizes. Reads newly appended assistant display messages from local Codex session files; previews stay in memory."
         },
         "codexLidGuard.overlayOpacity": {
           "type": "number",

@@ -32,6 +32,7 @@ pub(super) fn query(state: &OverlayState, kind: usize) -> isize {
         27 => ui.chat.as_ref().map_or(0, |chat| (chat.bounds.bottom - chat.bounds.top) as isize),
         33 => ui.pinned as isize,
         34 => ui.fold_after_click.is_some() as isize,
+        35 => state.tab_drag.moving() as isize,
         31 => state.layout.and_then(|layout| layout.panel).map_or(0, |panel| {
             let x = panel.left + scale_dip(20, state.dpi);
             let y = panel.top + scale_dip(10, state.dpi);
@@ -48,6 +49,234 @@ pub(super) fn query(state: &OverlayState, kind: usize) -> isize {
                 })
             })
             .unwrap_or(0),
+    }
+}
+
+#[test]
+#[ignore = "creates an owned overlay; sends mouse messages only to its test HWND"]
+fn native_tab_drag_moves_without_opening_and_preserves_clicks_and_hover() {
+    unsafe {
+        let previous_dpi = SetThreadDpiAwarenessContext(-4isize as Handle);
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = stop.clone();
+        let pointer = Arc::new(std::sync::Mutex::new(None));
+        let cursor = pointer.clone();
+        let shown = Arc::new(AtomicBool::new(true));
+        let feed_shown = shown.clone();
+        let thread = std::thread::spawn(move || run_overlay_inner(Some(0), move |_| {
+            if !feed_shown.load(Ordering::Relaxed) { return Frame { close: done.load(Ordering::Relaxed), ..Frame::empty() }; }
+            crate::overlay::groups::group_frames(vec![Frame {
+                session_id: Some("drag-fixture".into()), project_path: Some(r"C:\DragFixture".into()),
+                cards: vec![Card { id: 1, label: "Drag fixture".into(), text: "Keep this chat folded while moving its tab.".into(),
+                    final_message: false, attention: false,
+                    target: Some(CardTarget { window: 0, session_id: "drag-fixture".into(), project: None }) }],
+                dock_request: 1, close: done.load(Ordering::Relaxed), ..Frame::empty()
+            }]).remove(0)
+        }, |_, _| panic!("dragging or clicking a tab must not open an editor"),
+            move || *cursor.lock().unwrap(), None, None));
+        struct Cleanup(Arc<AtomicBool>, Option<std::thread::JoinHandle<io::Result<()>>>, Handle);
+        impl Drop for Cleanup { fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.1.take() { thread.join().unwrap().unwrap(); }
+            unsafe { SetThreadDpiAwarenessContext(self.2); }
+        } }
+        let _cleanup = Cleanup(stop, Some(thread), previous_dpi);
+        let class = wide(format!("CodexLidGuardMessageOverlay.{}", GetCurrentProcessId()));
+        let mut window = null_mut();
+        wait_for(|| { window = FindWindowW(class.as_ptr(), null());
+            !window.is_null() && SendMessageW(window, 0x80f0, 32, 0) != 0 });
+        // Keep physical mouse input out of this owned-window fixture.
+        SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
+        let bounds = || { let mut rect: Rect = zeroed(); assert_ne!(GetWindowRect(window, &mut rect), 0); rect };
+        let send_at = |message, buttons, x, y| {
+            let rect = bounds();
+            let point = (((y - rect.top) as u16 as u32) << 16 | (x - rect.left) as u16 as u32) as isize;
+            SendMessageW(window, message, buttons, point);
+        };
+        let original = bounds();
+        let dpi = SendMessageW(window, 0x80f0, 2, 0) as u32;
+        let x = (original.left + original.right) / 2;
+        let y = (original.top + original.bottom) / 2;
+        *pointer.lock().unwrap() = Some((x, y));
+        let foreground = GetForegroundWindow();
+        send_at(WM_MOUSEMOVE, 0, x, y); // A hover must leave time to grab the tab.
+        send_at(WM_LBUTTONDOWN, 1, x, y);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(SendMessageW(window, 0x80f0, 3, 0), 1, "holding a tab must not hover-open it");
+        send_at(WM_MOUSEMOVE, 1, x + 1, y - 1);
+        assert_eq!(bounds(), original, "small click jitter must not move the tab");
+        let target_y = y - scale_dip(180, dpi);
+        *pointer.lock().unwrap() = Some((x, target_y));
+        send_at(WM_MOUSEMOVE, 1, x - 100, target_y);
+        wait_for(|| (bounds().top - (original.top - scale_dip(180, dpi))).abs() <= 1);
+        send_at(WM_LBUTTONUP, 0, x, target_y);
+        let moved = bounds();
+        assert_eq!(moved.right, original.right, "horizontal movement must remain edge-snapped");
+        assert_eq!(GetForegroundWindow(), foreground, "dragging must not take keyboard focus");
+        std::thread::sleep(Duration::from_millis(500));
+        send_at(WM_MOUSEMOVE, 0, x, target_y);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(SendMessageW(window, 0x80f0, 3, 0), 1, "dropping must not open the chat");
+        assert_eq!(bounds(), moved, "feed refresh must preserve the dragged position");
+
+        // A focused project or a temporarily replaced feed slot can disappear
+        // entirely. Returning must restore the project anchor, not the corner.
+        *pointer.lock().unwrap() = Some((-100_000, -100_000));
+        shown.store(false, Ordering::Relaxed);
+        wait_for(|| IsWindowVisible(window) == 0 && SendMessageW(window, 0x80f0, 1, 0) == 0);
+        shown.store(true, Ordering::Relaxed);
+        wait_for(|| IsWindowVisible(window) != 0 && SendMessageW(window, 0x80f0, 3, 0) == 1 && bounds() == moved);
+        *pointer.lock().unwrap() = Some((x, target_y));
+
+        // Capture loss cancels the gesture and the next click still works.
+        send_at(WM_LBUTTONDOWN, 1, x, target_y);
+        SendMessageW(window, 0x001f, 0, 0); // WM_CANCELMODE releases the actual native capture.
+        send_at(WM_MOUSEMOVE, 1, x, target_y - 100);
+        assert_eq!(bounds(), moved);
+        send_at(WM_LBUTTONDOWN, 1, x, target_y);
+        send_at(WM_LBUTTONUP, 0, x + 1, target_y + 1);
+        wait_for(|| SendMessageW(window, 0x80f0, 25, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 1 && bounds() == moved);
+        // Leaving and returning restores ordinary hover expansion.
+        *pointer.lock().unwrap() = Some((-100_000, -100_000));
+        std::thread::sleep(Duration::from_millis(100));
+        *pointer.lock().unwrap() = Some((x, target_y));
+        send_at(WM_MOUSEMOVE, 0, x, target_y);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 0);
+
+        // The popped-out preview uses its existing stack anchor, even though
+        // its layout no longer contains a folded tab rectangle.
+        let drag_preview = |dy: i32, background: bool| {
+            wait_for(|| SendMessageW(window, 0x80f0, 13, 0) != 0
+                && SendMessageW(window, 0x80f0, 22, 0) == 0);
+            std::thread::sleep(Duration::from_millis(350));
+            let before = bounds();
+            let point = SendMessageW(window, 0x80f0, 31, 0);
+            assert_ne!(point, 0);
+            let grab_x = before.left + point as i16 as i32;
+            // The left background margin is clear of rows, input and buttons.
+            let grab_x = if background { before.left + scale_dip(2, dpi) } else { grab_x };
+            let grab_y = if background { (before.top + before.bottom) / 2 }
+                else { before.top + (point >> 16) as i16 as i32 };
+            let stage = SendMessageW(window, 0x80f0, 25, 0);
+            let pinned = SendMessageW(window, 0x80f0, 33, 0);
+            *pointer.lock().unwrap() = Some((grab_x, grab_y));
+            send_at(WM_LBUTTONDOWN, 1, grab_x, grab_y);
+            PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 1, 0);
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(SendMessageW(window, 0x80f0, 3, 0), 0, "a queued hover timeout cannot close a grabbed preview");
+            send_at(WM_MOUSEMOVE, 1, grab_x + 1, grab_y - 1);
+            assert_eq!(bounds(), before, "grabbing the expanded header must not jump to a different anchor");
+            for delta in [dy / 2, dy] {
+                *pointer.lock().unwrap() = Some((grab_x - 5, grab_y + delta));
+                send_at(WM_MOUSEMOVE, 1, grab_x - 5, grab_y + delta);
+                wait_for(|| (bounds().top - before.top - delta).abs() <= 1);
+                assert_eq!(SendMessageW(window, 0x80f0, 22, 0), 0, "moving a message preview must not start a resize animation");
+                assert_eq!(bounds().right, before.right, "expanded previews stay snapped to the same edge");
+                assert_eq!(bounds().bottom - bounds().top, before.bottom - before.top);
+            }
+            send_at(WM_LBUTTONUP, 0, grab_x - 5, grab_y + dy);
+            std::thread::sleep(Duration::from_millis(150));
+            assert_eq!(SendMessageW(window, 0x80f0, 25, 0), stage, "dropping must not expand or maximize the preview");
+            assert_eq!(SendMessageW(window, 0x80f0, 33, 0), pinned, "dragging preserves the existing pin state");
+            assert_eq!(SendMessageW(window, 0x80f0, 34, 0), 0, "dropping must not queue a click-to-fold");
+            assert_eq!(SendMessageW(window, 0x80f0, 35, 0), 0);
+            bounds()
+        };
+        let preview = drag_preview(-scale_dip(100, dpi), false);
+        *pointer.lock().unwrap() = Some((-100_000, -100_000));
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 1
+            && bounds().right - bounds().left == original.right - original.left
+            && (bounds().bottom - preview.bottom).abs() <= 1);
+        let tab = bounds();
+        let center = ((tab.left + tab.right) / 2, (tab.top + tab.bottom) / 2);
+        *pointer.lock().unwrap() = Some(center);
+        send_at(WM_LBUTTONDOWN, 1, center.0, center.1);
+        send_at(WM_LBUTTONUP, 0, center.0, center.1);
+        wait_for(|| SendMessageW(window, 0x80f0, 25, 0) == 1 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        drag_preview(scale_dip(80, dpi), true);
+        assert_eq!(SendMessageW(window, 0x80f0, 33, 0), 1);
+        let header = SendMessageW(window, 0x80f0, 31, 0);
+        SendMessageW(window, WM_LBUTTONDOWN, 1, header);
+        SendMessageW(window, WM_LBUTTONUP, 0, header);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 1);
+        std::thread::sleep(Duration::from_millis(350));
+        let folded = bounds();
+        let tab_point = SendMessageW(window, 0x80f0, 32, 0);
+        assert_ne!(tab_point, 0);
+        *pointer.lock().unwrap() = Some((-100_000, -100_000));
+        SendMessageW(window, WM_LBUTTONDBLCLK, 1, tab_point);
+        SendMessageW(window, WM_LBUTTONUP, 0, tab_point);
+        wait_for(|| SendMessageW(window, 0x80f0, 25, 0) == 2 && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+        wait_for(|| SendMessageW(window, 0x80f0, 3, 0) == 1 && bounds() == folded);
+    }
+}
+
+#[test]
+#[ignore = "opens an owned chat sidebar, temporarily reserves desktop space, then restores the desktop"]
+fn native_sidebar_minimize_and_close_restore_desktop_space() {
+    unsafe {
+        let previous_dpi = SetThreadDpiAwarenessContext(-4isize as Handle);
+        struct DpiReset(Handle);
+        impl Drop for DpiReset { fn drop(&mut self) { unsafe { SetThreadDpiAwarenessContext(self.0); } } }
+        let _dpi = DpiReset(previous_dpi);
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = stop.clone();
+        let thread = std::thread::spawn(move || run_overlay_inner(Some(0), move |_| {
+            crate::overlay::groups::group_frames(vec![Frame {
+                session_id: Some("sidebar-fixture".into()), project_path: Some(r"C:\SidebarFixture".into()),
+                cards: vec![Card { id: 1, label: "Sidebar fixture".into(), text: "Read this chat beside other applications.".into(),
+                    final_message: false, attention: false,
+                    target: Some(CardTarget { window: 0, session_id: "sidebar-fixture".into(), project: None }) }],
+                dock_request: 1, close: done.load(Ordering::Relaxed), ..Frame::empty()
+            }]).remove(0)
+        }, |_, _| panic!("the sidebar fixture must not open an editor"), || None, None, None));
+        struct Cleanup(Arc<AtomicBool>, Option<std::thread::JoinHandle<io::Result<()>>>);
+        impl Drop for Cleanup { fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.1.take() { thread.join().unwrap().unwrap(); }
+        } }
+        let mut cleanup = Cleanup(stop, Some(thread));
+        let class = wide(format!("CodexLidGuardMessageOverlay.{}", GetCurrentProcessId()));
+        let mut window = null_mut();
+        wait_for(|| { window = FindWindowW(class.as_ptr(), null());
+            !window.is_null() && SendMessageW(window, 0x80f0, 32, 0) != 0 });
+        SetWindowLongPtrW(window, -20, GetWindowLongPtrW(window, -20) | 0x20);
+        let display = MonitorFromWindow(window, 2);
+        let work = || {
+            let mut info: MonitorInfo = zeroed(); info.size = size_of::<MonitorInfo>() as u32;
+            assert_ne!(GetMonitorInfoW(display, &mut info), 0); info.work
+        };
+        let original = work();
+        let expected = workspace::sidebar_bounds(original);
+        let _desktop = workspace::DesktopFixture::new(window);
+        let expand = || {
+            std::thread::sleep(Duration::from_millis(350));
+            let point = SendMessageW(window, 0x80f0, 32, 0);
+            assert_ne!(point, 0);
+            SendMessageW(window, WM_LBUTTONDOWN, 1, point);
+            SendMessageW(window, WM_LBUTTONUP, 0, point);
+            SendMessageW(window, WM_LBUTTONDBLCLK, 1, point);
+            SendMessageW(window, WM_LBUTTONUP, 0, point);
+            wait_for(|| SendMessageW(window, 0x80f0, 25, 0) == 2 && SendMessageW(window, 0x80f0, 22, 0) == 0
+                && work().right == expected.left);
+            let mut bounds: Rect = zeroed(); GetWindowRect(window, &mut bounds);
+            assert_eq!(bounds, expected, "full chat fills the reserved right third vertically");
+        };
+        expand();
+        PostMessageW(window, WM_APP_COLLAPSE_OVERLAY, 0, 0);
+        wait_for(|| work() == original && SendMessageW(window, 0x80f0, 3, 0) == 1
+            && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        expand();
+        restore_overlay_workspace(); // The daemon uses this before quitting or upgrading.
+        wait_for(|| work() == original && SendMessageW(window, 0x80f0, 3, 0) == 1
+            && SendMessageW(window, 0x80f0, 22, 0) == 0);
+        expand();
+        cleanup.0.store(true, Ordering::Relaxed);
+        cleanup.1.take().unwrap().join().unwrap().unwrap();
+        assert_eq!(work(), original, "closing an expanded overlay releases the desktop reservation");
     }
 }
 
@@ -731,7 +960,7 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
         // Overflow grows the same message preview into the centered conversation.
         let mut initial_bounds: Rect = zeroed(); GetWindowRect(window, &mut initial_bounds);
         let (display, _) = overlay_display(None, window).unwrap();
-        let expected = chat_panel::centered(display.work, dpi);
+        let expected = workspace::sidebar_bounds(display.work);
         let mut compact_input: Rect = zeroed(); GetWindowRect(input, &mut compact_input);
         SendMessageW(input, 0x00b1, 0, -1);
         SendMessageW(input, 0x00c2, 1, wide(format!("Second draft{}", " long".repeat(30))).as_ptr() as isize);
@@ -867,16 +1096,25 @@ fn native_group_select_open_dismiss_and_fold_preserve_sibling_sessions() {
 #[ignore = "displays two owned project drawers; input and visibility changes affect only test windows"]
 fn native_group_tabs_slide_clear_before_expansion_without_activating() {
     for position in ["bottom-right", "top-right"] {
-        native_group_stack_case(position);
+        native_group_stack_case(position, false);
     }
 }
 
-fn native_group_stack_case(position: &'static str) {
+#[test]
+#[ignore = "expands only owned fixture overlays; never opens an editor or sends chat messages"]
+fn native_message_previews_keep_neighboring_tabs_visible_through_growth_and_fold() {
+    for position in ["bottom-right", "top-right"] {
+        native_group_stack_case(position, true);
+    }
+}
+
+fn native_group_stack_case(position: &'static str, fit_message: bool) {
     unsafe {
         let previous_dpi = SetThreadDpiAwarenessContext(-4isize as Handle);
         let stop = Arc::new(AtomicBool::new(false));
         let show_second = Arc::new(AtomicBool::new(true));
         let session_count = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let reply_length = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let pointer = Arc::new(std::sync::Mutex::new(None));
         struct Cleanup {
             stop: Arc<AtomicBool>,
@@ -904,6 +1142,7 @@ fn native_group_stack_case(position: &'static str) {
             let show_second = show_second.clone();
             let pointer = pointer.clone();
             let session_count = session_count.clone();
+            let reply_length = reply_length.clone();
             cleanup.threads.push(std::thread::spawn(move || {
                 run_overlay_inner(
                     Some(slot),
@@ -923,11 +1162,12 @@ fn native_group_stack_case(position: &'static str) {
                                     cards: vec![Card {
                                         id: 0,
                                         label: format!("StackingTest{slot} — Task"),
-                                        text: "Expanded project must stay above its sibling tab."
-                                            .into(),
+                                        text: "Expanded project must leave its sibling tab visible.\n\n"
+                                            .repeat(reply_length.load(Ordering::Relaxed)),
                                         final_message: false,
                                         attention: false,
-                                        target: None,
+                                        target: fit_message.then(|| CardTarget { window: 0,
+                                            session_id: format!("stacking-{slot}-{task}"), project: None }),
                                     }],
                                     dock_request: 1,
                                     busy: true,
@@ -1039,6 +1279,43 @@ fn native_group_stack_case(position: &'static str) {
         };
         assert_separate();
         let dpi = SendMessageW(windows[0], 0x80f0, 2, 0) as u32;
+        if fit_message {
+            let watch = |ready: &mut dyn FnMut() -> bool| {
+                let deadline = Instant::now() + Duration::from_secs(6);
+                loop {
+                    assert_separate();
+                    for window in windows { assert_ne!(IsWindowVisible(window), 0, "neighboring tabs must remain visible"); }
+                    if ready() { break; }
+                    assert!(Instant::now() < deadline, "message preview did not settle");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            };
+            for (slot, &window) in windows.iter().enumerate() {
+                let point = SendMessageW(window, 0x80f0, 32, 0);
+                assert_ne!(point, 0);
+                SendMessageW(window, WM_LBUTTONDOWN, 1, point);
+                SendMessageW(window, WM_LBUTTONUP, 0, point);
+                watch(&mut || SendMessageW(window, 0x80f0, 25, 0) == 1
+                    && SendMessageW(window, 0x80f0, 22, 0) == 0
+                    && bounds(window).right - bounds(window).left == scale_dip(group_window::PANEL_WIDTH, dpi));
+                let short = bounds(window);
+                reply_length.store(80, Ordering::Relaxed);
+                PostMessageW(window, WM_FRAME_READY, 0, 0);
+                watch(&mut || bounds(window).bottom - bounds(window).top > short.bottom - short.top + scale_dip(100, dpi)
+                    && SendMessageW(window, 0x80f0, 22, 0) == 0);
+                let tall = bounds(window);
+                assert_eq!(tall.right - tall.left, scale_dip(group_window::PANEL_WIDTH, dpi));
+                check_backdrop(slot, true);
+                reply_length.store(1, Ordering::Relaxed);
+                PostMessageW(window, WM_FRAME_READY, 0, 0);
+                watch(&mut || bounds(window).bottom - bounds(window).top < tall.bottom - tall.top
+                    && SendMessageW(window, 0x80f0, 22, 0) == 0);
+            }
+            PostMessageW(windows[1], WM_APP_COLLAPSE_OVERLAY, 0, 0);
+            watch(&mut || windows.map(bounds) == original
+                && windows.iter().all(|&window| SendMessageW(window, 0x80f0, 3, 0) == 1));
+            return;
+        }
         let animated = SendMessageW(windows[0], 0x80f0, 11, 0) != 0;
         let displacement = (scale_dip(136, dpi) + 1 - scale_dip(group_window::TAB_HEIGHT, dpi))
             * if position.starts_with("top") { 1 } else { -1 };

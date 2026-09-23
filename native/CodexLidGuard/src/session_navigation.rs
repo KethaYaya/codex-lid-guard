@@ -117,6 +117,44 @@ pub fn matching_window(project: &Project, preferred: u64) -> Option<u64> {
     matches.first().copied()
 }
 
+// Lifecycle notifications can arrive after focus has moved to another project
+// (or while a chat is being used in an overlay). Resolve its workspace before
+// treating the foreground editor as the originating window.
+pub fn origin_window(cwd: Option<&str>, preferred: Option<u64>) -> Option<u64> {
+    let preferred = preferred.filter(|window| win::is_editor_window(*window));
+    let directory = paths::data_directory().join("windows");
+    let contexts: Vec<_> = std::fs::read_dir(&directory).into_iter().flatten().flatten()
+        .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u64>().ok())
+        .filter(|window| win::is_editor_window(*window))
+        .filter_map(|window| read_context(&directory, window))
+        .filter(|context| win::is_process_running(context.pid))
+        .collect();
+    select_origin_window(cwd, preferred, &contexts)
+}
+
+fn select_origin_window(cwd: Option<&str>, preferred: Option<u64>, contexts: &[WindowContext]) -> Option<u64> {
+    let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) else { return preferred; };
+    let preferred_context = contexts.iter().find(|context| Some(context.window) == preferred);
+    if preferred_context.is_some_and(|context| belongs_to_workspace(cwd, &context.workspace_folders)) {
+        return preferred;
+    }
+    let mut candidates: Vec<_> = contexts.iter().filter_map(|context| {
+        context.workspace_folders.iter()
+            .filter(|root| belongs_to_workspace(cwd, std::slice::from_ref(root)))
+            .map(|root| normalized_path(root).len()).max()
+            .map(|specificity| (specificity, context.window))
+    }).collect();
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    if let Some(&(specificity, window)) = candidates.first() {
+        // Without a known origin, identical workspaces in two windows are
+        // ambiguous. Do not send a chat to an arbitrary editor.
+        return (candidates.get(1).is_none_or(|next| next.0 != specificity)).then_some(window);
+    }
+    // Keep the legacy foreground fallback for editors without a bridge, but
+    // never attach a session to a registered, unrelated workspace.
+    preferred.filter(|_| preferred_context.is_none_or(|context| context.workspace_folders.is_empty()))
+}
+
 // Called only by an explicit open action, on the activation worker. The saved
 // project is passed as one OS argument, never as shell text or a chat-derived URI.
 pub fn resolve_window(target: &crate::overlay::CardTarget, deadline: Instant) -> Option<u64> {
@@ -266,6 +304,33 @@ mod tests {
         assert!(!belongs_to_workspace(r"C:\Projects\Other", &roots));
         assert!(!belongs_to_workspace("", &roots));
         assert!(!belongs_to_workspace(r"C:\Projects\One", &[]));
+    }
+
+    #[test]
+    fn lifecycle_origin_follows_the_workspace_after_focus_moves() {
+        let own = context();
+        let mut other = context();
+        other.window = 20;
+        other.workspace_folders = vec![r"C:\Projects\Other".into()];
+        let contexts = [own, other];
+        assert_eq!(select_origin_window(Some(r"c:\projects\one\src"), Some(20), &contexts), Some(10));
+        assert_eq!(select_origin_window(Some(r"C:\Projects\One"), None, &contexts), Some(10), "chat used while another app is focused");
+        assert_eq!(select_origin_window(Some(r"C:\Projects\Missing"), Some(20), &contexts), None);
+        assert_eq!(select_origin_window(Some(r"C:\Projects\Missing"), Some(30), &contexts), Some(30), "legacy window without a bridge");
+        assert_eq!(select_origin_window(None, Some(20), &contexts), Some(20));
+    }
+
+    #[test]
+    fn lifecycle_origin_preserves_known_windows_and_avoids_ambiguous_projects() {
+        let own = context();
+        let mut duplicate = own.clone();
+        duplicate.window = 20;
+        let mut contexts = vec![own, duplicate];
+        let cwd = Some(r"C:\Projects\One\src");
+        assert_eq!(select_origin_window(cwd, Some(20), &contexts), Some(20));
+        assert_eq!(select_origin_window(cwd, None, &contexts), None);
+        contexts[1].workspace_folders = vec![r"C:\Projects".into()];
+        assert_eq!(select_origin_window(cwd, None, &contexts), Some(10), "prefer the most specific open project");
     }
 
     #[test]

@@ -170,8 +170,8 @@ pub fn run() -> io::Result<()> {
     })?;
     let pipe = win::PipeServer::new(&paths::pipe_name());
     logging::write(format!(
-        "Guardian daemon started on pipe {}.",
-        paths::pipe_name()
+        "Guardian daemon {} started on pipe {}.",
+        env!("CARGO_PKG_VERSION"), paths::pipe_name()
     ));
     if let Ok(state) = state.lock() {
         publish_status(&state.snapshot(true, "Guardian daemon ready."));
@@ -198,25 +198,30 @@ pub fn run() -> io::Result<()> {
             ..GuardRequest::default()
         };
         let key = turn_key(&request);
+        let cwd = request.cwd.clone();
         let _ = handle_request(&lifecycle_state, request);
+        let mut preferred_window = None;
         if let Ok(mut state) = lifecycle_state.lock()
             && state.active_turns.contains_key(&key)
         {
+            preferred_window = state.active_turns[&key].origin_window;
             state.transcript_cursors.insert(key, cursor);
         }
         // Window discovery is deliberately after acquisition so UI bookkeeping
         // cannot add latency to the power-protection path.
-        if let Some(origin_window) = win::foreground_editor_window() {
-            let _ = handle_request(
-                &lifecycle_state,
-                GuardRequest {
-                    action: "associate-window".to_string(),
-                    session_id: Some(session_id),
-                    origin_window: Some(origin_window),
-                    ..GuardRequest::default()
-                },
-            );
-        }
+        let preferred_window = preferred_window.filter(|window| win::is_editor_window(*window))
+            .or_else(win::foreground_editor_window);
+        let _ = handle_request(
+            &lifecycle_state,
+            GuardRequest {
+                action: "associate-window".to_string(),
+                session_id: Some(session_id),
+                cwd,
+                origin_window: preferred_window,
+                origin_window_authoritative: true,
+                ..GuardRequest::default()
+            },
+        );
         // The guard is already active; this read-only request only interrupts a
         // five-minute idle accept so terminal reconciliation switches to its
         // normal two-second active cadence.
@@ -261,6 +266,7 @@ pub fn run() -> io::Result<()> {
         }
     }
 
+    win::restore_overlay_workspace();
     crate::background::shutdown();
     if let Ok(mut state) = state.lock() {
         state.cancel_pending_sleep();
@@ -313,6 +319,17 @@ fn shield_newer_daemon_from_legacy_status(request: &GuardRequest, response: &mut
 
 fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -> GuardResponse {
     let action = request.action.to_ascii_lowercase();
+    if action == "associate-window" {
+        let cwd = request.cwd.clone().or_else(|| shared.lock().ok().and_then(|state|
+            state.active_turns.values().find(|turn| Some(&turn.info.session_id) == request.session_id.as_ref())
+                .and_then(|turn| turn.info.cwd.clone())));
+        let resolved = crate::session_navigation::origin_window(cwd.as_deref(), request.origin_window);
+        if resolved != request.origin_window {
+            logging::write(format!("Resolved session {} to workspace window {resolved:?} instead of {:?}.",
+                request.session_id.as_deref().unwrap_or_default(), request.origin_window));
+        }
+        request.origin_window = resolved;
+    }
     // Worker callbacks also acquire the daemon lock. Never hold it across startup or shutdown.
     if action.starts_with("background-") {
         if shared.lock().is_ok_and(|state| state.shutdown) { return crate::helper_pause::response(); }
@@ -328,6 +345,7 @@ fn handle_request(shared: &Arc<Mutex<DaemonState>>, mut request: GuardRequest) -
             Err(error) => shared.lock().unwrap().snapshot(false, error),
         };
     }
+    if matches!(action.as_str(), "quit" | "restore") { win::restore_overlay_workspace(); }
     if action == "quit" { crate::background::shutdown(); }
     if request.session_id.as_deref().is_some_and(|id| !crate::background::is_task(id) && crate::background::owns_thread(id))
         && matches!(action.as_str(), "acquire" | "pre-acquire" | "metadata-acquire" | "release" | "release-session" | "associate-window") {

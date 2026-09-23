@@ -3,6 +3,7 @@ use super::overlay_shortcuts::{ShortcutPublisher, WM_OVERLAY_SHORTCUT};
 use super::overlay_window_events::{WindowEvents, Transitions, WM_FRAME_READY, WM_FOREGROUND, WM_MINIMIZE, WM_RESTORE, WM_OPEN_STARTED, event_instant};
 use super::*;
 use crate::overlay::{Card, CardTarget, Frame};
+use super::overlay_workspace as workspace;
 use std::time::Instant;
 
 #[path = "overlay_motion.rs"]
@@ -15,6 +16,8 @@ use overlay_dock::{DockLayout, TabPlacement, arrival_layout_custom, dock_layout_
 mod group_window;
 #[path = "overlay_group_stack.rs"]
 mod group_stack;
+#[path = "overlay_tab_drag.rs"]
+mod tab_drag;
 #[path = "overlay_backdrop.rs"]
 mod overlay_backdrop;
 use group_window::{GroupUi, Action as GroupAction};
@@ -236,6 +239,7 @@ struct OverlayState {
     hover_open: Option<HoverOpen>,
     keyboard_preview: Option<KeyboardPreview>,
     tab_pressed: bool,
+    tab_drag: tab_drag::Interaction,
     close_pressed: bool,
     activity: u64,
     layout: Option<DockLayout>,
@@ -645,6 +649,7 @@ fn run_overlay_inner(
             hover_open: None,
             keyboard_preview: None,
             tab_pressed: false,
+            tab_drag: tab_drag::Interaction::default(),
             close_pressed: false,
             activity: 0,
             layout: None,
@@ -665,6 +670,7 @@ fn run_overlay_inner(
             compositor: None,
             render_alpha: 255,
         });
+        let _workspace_lease = workspace::Lease(window as usize);
         SetWindowLongPtrW(
             window,
             GWLP_USERDATA,
@@ -774,7 +780,7 @@ fn run_overlay_inner(
                         ui.progression.clear_typing();
                     }
                 }
-                if visible && !state.collapsed && !state.restoring && opening.is_none() && chat_fold.is_none()
+                if visible && !state.collapsed && !state.restoring && !state.tab_drag.pressed() && opening.is_none() && chat_fold.is_none()
                     && chat_expansion.is_none() && state.composer.as_ref().is_some_and(|composer| composer.target().is_some()) {
                     let next = state.group.as_ref().and_then(|ui| {
                         let input = ui.input_rect(state.dpi.max(96));
@@ -842,7 +848,8 @@ fn run_overlay_inner(
                         dismissed_members.retain(|id, activity| group.sessions.iter()
                             .any(|session| &session.id == id && session.activity == *activity));
                         group.sessions.retain(|session| {
-                            let hidden = session.hidden_in_focus && transitions.for_window(session.window,real).is_none()
+                            let reading_beside_apps = state.group.as_ref().is_some_and(|ui| ui.progression.stage == Stage::Full) && !state.collapsed;
+                            let hidden = !reading_beside_apps && session.hidden_in_focus && transitions.for_window(session.window,real).is_none()
                                 && session.window.is_some_and(is_window_focused);
                             let opened = opened_overlay.as_ref().is_some_and(|opened|
                                 opened.dock_request == frame.dock_request
@@ -896,6 +903,7 @@ fn run_overlay_inner(
                         if state.clicks.pressed.is_some() || state.tab_pressed || state.close_pressed {
                             ReleaseCapture();
                         }
+                        state.tab_drag.bind(window, frame.session_id.as_deref(), &frame.position);
                         state.clicks = ClickTracker::default();
                         state.pending_target = None;
                         state.group = None;
@@ -1012,7 +1020,8 @@ fn run_overlay_inner(
                         state.clicks = ClickTracker::default();
                         KillTimer(window, 3);
                     } else {
-                        let (info, dpi) = overlay_display(frame.window, window)?;
+                        let (mut info, dpi) = overlay_display(frame.window, window)?;
+                        info.work = workspace::work_area(window, info.work);
                         let font_changed = state.dpi != dpi;
                         if font_changed {
                             let font = CreateFontW(
@@ -1041,10 +1050,10 @@ fn run_overlay_inner(
                             state.dpi = dpi;
                         }
                         let margin = scale_dip(20, dpi);
-                        let next_width = scale_dip(state.group.as_ref().map_or(440, |ui| match ui.progression.stage {
-                            Stage::Full => 780, Stage::Message => group_window::MESSAGE_WIDTH, Stage::Compact => group_window::PANEL_WIDTH,
-                        }), dpi)
-                            .min((info.work.right - info.work.left - margin * 2).max(1));
+                        let next_width = if state.group.as_ref().is_some_and(|ui| ui.progression.stage == Stage::Full) {
+                            info.work.right - workspace::sidebar_bounds(info.work).left
+                        } else { scale_dip(state.group.as_ref().map_or(440, |_| group_window::PANEL_WIDTH), dpi)
+                            .min((info.work.right - info.work.left - margin * 2).max(1)) };
                         let area = if state.group.is_some() {
                             (info.work, None)
                         } else { slot.map(|slot| configured_session_area(info.work,slot,dpi,&frame.position,frame.max_tabs))
@@ -1059,6 +1068,7 @@ fn run_overlay_inner(
                         work = next_work;
                         width = next_width;
                         opacity = frame.opacity;
+                        if position != frame.position { state.tab_drag.select_position(&frame.position); }
                         position = frame.position;
                         if changed {
                             state.panel_dirty = true;
@@ -1105,7 +1115,7 @@ fn run_overlay_inner(
                             if let Some(ui) = &mut state.group {
                                 if ui.progression.stage == Stage::Message { ui.message_bounds(work, dpi, &position); }
                                 else {
-                                    let available = if ui.chat.is_some() { scale_dip(680, dpi).min(work.bottom-work.top-margin*2) }
+                                    let available = if ui.progression.stage == Stage::Full { work.bottom-work.top }
                                         else { work.bottom-work.top-margin*2 };
                                     ui.layout(width, available, dpi);
                                 }
@@ -1126,17 +1136,30 @@ fn run_overlay_inner(
                         motion.sync(&state.cards, &state.heights, now, animate && !auto_dock);
                     }
                 }
+                let sidebar = workspace::sync(window, !closing && !state.cards.is_empty() && chat_fold.is_none()
+                    && opening.is_none() && !state.collapsed && state.group.as_ref().is_some_and(|ui| ui.progression.stage == Stage::Full)
+                    && EXPANDED_PROJECT.load(std::sync::atomic::Ordering::Relaxed) == window as usize, work)?;
                 // Project tabs appear directly at their compact size. Reserve the
                 // drawer's space before any expansion frame can cover a sibling.
-                if let Some(ui) = &state.group {
+                if let Some(ui) = &mut state.group {
                     arrival = None;
-                    if ui.chat.is_some() && chat_fold.is_none() {
+                    if ui.progression.stage == Stage::Message && chat_fold.is_none() && !state.cards.is_empty() {
+                        let fitted = ui.message_bounds(work, state.dpi.max(96), &position);
+                        group_stack::update(window, group_stack::Geometry {
+                            slot: slot.unwrap_or(0), work, dpi: state.dpi.max(96),
+                            top: position.starts_with("top"), width: fitted.right - fitted.left,
+                            anchor: state.tab_drag.anchor,
+                            height: (fitted.bottom - fitted.top).min(group_stack::message_height(window, work, state.dpi.max(96))),
+                        }, true);
+                        stack_motion = group_stack::PlacementMotion::default();
+                    } else if ui.chat.is_some() && chat_fold.is_none() {
                         group_stack::remove(window);
                         stack_motion = group_stack::PlacementMotion::default();
                     } else if ui.chat.is_none() && !state.cards.is_empty() {
                         group_stack::update(window, group_stack::Geometry {
                             slot: slot.unwrap_or(0), work, dpi: state.dpi.max(96),
                             top: position.starts_with("top"), width, height: ui.height,
+                            anchor: state.tab_drag.anchor,
                         }, !state.collapsed);
                     }
                 }
@@ -1147,15 +1170,18 @@ fn run_overlay_inner(
                 if arrival_progress.is_none() {
                     arrival = None;
                 }
+                let message_preview = state.group.as_ref().is_some_and(|ui| ui.progression.stage == Stage::Message)
+                    && chat_fold.is_none();
                 let (stack_placement, stack_moving) = state.group.as_ref()
-                    .filter(|ui| ui.chat.is_none())
+                    .filter(|ui| ui.chat.is_none() || message_preview)
                     .and_then(|_| group_stack::placement(window))
                     .map(|target| {
+                        if message_preview { return (Some(target), false); }
                         let (placement, moving) = stack_motion.sample(target, now,
-                            animate && visible && dock.sample(now).0 >= 1.0);
+                            animate && visible && dock.sample(now).0 >= 1.0 && !state.tab_drag.moving());
                         (Some(placement), moving)
                     }).unwrap_or((None, false));
-                let waiting_for_space = state.group.is_some() && !chat_expanded(&state) && !state.collapsed
+                let waiting_for_space = state.group.is_some() && (!chat_expanded(&state) || message_preview) && !state.collapsed
                     && (stack_moving || !group_stack::ready(window));
                 if !waiting_for_space {
                     dock.target(state.collapsed, now, animate && !chat_expanded(&state));
@@ -1282,7 +1308,7 @@ fn run_overlay_inner(
                     // Input/history notifications remain responsive, but must not
                     // insert extra resizes between the animation's frame deadlines.
                     chat_moving = true;
-                } else if waiting_for_space && docked < 1.0 {
+                } else if waiting_for_space && (docked < 1.0 || message_preview) {
                     // Growing content waits for siblings just like an explicit
                     // expansion. Keep the previous frame until its space is clear.
                 } else {
@@ -1291,6 +1317,24 @@ fn run_overlay_inner(
                     let height = (scale_dip(64, dpi)
                         + state.rows.iter().map(|row| row.height).sum::<i32>())
                     .min((work.bottom - work.top - margin * 2).max(1));
+                    if state.group.is_some() && opacity < 100 && !backdrop_attempted {
+                        backdrop_attempted = true;
+                        match overlay_backdrop::Backdrop::new(window) {
+                            Ok(surface) => backdrop = Some(surface),
+                            Err(cause) => logging::write(format!("Overlay blur unavailable; keeping glass tint: {cause}")),
+                        }
+                    }
+                    // Full conversation reading needs a darker surface. Choose
+                    // its material before capturing the expansion animation.
+                    let reading_opacity = if state.group.as_ref().is_some_and(|ui| ui.progression.stage == Stage::Full) {
+                        opacity.max(65)
+                    } else { opacity };
+                    // Keep labels readable without desktop blur on older Windows.
+                    let effective_opacity = if state.group.is_some() && backdrop.is_none() { reading_opacity.max(82) } else { reading_opacity };
+                    let tint = (effective_opacity.clamp(30, 100) as u16 * 255 / 100) as u8;
+                    let material = (state.group.is_some() && tint < 255).then_some(tint);
+                    if state.material.tint != material { state.panel_dirty = true; repaint = true; }
+                    state.material.tint = material;
                     if state.panel_size != (width, height) {
                         state.panel_dirty = true;
                         state.panel_size = (width, height);
@@ -1304,9 +1348,11 @@ fn run_overlay_inner(
                     if state.group.is_none() { bounds.top += slide; bounds.bottom += slide; }
                     let layout = if chat_expanded(&state) {
                         let target = if state.group.as_ref().unwrap().progression.stage == Stage::Message {
-                            state.group.as_mut().unwrap().message_bounds(work, dpi, &position)
-                        } else { chat_panel::centered(work, dpi) };
-                        if chat_expansion.is_none() && let Some(layout) = state.layout && layout.window != target {
+                            stack_placement.map_or_else(|| state.group.as_mut().unwrap().message_bounds(work, dpi, &position),
+                                |placement| placement.panel)
+                        } else { sidebar.unwrap_or_else(|| workspace::sidebar_bounds(work)) };
+                        if chat_expansion.is_none() && !state.tab_drag.moving()
+                            && let Some(layout) = state.layout && layout.window != target {
                             chat_expansion = Some(chat_panel::Expansion::growing(layout.window));
                         }
                         let bounds = if let Some(expansion) = &mut chat_expansion {
@@ -1347,19 +1393,6 @@ fn run_overlay_inner(
                     let bounds = layout.window;
                     let window_width = bounds.right - bounds.left;
                     let window_height = bounds.bottom - bounds.top;
-                    if state.group.is_some() && opacity < 100 && !backdrop_attempted {
-                        backdrop_attempted = true;
-                        match overlay_backdrop::Backdrop::new(window) {
-                            Ok(surface) => backdrop = Some(surface),
-                            Err(cause) => logging::write(format!("Overlay blur unavailable; keeping glass tint: {cause}")),
-                        }
-                    }
-                    // Keep labels readable against sharp desktop content on older Windows.
-                    let effective_opacity = if state.group.is_some() && backdrop.is_none() { opacity.max(82) } else { opacity };
-                    let tint = (effective_opacity.clamp(30, 100) as u16 * 255 / 100) as u8;
-                    let material = (state.group.is_some() && tint < 255).then_some(tint);
-                    if state.material.tint != material { state.panel_dirty = true; repaint = true; }
-                    state.material.tint = material;
                     let alpha = (panel * if state.group.is_some() { 255.0 } else { tint as f32 }).round() as u8;
                     let compositor_started = state.compositor.is_none() && (state.group.is_some() || docking || stack_moving || tab_moving) && arrival.is_none();
                     if compositor_started {
@@ -1450,7 +1483,8 @@ fn run_overlay_inner(
                         } else { surface.hide(); false }
                     } else { false };
                     if backdrop_failed { backdrop = None; }
-                    if let Some(placement) = stack_placement && !stack_moving {
+                    workspace::positioned(window, layout.window);
+                    if let Some(placement) = stack_placement && !stack_moving && !chat_moving && !waiting_for_space {
                         group_stack::painted(window, placement, state.collapsed && !docking && docked >= 1.0);
                     }
                 }
@@ -1767,6 +1801,13 @@ fn run_overlay_inner(
                             None => { KillTimer(window, 8); continue; }
                         }
                     }
+                    if message.message == WM_TIMER && message.wparam == tab_drag::HOVER_TIMER {
+                        if state.tab_drag.hover_tick(window, state.layout, pointer())
+                            && state.collapsed && !state.tab_pressed && !state.restoring {
+                            PostMessageW(window, WM_APP_EXPAND_OVERLAY, 1, 0);
+                        }
+                        continue;
+                    }
                     if message.message == WM_TIMER && message.wparam == 6 {
                         if let Some(KeyboardPreview::Released(deadline)) = state.keyboard_preview {
                             if Instant::now() < deadline {
@@ -1894,7 +1935,8 @@ fn run_overlay_inner(
                     }
                     if message.message == WM_APP_COLLAPSE_OVERLAY {
                         // A queued hover timeout cannot dismiss a preview pinned by a later click.
-                        if message.wparam == 1 && state.group.as_ref().is_some_and(|ui| ui.pinned) { continue; }
+                        if message.wparam == 1 && (state.tab_drag.pressed()
+                            || state.group.as_ref().is_some_and(|ui| ui.pinned)) { continue; }
                         cancel_click_fold(window, &mut state);
                         if let Some(ui) = &mut state.group { ui.pinned = false; ui.last_expand_click = None; }
                         let was_chat = chat_expanded(&state);
@@ -1940,9 +1982,10 @@ fn run_overlay_inner(
                         break;
                     }
                     if message.message == WM_APP_EXPAND_OVERLAY {
-                        if message.wparam == 1 && !state.collapsed {
+                        if state.tab_pressed || (message.wparam == 1 && !state.collapsed) {
                             continue;
                         }
+                        state.tab_drag.cancel_hover(window);
                         if let Some(ui) = &mut state.group {
                             ui.tab.preview_opened(&ui.group);
                         }
@@ -1982,6 +2025,8 @@ fn run_overlay_inner(
             }
             Ok(())
         })();
+        workspace::release(window as usize);
+        tab_drag::save_positions();
         state.composer.take();
         if let Some(updates) = &updates { updates.detach(); }
         ShowWindow(window, 0);
@@ -1995,6 +2040,7 @@ fn run_overlay_inner(
         KillTimer(window, 6);
         KillTimer(window, 7);
         KillTimer(window, 8);
+        KillTimer(window, tab_drag::HOVER_TIMER);
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         DestroyWindow(window);
         if !state.font.is_null() {
@@ -2367,7 +2413,7 @@ unsafe fn start_chat_fold(window: Hwnd, state: &OverlayState, layout: DockLayout
         let mut compact = GroupUi::new(state.group.as_ref().unwrap().group.clone());
         let width = scale_dip(group_window::PANEL_WIDTH, dpi).min(work.right-work.left-scale_dip(40,dpi));
         compact.layout(width, work.bottom-work.top-scale_dip(40,dpi), dpi);
-        group_stack::update(window, group_stack::Geometry { slot, work, dpi, top: position.starts_with("top"), width, height: compact.height }, false);
+        group_stack::update(window, group_stack::Geometry { slot, work, dpi, top: position.starts_with("top"), anchor: state.tab_drag.anchor, width, height: compact.height }, false);
         let placement = group_stack::placement(window).ok_or_else(|| error("Locate chat tab"))?;
         let target = overlay_dock::dock_layout_sized(placement.panel, placement.work, 1.0, dpi, None, Some(placement.tab), overlay_tab_width(state));
         let source = cached.unwrap_or_else(|| state.compositor.as_ref().map_or(state.buffer.dc, FrameSurface::cached_dc));
@@ -2403,6 +2449,7 @@ unsafe extern "system" fn window_procedure(
     lparam: Lparam,
 ) -> Lresult {
     unsafe {
+        if workspace::notification(window, message, wparam) { return 0; }
         let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *const OverlayState;
         #[cfg(test)]
         if message==0x80f0 {
@@ -2473,6 +2520,9 @@ unsafe extern "system" fn window_procedure(
             WM_MOUSEACTIVATE => 3, // MA_NOACTIVATE
             WM_MOUSEMOVE => {
                 let mutable_state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
+                if let Some(state) = mutable_state.as_mut() && tab_drag::mouse_move(window, state, lparam) {
+                    return 0;
+                }
                 if let Some(state) = mutable_state.as_mut()
                     && let Some(panel) = state.layout.and_then(|layout| layout.panel)
                     && let Some(ui) = &mut state.group && matches!(ui.pressed, Some(GroupAction::ScrollThumb | GroupAction::HistoryThumb)) {
@@ -2483,8 +2533,8 @@ unsafe extern "system" fn window_procedure(
                     PostMessageW(window, WM_FRAME_READY, 0, 0);
                     return 0;
                 }
-                let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *const OverlayState;
-                if let Some(state) = state.as_ref()
+                let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
+                if let Some(state) = state.as_mut()
                     && state.collapsed
                     // Wait for docking to finish so a passing tab cannot undo dismissal.
                     && state.layout.is_some_and(|layout| layout.panel.is_none())
@@ -2494,7 +2544,8 @@ unsafe extern "system" fn window_procedure(
                     && tab_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32)
                 {
                     // Reuse cached expansion; hovering never activates or acknowledges a chat.
-                    PostMessageW(window, WM_APP_EXPAND_OVERLAY, 1, 0);
+                    if state.group.is_some() { state.tab_drag.hover(window); }
+                    else { PostMessageW(window, WM_APP_EXPAND_OVERLAY, 1, 0); }
                 }
                 0
             }
@@ -2505,7 +2556,8 @@ unsafe extern "system" fn window_procedure(
                     && GetCursorPos(&mut point) != 0
                     && ScreenToClient(window, &mut point) != 0
                 {
-                    let cursor = if close_at(state, point.x, point.y) || tab_at(state, point.x, point.y)
+                    let cursor = if state.tab_drag.moving() { 32_645usize }
+                    else if close_at(state, point.x, point.y) || tab_at(state, point.x, point.y)
                         || group_window::action_at(state,point.x,point.y).is_some()
                         || card_target_at(window, state, point.x, point.y).is_some()
                     {
@@ -2525,9 +2577,17 @@ unsafe extern "system" fn window_procedure(
                     cancel_click_fold(window, state);
                     // A new gesture cannot reuse the previous click's session.
                     if let Some(ui) = &mut state.group { ui.last_expand_click = None; }
-                    if let Some(action)=group_window::action_at(state,lparam as i16 as i32,(lparam>>16) as i16 as i32) {
+                    state.tab_drag.cancel_hover(window);
+                    let point = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+                    let action = group_window::action_at(state, point.0, point.1);
+                    if action == Some(GroupAction::Pin)
+                        && state.group.as_ref().is_some_and(|ui| ui.progression.stage != Stage::Full)
+                        && let Some(layout) = state.layout && (!state.collapsed || layout.panel.is_none()) {
+                        state.tab_drag.press(window, layout, point, state.dpi.max(96), state.hover_open.is_some());
+                    }
+                    if let Some(action)=action {
                         cancel_hover(window,state);cancel_keyboard_preview(window,state);
-                        state.tab_pressed = tab_at(state, lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+                        state.tab_pressed = state.tab_drag.pressed() || tab_at(state, point.0, point.1);
                         if action == GroupAction::ScrollThumb {
                             let panel_top = state.layout.and_then(|layout| layout.panel).map_or(0, |panel| panel.top);
                             state.group.as_mut().unwrap().begin_drag((lparam >> 16) as i16 as i32 - panel_top);
@@ -2571,6 +2631,16 @@ unsafe extern "system" fn window_procedure(
                 let mut close = None;
                 if let Some(state) = state.as_mut() {
                     state.panel_dirty = true;
+                    tab_drag::mouse_move(window, state, lparam);
+                    if tab_drag::release(window, state) {
+                        state.tab_pressed = false;
+                        state.group_action = None;
+                        if let Some(ui) = &mut state.group { ui.pressed = None; ui.last_expand_click = None; }
+                        ReleaseCapture();
+                        state.tab_drag.watch_leave(window);
+                        PostMessageW(window, WM_APP_STACK_LAYOUT, 0, 0);
+                        return 0;
+                    }
                     if state.group.as_ref().is_some_and(|ui|ui.pressed.is_some()) {
                         let released=group_window::action_at(state,lparam as i16 as i32,(lparam>>16) as i16 as i32);
                         let ui=state.group.as_mut().unwrap();let pressed=ui.pressed.take();
@@ -2629,7 +2699,7 @@ unsafe extern "system" fn window_procedure(
                 UpdateWindow(window);
                 0
             }
-            WM_CAPTURECHANGED => {
+            WM_CAPTURECHANGED | 0x001f => { // WM_CANCELMODE also aborts a captured gesture.
                 let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut OverlayState;
                 if let Some(state) = state.as_mut() {
                     state.panel_dirty = true;
@@ -2637,8 +2707,12 @@ unsafe extern "system" fn window_procedure(
                     state.clicks.opening = None;
                     state.tab_pressed = false;
                     state.close_pressed = false;
+                    tab_drag::release(window, state);
+                    state.tab_drag.cancel_hover(window);
+                    state.tab_drag.watch_leave(window);
                     if let Some(ui)=&mut state.group {ui.pressed=None;}
                 }
+                if message == 0x001f { ReleaseCapture(); }
                 InvalidateRect(window, null(), 0);
                 0
             }
@@ -4535,6 +4609,7 @@ mod tests {
                 hover_open: None,
                 keyboard_preview: None,
                 tab_pressed: false,
+                tab_drag: tab_drag::Interaction::default(),
                 close_pressed: false,
                 activity: 0,
                 layout: None,
@@ -4641,6 +4716,7 @@ mod tests {
             hover_open: None,
             keyboard_preview: None,
             tab_pressed: false,
+            tab_drag: tab_drag::Interaction::default(),
             close_pressed: false,
             activity: 0,
             layout: None,

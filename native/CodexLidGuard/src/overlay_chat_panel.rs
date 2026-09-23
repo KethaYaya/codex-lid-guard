@@ -211,14 +211,6 @@ impl Conversation {
     }
 }
 
-pub(super) fn centered(work: Rect, dpi: u32) -> Rect {
-    let width = scale_dip(780, dpi).min((work.right - work.left - scale_dip(40, dpi)).max(1));
-    let height = scale_dip(680, dpi).min((work.bottom - work.top - scale_dip(40, dpi)).max(1));
-    let left = work.left + (work.right - work.left - width) / 2;
-    let top = work.top + (work.bottom - work.top - height) / 2;
-    Rect { left, top, right: left + width, bottom: top + height }
-}
-
 pub(super) struct HistoryWorker {
     request: mpsc::SyncSender<()>,
     result: mpsc::Receiver<Result<Option<crate::chat_history::Snapshot>, String>>,
@@ -312,7 +304,7 @@ mod tests {
     fn expansion_and_escape_have_continuous_bounds_and_respect_reduced_motion() {
         let now = Instant::now();
         let tab = Rect { left: -28, top: 700, right: 0, bottom: 742 };
-        let full = centered(Rect { left: -1920, top: 0, right: 0, bottom: 1040 }, 96);
+        let full = workspace::sidebar_bounds(Rect { left: -1920, top: 0, right: 0, bottom: 1040 });
         let mut grow = Expansion::growing(tab);
         let first_paint = now + Duration::from_secs(2);
         assert!(grow.pending());
@@ -437,15 +429,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn chat_is_centered_and_fits_each_monitor_and_dpi() {
-        for dpi in [96, 120, 144, 192] {
-            for work in [Rect { left: -1920, top: 0, right: 0, bottom: 1040 }, Rect { left: 0, top: 0, right: 800, bottom: 560 }] {
-                let bounds = centered(work, dpi);
-                assert!(bounds.left >= work.left && bounds.top >= work.top && bounds.right <= work.right && bounds.bottom <= work.bottom);
-                assert!((bounds.left + bounds.right - work.left - work.right).abs() <= 1);
-                assert!((bounds.top + bounds.bottom - work.top - work.bottom).abs() <= 1);
-            }
-        }
-    }
 }
